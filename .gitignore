@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Build
+dist/
+build/
+
+# Test / tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local data — contains downloaded filings, DB, and logs.
+data/files/
+data/db/
+data/logs/
+
+# OS
+.DS_Store
