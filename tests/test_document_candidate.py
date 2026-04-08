@@ -125,17 +125,6 @@ def test_idx_stub_adapter_healthcheck_reports_blocked(adapter_cls, expected_clas
     a = adapter_cls()
     h = a.healthcheck()
     assert h["source_class"] == expected_class.value
-    assert h["status"] == "blocked_on_browser_session"
-    assert h["blocking_reason"] == "cloudflare_managed_challenge"
+    assert h["status"] == "browser_backed_discovery_available"
+    assert h["blocking_reason"] is None
     assert h["public_url"].startswith("https://www.idx.co.id/")
-
-
-@pytest.mark.parametrize(
-    "adapter_cls",
-    [IDXCompanyUniverseAdapter, IDXFinancialReportAdapter, IDXDisclosureAdapter],
-)
-def test_idx_stub_adapter_discover_raises(adapter_cls):
-    a = adapter_cls()
-    with pytest.raises(NotImplementedError) as exc:
-        list(a.discover(DiscoveryWindow()))
-    assert "phase1_recon" in str(exc.value)

@@ -10,13 +10,13 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 0 — Foundations and repo setup** (complete).
+**Phase 2 — Universe and discovery bootstrap** (in progress).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Repo, config, SQLite schema, file storage | done |
-| 1 | Source reconnaissance and proof of access | pending |
-| 2 | Universe and discovery layer | pending |
+| 1 | Source reconnaissance and proof of access | done |
+| 2 | Universe and discovery layer | in progress |
 | 3 | Download, versioning, file store | pending |
 | 4 | Parsing, OCR, chunking | pending |
 | 5 | Normalization, extraction, events | pending |
@@ -49,11 +49,27 @@ Requires Python 3.11+.
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 
+# Optional: install the browser-backed Phase 1 proof-of-access tooling
+uv pip install -e ".[browser]"
+python -m playwright install chromium
+
 # Initialize directories and apply DB migrations
 python -m stock_triage init
 
-# Run the Phase 0 smoke test
+# Run the test suite
 pytest -q
+
+# Run the Phase 1 browser-backed proof-of-access flow for IDX
+python scripts/run_browser_recon.py
+
+# Persist the company universe from browser artifacts
+python -m stock_triage discover company_universe
+
+# Persist disclosures from browser artifacts
+python -m stock_triage discover disclosure
+
+# Persist financial-report attachment candidates through the warmed browser session
+python -m stock_triage discover financial_report --year 2025
 ```
 
 ## Configuration
@@ -68,6 +84,12 @@ Defaults live in `config/default.yaml`. Override either by:
 - **SQLite, single-writer.** Writes are serialized through a background
   `WriterQueue` thread; reads use independent connections. WAL mode is enabled
   by default.
+- **Browser-backed IDX access.** Phase 1 now includes an operator-assisted
+  Playwright session that persists browser state under `data/browser/` and
+  writes proof artifacts under `data/recon/browser/`.
+- **Phase 2 bootstrap.** The initial discovery layer can already persist the
+  company universe, disclosures, financial-report attachment candidates, and
+  source watermarks into SQLite.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

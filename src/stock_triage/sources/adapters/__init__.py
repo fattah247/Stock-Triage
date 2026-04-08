@@ -1,10 +1,12 @@
 """Source adapters for the v1 source classes (PRD §6.2).
 
-All three IDX adapters are stubs in Phase 1: live discovery requires browser
-automation to clear Cloudflare's managed challenge (see docs/phase1_recon.md).
-The adapter classes exist so the rest of the pipeline can be built and tested
-against the SourceAdapter Protocol; their `discover()` methods raise
-`NotImplementedError` until Phase 1.5 lands the Playwright-backed session.
+The repository now includes browser-backed proof-of-access tooling for IDX
+surfaces (see `docs/phase1_recon.md` and `scripts/run_browser_recon.py`).
+Phase 2 bootstrap discovery is available:
+
+- company universe parses from saved browser artifacts
+- disclosures parse from saved browser artifacts
+- financial reports fetch JSON through the warmed browser session
 """
 
 from .idx_company_universe import IDXCompanyUniverseAdapter
