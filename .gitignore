@@ -17,10 +17,11 @@ build/
 .coverage
 htmlcov/
 
-# Local data — contains downloaded filings, DB, and logs.
+# Local data — contains downloaded filings, DB, logs, and recon dumps.
 data/files/
 data/db/
 data/logs/
+data/recon/
 
 # OS
 .DS_Store
