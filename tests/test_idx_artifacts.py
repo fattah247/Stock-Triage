@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from datetime import date
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
+
 from stock_triage.sources import DiscoveryWindow, SourceClass
 from stock_triage.sources.adapters import (
     IDXCompanyUniverseAdapter,
@@ -121,7 +126,138 @@ def test_parse_financial_report_json_extracts_candidates():
 
 
 def test_financial_report_api_url_builder():
-    url = IDXFinancialReportAdapter._build_api_url(year=2025, page_size=50)
+    url = IDXFinancialReportAdapter._build_api_url(
+        year=2025,
+        page_size=50,
+        index_from=2,
+        report_type="rda",
+    )
     assert "year=2025" in url
     assert "pageSize=50" in url
-    assert "reportType=rdf" in url
+    assert "indexFrom=2" in url
+    assert "reportType=rda" in url
+
+
+def test_financial_report_total_pages():
+    assert IDXFinancialReportAdapter._total_pages(result_count=802, page_size=100) == 9
+    assert IDXFinancialReportAdapter._total_pages(result_count=120, page_size=100) == 2
+    assert IDXFinancialReportAdapter._total_pages(result_count=0, page_size=100) == 1
+
+
+def test_financial_report_adapter_paginates_and_combines_report_types(tmp_path, monkeypatch):
+    payloads = {
+        ("rdf", 1): {
+            "ResultCount": 150,
+            "Results": [
+                {
+                    "KodeEmiten": "AAA",
+                    "NamaEmiten": "Issuer AAA",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rdf-1",
+                            "File_Modified": "2026-04-08T23:45:55.517",
+                            "File_Name": "rdf-1.pdf",
+                            "File_Path": "/files/rdf-1.pdf",
+                            "Report_Type": "rdf",
+                        }
+                    ],
+                }
+            ],
+        },
+        ("rdf", 2): {
+            "ResultCount": 150,
+            "Results": [
+                {
+                    "KodeEmiten": "BBB",
+                    "NamaEmiten": "Issuer BBB",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rdf-2",
+                            "File_Modified": "2026-04-07T23:45:55.517",
+                            "File_Name": "rdf-2.pdf",
+                            "File_Path": "/files/rdf-2.pdf",
+                            "Report_Type": "rdf",
+                        }
+                    ],
+                }
+            ],
+        },
+        ("rda", 1): {
+            "ResultCount": 20,
+            "Results": [
+                {
+                    "KodeEmiten": "CCC",
+                    "NamaEmiten": "Issuer CCC",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rda-1",
+                            "File_Modified": "2026-04-06T23:45:55.517",
+                            "File_Name": "rda-1.pdf",
+                            "File_Path": "/files/rda-1.pdf",
+                            "Report_Type": "rda",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    class FakeSession:
+        fetched_urls: list[str] = []
+
+        def __init__(self, **_kwargs):
+            self.counter = 0
+
+        def fetch_json(self, *, source_id, page_url, api_url):
+            del source_id, page_url
+            FakeSession.fetched_urls.append(api_url)
+            return self._result_for(api_url)
+
+        def fetch_json_many(self, *, source_id, page_url, api_urls):
+            del source_id, page_url
+            out = []
+            for api_url in api_urls:
+                FakeSession.fetched_urls.append(api_url)
+                out.append(self._result_for(api_url))
+            return out
+
+        def _result_for(self, api_url):
+            self.counter += 1
+            qs = parse_qs(urlparse(api_url).query)
+            key = (qs["reportType"][0], int(qs["indexFrom"][0]))
+            body_path = tmp_path / f"payload-{self.counter}.json"
+            body_path.write_text(json.dumps(payloads[key]), encoding="utf-8")
+            return SimpleNamespace(status=200, api_url=api_url, body_path=body_path)
+
+    fake_config = SimpleNamespace(
+        browser=SimpleNamespace(
+            profile_dir=tmp_path / "profile",
+            artifacts_dir=tmp_path / "artifacts",
+            headless=True,
+            challenge_timeout_s=1,
+            page_settle_ms=1,
+            channel="",
+        )
+    )
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.PlaywrightSession", FakeSession)
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.load_config", lambda: fake_config)
+
+    adapter = IDXFinancialReportAdapter()
+    candidates = list(
+        adapter.discover(
+            DiscoveryWindow(
+                start=date(2025, 1, 1),
+                end=date(2025, 12, 31),
+            )
+        )
+    )
+
+    assert [candidate.source_record_id for candidate in candidates] == ["rdf-1", "rdf-2", "rda-1"]
+    assert any("reportType=rda" in url for url in FakeSession.fetched_urls)
+    assert any("indexFrom=2" in url for url in FakeSession.fetched_urls)
