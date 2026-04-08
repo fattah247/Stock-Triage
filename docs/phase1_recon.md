@@ -3,8 +3,10 @@
 **Date:** 2026-04-09
 **Branch:** `phase-1-discovery`
 **Probe runner:** `scripts/run_recon.py`
+**Browser probe runner:** `scripts/run_browser_recon.py`
 **Raw data:** `data/recon/` (gitignored)
 **Structured findings:** `data/recon/findings.json`
+**Browser artifacts:** `data/recon/browser/` + `data/recon/browser_findings.json`
 
 This document satisfies PRD §11 Phase 1 exit criteria:
 
@@ -78,9 +80,18 @@ resilience"). For v1, IDX discovery must go through one of these paths:
 Browser automation is the only path that satisfies "discovery runs are
 incremental" (PRD §11 Phase 2 exit criterion) without operator-in-the-loop.
 
-**Phase 1.5 recommendation.** Add an optional install extra
-`pip install -e ".[browser]"` that pulls in `playwright` and a thin
-`PlaywrightSession` helper that:
+**Implementation landed.** The repository now includes an optional browser
+extra, `scripts/run_browser_recon.py`, and
+`src/stock_triage/recon/browser.py`, which provide the Playwright-backed
+session helper originally proposed here.
+
+**Browser-session path.** Install the optional browser extra
+`pip install -e ".[browser]"`, install Chromium via Playwright, and run the
+browser probe. It uses a persistent browser profile under `data/browser/`
+and writes HTML, storage state, and captured XHR/fetch responses under
+`data/recon/browser/`.
+
+The helper:
 
 - Boots Chromium with reasonable stealth settings.
 - Navigates to a warm-up IDX page.
@@ -89,10 +100,8 @@ incremental" (PRD §11 Phase 2 exit criterion) without operator-in-the-loop.
 - Exposes a `request_context` that can be used either to capture XHRs or to
   hand cookies back to the polite HTTP client.
 
-This is **not** added in Phase 1 because (a) Playwright is a heavy dep that
-should be opt-in, (b) introducing browser automation deserves explicit user
-sign-off given its operational footprint, and (c) it expands the trust
-boundary of the project.
+The dependency remains opt-in because Playwright is heavy and expands the
+project's operational footprint.
 
 ### OJK surfaces — fully reachable
 
@@ -121,13 +130,14 @@ project as ground-truth references, not as primary v1 data.
 
 | Source class | Reliable path? | How |
 |---|---|---|
-| `company_universe` | **No** (requires browser) | Playwright on `/listed-companies/company-profiles` |
-| `financial_report` | **No** (requires browser) | Playwright on `/listed-companies/financial-statements-and-annual-report` |
-| `disclosure` | **No** (requires browser) | Playwright on `/listed-companies/disclosure` |
+| `company_universe` | **Yes** | Browser-backed probe via Playwright on `/listed-companies/company-profiles` |
+| `financial_report` | **Yes** | Browser-backed probe via Playwright on `/listed-companies/financial-statements-and-annual-report` |
+| `disclosure` | **Yes** | Browser-backed probe via Playwright on `/listed-companies/disclosure` |
 | `regulation` (reference, not in PRD §6.2 contract) | **Yes** | Polite HTTP client against OJK pages |
 
-Three of four PRD-required source classes need browser automation. This is
-the single most important Phase 1 finding and gates Phase 2.
+Three of four PRD-required source classes require browser automation. That is
+still the key Phase 1 finding, but the repository now includes the browser
+bootstrap path needed to carry this into Phase 2.
 
 ## Collector failure modes
 
@@ -143,17 +153,10 @@ the single most important Phase 1 finding and gates Phase 2.
 
 ## What the next phase needs from this one
 
-Phase 2 (Universe and discovery layer) cannot proceed for IDX without one of:
-
-1. User approval to introduce **Playwright** as an optional dependency, with
-   the matching `PlaywrightSession` helper. *(Recommended.)*
-2. User commitment to supply session cookies out-of-band on a recurring
-   schedule.
-3. A different path the operator has in mind (e.g., a known third-party
-   mirror with terms of use the operator has reviewed).
-
-Phase 2 **can** proceed for the OJK regulation reference path immediately
-using the polite HTTP client built in Phase 1.
+Phase 2 can now proceed on top of the browser-session artifacts and persistent
+profile introduced in Phase 1. The next step is to extract stable
+`DocumentCandidate` records from the IDX browser session responses instead of
+stopping at proof-of-access.
 
 ## Artifacts produced in Phase 1
 
@@ -161,6 +164,9 @@ using the polite HTTP client built in Phase 1.
 - `src/stock_triage/sources/adapters/` — stub adapters for the three v1 source classes; each raises `NotImplementedError` with a pointer to this document.
 - `src/stock_triage/recon/client.py` — `PoliteClient` (rate limit, robots, cache).
 - `src/stock_triage/recon/probe.py` — probe runner with CF detection.
+- `src/stock_triage/recon/browser.py` — `PlaywrightSession`, Cloudflare block detection, and browser artifact persistence.
 - `scripts/run_recon.py` — operator entrypoint.
+- `scripts/run_browser_recon.py` — browser-backed operator entrypoint for IDX surfaces.
 - `data/recon/findings.json` — structured findings (re-runnable).
+- `data/recon/browser_findings.json` — browser-backed proof-of-access findings.
 - `tests/test_document_candidate.py` — round-trip test for the candidate type.

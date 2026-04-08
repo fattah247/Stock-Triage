@@ -22,6 +22,14 @@ def tmp_config(tmp_path: Path):
             "request_timeout_s": 10,
             "rate_limit_per_second": 1.0,
         },
+        "browser": {
+            "headless": True,
+            "profile_dir": str(tmp_path / "data" / "browser" / "profile"),
+            "artifacts_dir": str(tmp_path / "data" / "recon" / "browser"),
+            "challenge_timeout_s": 5,
+            "page_settle_ms": 10,
+            "channel": "",
+        },
         "logging": {"level": "WARNING", "json": False},
     }
     cfg_path = tmp_path / "config.yaml"

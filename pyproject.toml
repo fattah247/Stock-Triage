@@ -11,6 +11,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+browser = [
+    "playwright>=1.58",
+]
 dev = [
     "pytest>=8.0",
 ]

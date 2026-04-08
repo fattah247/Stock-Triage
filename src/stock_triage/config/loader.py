@@ -47,6 +47,21 @@ class DiscoveryConfig(BaseModel):
     rate_limit_per_second: float = 1.0
 
 
+class BrowserConfig(BaseModel):
+    headless: bool = False
+    profile_dir: Path
+    artifacts_dir: Path
+    challenge_timeout_s: int = 180
+    page_settle_ms: int = 5000
+    channel: str = ""
+
+    @field_validator("profile_dir", "artifacts_dir", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
 class OCRConfig(BaseModel):
     min_chars_per_page: int = 50
 
@@ -61,6 +76,7 @@ class Config(BaseModel):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     discovery: DiscoveryConfig
+    browser: BrowserConfig
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
@@ -70,6 +86,8 @@ class Config(BaseModel):
             self.paths.files_dir,
             self.paths.logs_dir,
             self.paths.db_path.parent,
+            self.browser.profile_dir,
+            self.browser.artifacts_dir,
         ):
             p.mkdir(parents=True, exist_ok=True)
 

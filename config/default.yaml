@@ -24,6 +24,15 @@ discovery:
   request_timeout_s: 30
   rate_limit_per_second: 1.0
 
+browser:
+  # Phase 1 proof-of-access path for IDX surfaces.
+  headless: false
+  profile_dir: data/browser/profile
+  artifacts_dir: data/recon/browser
+  challenge_timeout_s: 180
+  page_settle_ms: 5000
+  channel: ""
+
 ocr:
   # If extracted text density falls below this, route through OCR.
   min_chars_per_page: 50
