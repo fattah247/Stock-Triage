@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 4 — Parsing, OCR, and chunking** (in progress).
+**Phase 4 — Parsing, OCR, and chunking** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -18,7 +18,7 @@ review of source-data and model licensing.
 | 1 | Source reconnaissance and proof of access | done |
 | 2 | Universe and discovery layer | done |
 | 3 | Download, versioning, file store | done |
-| 4 | Parsing, OCR, chunking | in progress |
+| 4 | Parsing, OCR, chunking | done |
 | 5 | Normalization, extraction, events | pending |
 | 6 | Rule engine and evaluation harness | pending |
 | 7 | Local LLM summary layer | pending |
@@ -123,7 +123,7 @@ Defaults live in `config/default.yaml`. Override either by:
   automatically, `--retry-failed` forces immediate retries, and corrupt
   payloads are quarantined under `data/quarantine/` until explicitly
   reconsidered with `--include-quarantined`.
-- **Phase 4 bootstrap.** Parse now supports native PDF text extraction,
+- **Phase 4 parse layer.** Parse now supports native PDF text extraction,
   threshold-based OCR fallback routing, page-aware chunk persistence into
   `document_chunks`, section-label heuristics for heading blocks, and
   document-level parse state updates plus operator-visible status/retry
