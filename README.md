@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 9 — Exchange-scale hardening** (in progress).
+**Phase 9 — Exchange-scale hardening** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -23,7 +23,7 @@ review of source-data and model licensing.
 | 6 | Rule engine and evaluation harness | done |
 | 7 | Local LLM summary layer | done |
 | 8 | Dashboard, alerts, canary | done |
-| 9 | Exchange-scale hardening | in progress |
+| 9 | Exchange-scale hardening | done |
 
 ## Layout
 
@@ -121,7 +121,7 @@ python -m stock_triage canary-run
 python -m stock_triage canary-status
 
 # Run a bounded historical backfill and inspect backlog / SQLite throughput
-python -m stock_triage backfill --source financial_report --start-year 2024 --end-year 2025
+python -m stock_triage backfill --source financial_report --start-year 2024 --end-year 2025 --discover-limit 50
 python -m stock_triage backlog-status
 python -m stock_triage benchmark-sqlite
 ```
@@ -190,7 +190,9 @@ Defaults live in `config/default.yaml`. Override either by:
 - **Phase 9 hardening bootstrap.** The repository now has bounded backfill
   orchestration, per-source backlog reporting, and a SQLite writer benchmark so
   scale decisions can be made from measured queue latency and throughput instead
-  of guesswork. The operating checklist lives in
+  of guesswork. Backfill now also bounds discovery persistence by default so a
+  historical window does not automatically flood the active candidate queue.
+  The operating checklist lives in
   `docs/phase9_operational_playbook.md`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB

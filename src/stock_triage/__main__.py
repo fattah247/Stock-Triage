@@ -417,6 +417,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         source=args.source,
         start_year=args.start_year,
         end_year=args.end_year,
+        discover_limit=args.discover_limit,
         download_limit=args.download_limit,
         parse_limit=args.parse_limit,
         extract_limit=args.extract_limit,
@@ -698,6 +699,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_backfill.add_argument("--start-year", type=int, required=True, help="First year to backfill")
     p_backfill.add_argument("--end-year", type=int, required=True, help="Last year to backfill")
+    p_backfill.add_argument(
+        "--discover-limit",
+        type=int,
+        help="Maximum discovery candidates to persist per year; defaults to the largest downstream stage budget",
+    )
     p_backfill.add_argument("--download-limit", type=int, default=50, help="Download budget per year")
     p_backfill.add_argument("--parse-limit", type=int, default=50, help="Parse budget per year")
     p_backfill.add_argument("--extract-limit", type=int, default=50, help="Extract budget per year")

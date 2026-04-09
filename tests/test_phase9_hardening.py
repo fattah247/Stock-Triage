@@ -52,6 +52,7 @@ def test_run_backfill_orchestrates_bounded_pipeline(tmp_config, monkeypatch):
         source="financial_report",
         start_year=2024,
         end_year=2025,
+        discover_limit=1,
         download_limit=5,
         parse_limit=5,
         extract_limit=5,
@@ -60,6 +61,7 @@ def test_run_backfill_orchestrates_bounded_pipeline(tmp_config, monkeypatch):
 
     assert [row.year for row in result.rows] == [2024, 2025]
     assert result.rows[0].discovered == 1
+    assert result.rows[0].inserted == 1
     assert result.rows[0].downloaded == 2
     assert result.rows[0].analyzed == 2
 
@@ -131,8 +133,26 @@ def _seed_backlog_docs(tmp_config) -> None:
         wq.submit(run_migrations)
 
         def _insert(conn):
+            conn.execute(
+                """
+                INSERT INTO document_candidates (
+                    candidate_id, source_name, source_record_id, ticker, title, upstream_published_at,
+                    attachment_url, raw_metadata, discovered_at, queued
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    "idx_financial_reports:candidate-only",
+                    "idx_financial_reports",
+                    "candidate-only",
+                    "TAMU",
+                    "Candidate only",
+                    now,
+                    "https://example.test/candidate.pdf",
+                    "{}",
+                    now,
+                ),
+            )
             for doc_id, state in (
-                ("doc-discovered", "discovered"),
                 ("doc-downloaded", "downloaded"),
                 ("doc-analyzed", "analyzed"),
             ):
@@ -169,6 +189,6 @@ def _seed_backlog_docs(tmp_config) -> None:
     try:
         configure_pragmas(rconn, tmp_config)
         row = rconn.execute("SELECT COUNT(*) AS cnt FROM documents").fetchone()
-        assert row["cnt"] == 3
+        assert row["cnt"] == 2
     finally:
         rconn.close()

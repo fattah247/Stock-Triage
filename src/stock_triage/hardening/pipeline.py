@@ -68,6 +68,7 @@ def run_backfill(
     source: str,
     start_year: int,
     end_year: int,
+    discover_limit: int | None = None,
     download_limit: int = 50,
     parse_limit: int = 50,
     extract_limit: int = 50,
@@ -76,6 +77,9 @@ def run_backfill(
     cfg.ensure_dirs()
     rows: list[BackfillYearResult] = []
     for year in range(start_year, end_year + 1):
+        year_discover_limit = discover_limit
+        if year_discover_limit is None and source != "company_universe":
+            year_discover_limit = max(download_limit, parse_limit, extract_limit, rules_limit)
         discover_inserted = 0
         discover_updated = 0
         discovered = 0
@@ -87,19 +91,24 @@ def run_backfill(
                 window = DiscoveryWindow(start=date(year, 1, 1), end=date(year, 12, 31))
                 candidates = list(adapter.discover(window))
                 discovered += len(candidates)
+                persisted_candidates = candidates[:year_discover_limit] if year_discover_limit is not None else candidates
                 if adapter.source_class.value == "company_universe":
-                    persist = wq.submit(lambda conn, c=candidates: persist_companies(conn, c))
+                    persist = wq.submit(lambda conn, c=persisted_candidates: persist_companies(conn, c))
                 else:
-                    persist = wq.submit(lambda conn, c=candidates: persist_document_candidates(conn, c))
+                    persist = wq.submit(lambda conn, c=persisted_candidates: persist_document_candidates(conn, c))
                 discover_inserted += persist.inserted
                 discover_updated += persist.updated
                 wq.submit(
-                    lambda conn, a=adapter, w=window, cnt=len(candidates): persist_watermark(
+                    lambda conn, a=adapter, w=window, cnt=len(persisted_candidates): persist_watermark(
                         conn,
                         source_name=a.name,
                         source_class=a.source_class,
                         window=w,
-                        raw_state={"candidate_count": cnt, "mode": "phase9_backfill"},
+                        raw_state={
+                            "candidate_count": cnt,
+                            "discovered_total": len(candidates),
+                            "mode": "phase9_backfill",
+                        },
                     )
                 )
 
@@ -143,11 +152,27 @@ def load_backlog(cfg: Config) -> BacklogReport:
     conn = connect(cfg.paths.db_path, read_only=True)
     try:
         configure_pragmas(conn, cfg)
+        discovered_rows = conn.execute(
+            """
+            SELECT
+                dc.source_name,
+                COUNT(*) AS discovered
+            FROM document_candidates dc
+            LEFT JOIN documents d
+              ON d.source_name = dc.source_name
+             AND d.source_record_id = dc.source_record_id
+            WHERE d.document_id IS NULL
+            GROUP BY dc.source_name
+            """
+        ).fetchall()
+        discovered_by_source = {
+            row["source_name"]: row["discovered"] or 0
+            for row in discovered_rows
+        }
         rows = conn.execute(
             """
             SELECT
                 source_name,
-                SUM(CASE WHEN process_state = 'discovered' THEN 1 ELSE 0 END) AS discovered,
                 SUM(CASE WHEN process_state = 'downloaded' THEN 1 ELSE 0 END) AS downloaded,
                 SUM(CASE WHEN process_state = 'parsed' THEN 1 ELSE 0 END) AS parsed,
                 SUM(CASE WHEN process_state = 'extracted' THEN 1 ELSE 0 END) AS extracted,
@@ -158,20 +183,31 @@ def load_backlog(cfg: Config) -> BacklogReport:
             ORDER BY source_name
             """
         ).fetchall()
-        return BacklogReport(
-            rows=[
-                BacklogRow(
-                    source_name=row["source_name"],
-                    discovered=row["discovered"] or 0,
-                    downloaded=row["downloaded"] or 0,
-                    parsed=row["parsed"] or 0,
-                    extracted=row["extracted"] or 0,
-                    analyzed=row["analyzed"] or 0,
-                    failed=row["failed"] or 0,
-                )
-                for row in rows
-            ]
-        )
+        row_by_source = {
+            row["source_name"]: BacklogRow(
+                source_name=row["source_name"],
+                discovered=discovered_by_source.get(row["source_name"], 0),
+                downloaded=row["downloaded"] or 0,
+                parsed=row["parsed"] or 0,
+                extracted=row["extracted"] or 0,
+                analyzed=row["analyzed"] or 0,
+                failed=row["failed"] or 0,
+            )
+            for row in rows
+        }
+        for source_name, discovered in discovered_by_source.items():
+            if source_name in row_by_source:
+                continue
+            row_by_source[source_name] = BacklogRow(
+                source_name=source_name,
+                discovered=discovered,
+                downloaded=0,
+                parsed=0,
+                extracted=0,
+                analyzed=0,
+                failed=0,
+            )
+        return BacklogReport(rows=sorted(row_by_source.values(), key=lambda row: row.source_name))
     finally:
         conn.close()
 
