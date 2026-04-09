@@ -14,6 +14,7 @@ from .dashboard import export_dashboard, serve_dashboard
 from .download import run_downloads
 from .extract import load_extract_status, run_extract
 from .hardening import load_backlog, run_backfill, run_sqlite_benchmark
+from .intelligence import DERIVED_VERSION, run_intelligence
 from .parse import load_parse_status, run_parse
 from .rules import load_rule_status, run_rules
 from .summary import PROMPT_VERSION, build_summary_context, generate_summary, validate_summary_file
@@ -485,6 +486,31 @@ def cmd_benchmark_sqlite(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intelligence_run(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = run_intelligence(
+        cfg,
+        ticker=args.ticker,
+        limit=args.limit,
+    )
+    print(
+        "intelligence-run: "
+        f"derived_version={DERIVED_VERSION} "
+        f"selected_tickers={result.selected_tickers} "
+        f"deltas={result.deltas} "
+        f"snapshots={result.snapshots} "
+        f"timeseries={result.timeseries} "
+        f"briefs={result.briefs} "
+        f"review_items={result.review_items} "
+        f"peer_sets={result.peer_sets} "
+        f"sector_rollups={result.sector_rollups}"
+    )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -747,6 +773,10 @@ def main(argv: list[str] | None = None) -> int:
     p_benchmark_sqlite.add_argument("--batches", type=int, default=20, help="Number of writer batches to execute")
     p_benchmark_sqlite.add_argument("--rows-per-batch", type=int, default=100, help="Rows inserted per batch")
     p_benchmark_sqlite.set_defaults(func=cmd_benchmark_sqlite)
+    p_intelligence = sub.add_parser("intelligence-run", help="Derive Phase 10 company deltas, snapshots, and review items")
+    p_intelligence.add_argument("--ticker", help="Optional ticker filter for derived intelligence")
+    p_intelligence.add_argument("--limit", type=int, default=25, help="Maximum number of tickers to derive per run")
+    p_intelligence.set_defaults(func=cmd_intelligence_run)
     args = parser.parse_args(argv)
     return args.func(args)
 

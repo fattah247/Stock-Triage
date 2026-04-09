@@ -5,12 +5,14 @@ with strong provenance, extracts normalized metrics and events, and produces
 evidence-backed summaries using a local model.
 
 This repository implements the **IDX Filing Analysis Automation System** PRD
-(v2.0). It is intended for personal research use; redistribution requires
-review of source-data and model licensing.
+(v2.0) and the v3 decision-intelligence layer on top of that baseline. It is
+intended for personal research use; redistribution requires review of
+source-data and model licensing.
 
 ## Status
 
-**Phase 9 — Exchange-scale hardening** (done).
+**Phase 9 — Exchange-scale hardening** (done). v3 **Phase 10 — derived
+intelligence foundation** is in progress on the active branch.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -24,6 +26,12 @@ review of source-data and model licensing.
 | 7 | Local LLM summary layer | done |
 | 8 | Dashboard, alerts, canary | done |
 | 9 | Exchange-scale hardening | done |
+
+V3 preview on this branch:
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 10 | Derived intelligence foundation | in progress |
 
 ## Layout
 
@@ -109,6 +117,10 @@ python -m stock_triage summary-validate <document_id> --input-file /tmp/output.j
 # If a local Ollama-compatible runtime is running, generate and validate the
 # summary in one step. The default local model is gemma2:9b.
 python -m stock_triage summary-generate <document_id>
+
+# Build the first v3-derived layer: company deltas, current snapshots,
+# timeseries points, review items, peer sets, and sector rollups.
+python -m stock_triage intelligence-run --limit 25
 
 # Render the local dashboard plus CSV exports
 python -m stock_triage dashboard-export
