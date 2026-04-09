@@ -11,6 +11,7 @@ from .db import WriterQueue, run_migrations
 from .download import run_downloads
 from .extract import load_extract_status, run_extract
 from .parse import load_parse_status, run_parse
+from .rules import load_rule_status, run_rules
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -232,6 +233,54 @@ def cmd_extract_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rules(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    result = run_rules(
+        cfg,
+        source_name=source_name,
+        limit=args.limit,
+        include_analyzed=args.include_analyzed,
+    )
+    print(
+        "rules: "
+        f"selected={result.selected} "
+        f"analyzed={result.analyzed} "
+        f"triggered={result.triggered}"
+    )
+    return 0
+
+
+def cmd_rules_status(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    report = load_rule_status(
+        cfg,
+        source_name=source_name,
+        trigger_limit=args.trigger_limit,
+    )
+    for row in report.rows:
+        print(
+            f"{row.source_name}: total={row.total} pending={row.pending} "
+            f"analyzed={row.analyzed} triggered={row.triggered}"
+        )
+    if report.recent_triggers:
+        print("recent_triggers:")
+        for trigger in report.recent_triggers:
+            print(
+                f"{trigger.source_name} {trigger.document_id} "
+                f"record={trigger.source_record_id} rule={trigger.rule_name} "
+                f"severity={trigger.severity} evaluated_at={trigger.evaluated_at}"
+            )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -388,6 +437,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum number of recent extraction failures to display",
     )
     p_extract_status.set_defaults(func=cmd_extract_status)
+    p_rules = sub.add_parser("rules", help="Evaluate deterministic rule flags over extracted facts")
+    p_rules.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for extracted documents",
+    )
+    p_rules.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of extracted documents to analyze",
+    )
+    p_rules.add_argument(
+        "--include-analyzed",
+        action="store_true",
+        help="Re-evaluate documents already marked analyzed",
+    )
+    p_rules.set_defaults(func=cmd_rules)
+    p_rules_status = sub.add_parser("rules-status", help="Show rule-engine coverage and recent triggers")
+    p_rules_status.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for analyzed documents",
+    )
+    p_rules_status.add_argument(
+        "--trigger-limit",
+        type=int,
+        default=10,
+        help="Maximum number of recent triggered rules to display",
+    )
+    p_rules_status.set_defaults(func=cmd_rules_status)
     args = parser.parse_args(argv)
     return args.func(args)
 

@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 5 — Normalization, extraction, and event detection** (done).
+**Phase 6 — Rule engine and evaluation harness** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -20,7 +20,7 @@ review of source-data and model licensing.
 | 3 | Download, versioning, file store | done |
 | 4 | Parsing, OCR, chunking | done |
 | 5 | Normalization, extraction, events | done |
-| 6 | Rule engine and evaluation harness | pending |
+| 6 | Rule engine and evaluation harness | done |
 | 7 | Local LLM summary layer | pending |
 | 8 | Dashboard, alerts, canary | pending |
 | 9 | Exchange-scale hardening | pending |
@@ -93,6 +93,12 @@ python -m stock_triage extract --source all --limit 10
 
 # Inspect extraction coverage, completeness, and recent failures
 python -m stock_triage extract-status --source all --failure-limit 10
+
+# Evaluate deterministic rules over extracted facts
+python -m stock_triage rules --source all --limit 10
+
+# Inspect rule-engine coverage and recent triggered flags
+python -m stock_triage rules-status --source all --trigger-limit 10
 ```
 
 For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
@@ -140,6 +146,11 @@ Defaults live in `config/default.yaml`. Override either by:
   deterministic disclosure and filing-driven events into `events`, persists
   evidence spans for every extracted fact, and exposes operator-visible KPI
   reporting via `python -m stock_triage extract-status ...`.
+- **Phase 6 rule layer.** Rules now run deterministically over normalized
+  metrics and event detections, persist replayable rows into `rule_runs`,
+  update documents into the `analyzed` state, and expose coverage plus recent
+  trigger reporting via `python -m stock_triage rules-status ...`. Current
+  baseline audit notes live in `docs/phase6_rule_audit.md`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.
