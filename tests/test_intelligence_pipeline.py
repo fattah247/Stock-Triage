@@ -17,31 +17,45 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     result = run_intelligence(tmp_config, ticker="TAMU")
 
     assert result.selected_tickers == 1
-    assert result.deltas == 1
+    assert result.deltas == 6
     assert result.snapshots == 1
-    assert result.timeseries == 2
+    assert result.timeseries == 3
     assert result.briefs == 1
-    assert result.review_items == 2
+    assert result.review_items == 3
     assert result.peer_sets == 1
     assert result.sector_rollups == 1
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
     try:
         configure_pragmas(rconn, tmp_config)
-        delta = rconn.execute(
+        deltas = rconn.execute(
             """
-            SELECT metric_name, previous_value, current_value, absolute_change, percent_change
+            SELECT delta_kind, metric_name, previous_value, current_value, absolute_change, percent_change, payload_json
             FROM document_deltas
             WHERE ticker = ?
+            ORDER BY delta_kind, metric_name
             """,
             ("TAMU",),
-        ).fetchone()
-        assert delta is not None
-        assert delta["metric_name"] == "revenue"
-        assert delta["previous_value"] == 4000000.0
-        assert delta["current_value"] == 5082099.0
-        assert delta["absolute_change"] == 1082099.0
-        assert round(delta["percent_change"], 2) == 27.05
+        ).fetchall()
+        assert len(deltas) == 6
+        metric_delta = next(row for row in deltas if row["delta_kind"] == "metric_change")
+        assert metric_delta["metric_name"] == "revenue"
+        assert metric_delta["previous_value"] == 4000000.0
+        assert metric_delta["current_value"] == 5082099.0
+        assert metric_delta["absolute_change"] == 1082099.0
+        assert round(metric_delta["percent_change"], 2) == 27.05
+        metric_payload = json.loads(metric_delta["payload_json"])
+        assert metric_payload["baseline_kind"] == "revision"
+        assert metric_payload["current_evidence_span_id"] == "span-tamu-1"
+
+        assert {row["delta_kind"] for row in deltas} == {
+            "event_addition",
+            "event_resolution",
+            "metric_change",
+            "narrative_change",
+            "rule_addition",
+            "rule_resolution",
+        }
 
         snapshot = rconn.execute(
             """
@@ -55,7 +69,14 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         payload = json.loads(snapshot["payload_json"])
         assert snapshot["as_of_document_id"] == "doc-tamu-a"
         assert payload["latest_summary"] == "Debt refinancing remains a monitoring point."
-        assert payload["top_deltas"][0]["metric_name"] == "revenue"
+        assert payload["baseline"]["kind"] == "revision"
+        assert payload["baseline"]["document_id"] == "doc-tamu-b"
+        assert payload["top_card"]["overall_state"] == "review_required"
+        assert payload["top_card"]["leverage_state"] == "warning"
+        assert "revenue increased" in payload["top_card"]["positive_factors"]
+        assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
+        assert payload["delta_count_by_kind"]["metric_change"] == 1
+        assert payload["review_required"][0]["item_type"] == "revision_change"
 
         counts = {
             table: rconn.execute(f"SELECT COUNT(*) AS cnt FROM {table}").fetchone()["cnt"]
@@ -68,9 +89,9 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
             )
         }
         assert counts == {
-            "company_timeseries": 2,
+            "company_timeseries": 3,
             "decision_briefs": 1,
-            "review_queue_items": 2,
+            "review_queue_items": 3,
             "peer_sets": 1,
             "sector_rollups": 1,
         }
@@ -84,7 +105,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
     first = run_intelligence(tmp_config, ticker="TAMU")
     second = run_intelligence(tmp_config, ticker="TAMU")
 
-    assert first.deltas == second.deltas == 1
+    assert first.deltas == second.deltas == 6
     assert first.snapshots == second.snapshots == 1
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
@@ -103,11 +124,11 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
             )
         }
         assert counts == {
-            "document_deltas": 1,
+            "document_deltas": 6,
             "company_snapshots": 1,
-            "company_timeseries": 2,
+            "company_timeseries": 3,
             "decision_briefs": 1,
-            "review_queue_items": 2,
+            "review_queue_items": 3,
             "peer_sets": 1,
             "sector_rollups": 1,
         }
@@ -128,7 +149,7 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "intelligence-run:" in captured
-    assert "derived_version=phase10-v1" in captured
+    assert "derived_version=phase11-v1" in captured
     assert "selected_tickers=1" in captured
 
 
@@ -160,6 +181,49 @@ def _seed_phase10_inputs(tmp_config) -> None:
             )
             conn.execute(
                 """
+                INSERT INTO document_versions (
+                    version_group_id, source_name, source_record_id, ticker, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                ("vg-tamu-0", "idx_financial_reports", "fin-2023-tamu", "TAMU", older),
+            )
+            conn.execute(
+                """
+                INSERT INTO documents (
+                    document_id, source_name, source_record_id, source_file_id, source_modified_at, retrieved_at, original_url,
+                    local_path, sha256, mime_type, document_type, language_variant, process_state,
+                    parser_version, pipeline_version, ruleset_version, prompt_version, model_name,
+                    output_schema_version, ticker, version_group_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "doc-tamu-c",
+                    "idx_financial_reports",
+                    "fin-2023-tamu",
+                    "fin-2023-tamu-c",
+                    (now - timedelta(days=730)).isoformat(),
+                    (now - timedelta(days=730)).isoformat(),
+                    "https://example.test/tamu-2023.pdf",
+                    str(tmp_config.paths.data_dir / "tamu-annual-report.pdf"),
+                    "sha-c",
+                    "application/pdf",
+                    "annual_report",
+                    "bilingual",
+                    "analyzed",
+                    "phase4-v1",
+                    "phase5-v1",
+                    "phase6-v1",
+                    "phase7-v2",
+                    "gemma2:9b",
+                    "appendix-c-v1",
+                    "TAMU",
+                    "vg-tamu-0",
+                    (now - timedelta(days=730)).isoformat(),
+                    (now - timedelta(days=730)).isoformat(),
+                ),
+            )
+            conn.execute(
+                """
                 INSERT INTO metric_items (
                     metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
                     unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
@@ -182,6 +246,99 @@ def _seed_phase10_inputs(tmp_config) -> None:
                     "consolidated",
                     "bilingual",
                     "span-tamu-1",
+                    older,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_items (
+                    metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                    unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                    language_variant, evidence_span_id, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "metric-tamu-revenue-oldest",
+                    "doc-tamu-c",
+                    "TAMU",
+                    "revenue",
+                    3000000.0,
+                    "3,000,000",
+                    "USD",
+                    "units",
+                    2023,
+                    "Annual",
+                    "2023-12-31",
+                    "audited",
+                    "consolidated",
+                    "bilingual",
+                    "span-tamu-1",
+                    (now - timedelta(days=730)).isoformat(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (
+                    event_id, document_id, ticker, event_type, matched_pattern, severity, rationale, evidence_span_id, detected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event-tamu-prev",
+                    "doc-tamu-b",
+                    "TAMU",
+                    "capital_raise",
+                    "rights issue",
+                    "warning",
+                    "Prior capital raise was the earlier focus.",
+                    "span-tamu-1",
+                    older,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO rule_runs (
+                    rule_run_id, document_id, ticker, ruleset_version, rule_name, severity, threshold, input_values, rationale, triggered, evaluated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "rule-tamu-prev",
+                    "doc-tamu-b",
+                    "TAMU",
+                    "phase6-v1",
+                    "cash_burn",
+                    "warning",
+                    "operating_cash_flow < 0",
+                    json.dumps({"operating_cash_flow": -1}),
+                    "Prior year cash burn required monitoring.",
+                    1,
+                    older,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO analysis_runs (
+                    analysis_run_id, document_id, model_name, prompt_version, output_schema_version,
+                    schema_valid, evidence_link_valid, output_json, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "analysis-tamu-prev",
+                    "doc-tamu-b",
+                    "gemma2:9b",
+                    "phase7-v2",
+                    "appendix-c-v1",
+                    1,
+                    1,
+                    json.dumps(
+                        {
+                            "document_id": "doc-tamu-b",
+                            "model_name": "gemma2:9b",
+                            "summary": "Capital raise remained the main monitoring point.",
+                            "what_to_verify": ["Check post-raise share dilution."],
+                            "evidence_links": [],
+                        }
+                    ),
+                    older,
                     older,
                 ),
             )

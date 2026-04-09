@@ -1,4 +1,4 @@
-"""Phase 10 derived intelligence foundation: deltas, snapshots, and review items."""
+"""Phase 11 change detection and snapshot assembly over the Phase 10 foundation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 
-DERIVED_VERSION = "phase10-v1"
+DERIVED_VERSION = "phase11-v1"
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,8 @@ class CompanyDocument:
     source_record_id: str
     ticker: str
     title: str | None
+    document_type: str | None
+    version_group_id: str | None
     source_modified_at: str | None
     updated_at: str
     created_at: str
@@ -94,11 +96,19 @@ class DeltaRecord:
     fiscal_year: int | None
     fiscal_period: str | None
     period_end_date: str | None
-    previous_value: float
-    current_value: float
-    absolute_change: float
+    previous_value: float | None
+    current_value: float | None
+    absolute_change: float | None
     percent_change: float | None
     payload_json: str
+
+
+@dataclass(frozen=True)
+class BaselineChoice:
+    kind: str
+    document: CompanyDocument
+    comparable: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -149,6 +159,7 @@ class SectorRollupRecord:
 class CompanyIntelligenceBundle:
     profile: CompanyProfile
     latest_document: CompanyDocument
+    baseline: BaselineChoice | None
     latest_analysis: AnalysisSummary | None
     deltas: list[DeltaRecord]
     timeseries: list[TimeseriesPoint]
@@ -233,60 +244,78 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     profile = _load_company_profile(conn, ticker)
     if profile is None:
         return None
-    documents = _load_company_documents(conn, ticker, limit=2)
+    documents = _load_company_documents(conn, ticker, limit=25)
     if not documents:
         return None
     latest_document = documents[0]
-    previous_document = documents[1] if len(documents) > 1 else None
+    baseline = _select_baseline(latest_document, documents[1:])
     latest_metrics = _load_document_metrics(conn, latest_document.document_id)
     if not latest_metrics:
         return None
-    previous_metrics = (
-        _load_document_metrics(conn, previous_document.document_id) if previous_document is not None else []
-    )
+    previous_metrics = _load_document_metrics(conn, baseline.document.document_id) if baseline is not None else []
+    latest_events = _load_document_events(conn, latest_document.document_id)
+    previous_events = _load_document_events(conn, baseline.document.document_id) if baseline is not None else []
+    latest_rules = _load_triggered_rules(conn, latest_document.document_id)
+    previous_rules = _load_triggered_rules(conn, baseline.document.document_id) if baseline is not None else []
+    latest_analysis = _load_latest_analysis(conn, latest_document.document_id)
+    previous_analysis = _load_latest_analysis(conn, baseline.document.document_id) if baseline is not None else None
     deltas = _build_deltas(
         ticker=ticker,
-        from_document=previous_document,
+        baseline=baseline,
         to_document=latest_document,
         previous_metrics=previous_metrics,
         current_metrics=latest_metrics,
+        previous_events=previous_events,
+        current_events=latest_events,
+        previous_rules=previous_rules,
+        current_rules=latest_rules,
+        previous_analysis=previous_analysis,
+        current_analysis=latest_analysis,
     )
     timeseries = _build_timeseries(ticker=ticker, metrics=_load_ticker_metrics(conn, ticker))
-    events = _load_document_events(conn, latest_document.document_id)
-    triggered_rules = _load_triggered_rules(conn, latest_document.document_id)
-    latest_analysis = _load_latest_analysis(conn, latest_document.document_id)
+    conflict_items = _build_conflict_review_items(
+        ticker=ticker,
+        latest_document=latest_document,
+        baseline=baseline,
+        deltas=deltas,
+    )
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
+        baseline=baseline,
         latest_analysis=latest_analysis,
         latest_metrics=latest_metrics,
         deltas=deltas,
-        events=events,
-        triggered_rules=triggered_rules,
+        events=latest_events,
+        triggered_rules=latest_rules,
+        conflicts=conflict_items,
     )
     brief_payload_json = _build_brief_payload_json(
         ticker=ticker,
         latest_analysis=latest_analysis,
         deltas=deltas,
-        events=events,
-        triggered_rules=triggered_rules,
+        events=latest_events,
+        triggered_rules=latest_rules,
+        baseline=baseline,
     )
     review_items = _build_review_items(
         ticker=ticker,
         document_id=latest_document.document_id,
-        events=events,
-        triggered_rules=triggered_rules,
+        events=latest_events,
+        triggered_rules=latest_rules,
     )
+    review_items.extend(conflict_items)
     peer_set = _build_peer_set(conn, profile)
     sector_rollup = _build_sector_rollup(conn, profile)
     return CompanyIntelligenceBundle(
         profile=profile,
         latest_document=latest_document,
+        baseline=baseline,
         latest_analysis=latest_analysis,
         deltas=deltas,
         timeseries=timeseries,
-        triggered_rules=triggered_rules,
-        events=events,
+        triggered_rules=latest_rules,
+        events=latest_events,
         snapshot_payload_json=snapshot_payload_json,
         brief_payload_json=brief_payload_json,
         review_items=review_items,
@@ -332,6 +361,8 @@ def _load_company_documents(
             d.source_record_id,
             d.ticker,
             dc.title,
+            d.document_type,
+            d.version_group_id,
             d.source_modified_at,
             d.updated_at,
             d.created_at
@@ -353,12 +384,58 @@ def _load_company_documents(
             source_record_id=row["source_record_id"],
             ticker=row["ticker"],
             title=row["title"],
+            document_type=row["document_type"],
+            version_group_id=row["version_group_id"],
             source_modified_at=row["source_modified_at"],
             updated_at=row["updated_at"],
             created_at=row["created_at"],
         )
         for row in rows
     ]
+
+
+def _select_baseline(latest_document: CompanyDocument, prior_documents: list[CompanyDocument]) -> BaselineChoice | None:
+    revision_candidates = [
+        document
+        for document in prior_documents
+        if latest_document.version_group_id
+        and document.version_group_id == latest_document.version_group_id
+    ]
+    if revision_candidates:
+        return BaselineChoice(
+            kind="revision",
+            document=revision_candidates[0],
+            comparable=True,
+            reason="Using the most recent prior revision in the same version group.",
+        )
+
+    comparable_candidates = [
+        document
+        for document in prior_documents
+        if document.source_name == latest_document.source_name
+        and document.document_type == latest_document.document_type
+    ]
+    if comparable_candidates:
+        return BaselineChoice(
+            kind="comparable_filing",
+            document=comparable_candidates[0],
+            comparable=True,
+            reason="Using the most recent prior filing of the same source and document type.",
+        )
+
+    source_candidates = [
+        document
+        for document in prior_documents
+        if document.source_name == latest_document.source_name
+    ]
+    if source_candidates:
+        return BaselineChoice(
+            kind="source_prior",
+            document=source_candidates[0],
+            comparable=False,
+            reason="Using the most recent prior filing from the same source because no exact comparable baseline was found.",
+        )
+    return None
 
 
 def _load_document_metrics(conn: sqlite3.Connection, document_id: str) -> list[MetricPoint]:
@@ -514,16 +591,24 @@ def _load_latest_analysis(conn: sqlite3.Connection, document_id: str) -> Analysi
 def _build_deltas(
     *,
     ticker: str,
-    from_document: CompanyDocument | None,
+    baseline: BaselineChoice | None,
     to_document: CompanyDocument,
     previous_metrics: list[MetricPoint],
     current_metrics: list[MetricPoint],
+    previous_events: list[EventSignal],
+    current_events: list[EventSignal],
+    previous_rules: list[TriggeredRule],
+    current_rules: list[TriggeredRule],
+    previous_analysis: AnalysisSummary | None,
+    current_analysis: AnalysisSummary | None,
 ) -> list[DeltaRecord]:
-    if from_document is None:
-        return []
+    deltas: list[DeltaRecord] = []
+    if baseline is None:
+        return deltas
+
+    from_document = baseline.document
     previous_by_key = {_metric_key(metric): metric for metric in previous_metrics}
     current_by_key = {_metric_key(metric): metric for metric in current_metrics}
-    deltas: list[DeltaRecord] = []
     for key in sorted(set(previous_by_key) & set(current_by_key)):
         previous_metric = previous_by_key[key]
         current_metric = current_by_key[key]
@@ -537,9 +622,13 @@ def _build_deltas(
             percent_change = (absolute_change / abs(previous_metric.value_normalized)) * 100.0
         payload = {
             "ticker": ticker,
+            "baseline_kind": baseline.kind,
+            "comparable": baseline.comparable,
             "metric_name": current_metric.metric_name,
             "previous_metric_id": previous_metric.metric_id,
             "current_metric_id": current_metric.metric_id,
+            "previous_evidence_span_id": previous_metric.evidence_span_id,
+            "current_evidence_span_id": current_metric.evidence_span_id,
             "previous_value": previous_metric.value_normalized,
             "current_value": current_metric.value_normalized,
             "absolute_change": absolute_change,
@@ -577,7 +666,232 @@ def _build_deltas(
                 payload_json=json.dumps(payload, sort_keys=True),
             )
         )
+    deltas.extend(
+        _build_event_deltas(
+            ticker=ticker,
+            baseline=baseline,
+            from_document=from_document,
+            to_document=to_document,
+            previous_events=previous_events,
+            current_events=current_events,
+        )
+    )
+    deltas.extend(
+        _build_rule_deltas(
+            ticker=ticker,
+            baseline=baseline,
+            from_document=from_document,
+            to_document=to_document,
+            previous_rules=previous_rules,
+            current_rules=current_rules,
+        )
+    )
+    narrative_delta = _build_narrative_delta(
+        ticker=ticker,
+        baseline=baseline,
+        from_document=from_document,
+        to_document=to_document,
+        previous_analysis=previous_analysis,
+        current_analysis=current_analysis,
+    )
+    if narrative_delta is not None:
+        deltas.append(narrative_delta)
     return deltas
+
+
+def _build_event_deltas(
+    *,
+    ticker: str,
+    baseline: BaselineChoice,
+    from_document: CompanyDocument,
+    to_document: CompanyDocument,
+    previous_events: list[EventSignal],
+    current_events: list[EventSignal],
+) -> list[DeltaRecord]:
+    previous_by_type = {event.event_type: event for event in previous_events}
+    current_by_type = {event.event_type: event for event in current_events}
+    deltas: list[DeltaRecord] = []
+    for event_type in sorted(set(current_by_type) - set(previous_by_type)):
+        event = current_by_type[event_type]
+        deltas.append(
+            DeltaRecord(
+                delta_id=_stable_id("delta", ticker, from_document.document_id, to_document.document_id, "event_addition", event_type, DERIVED_VERSION),
+                delta_key=f"event_added|{event_type}",
+                ticker=ticker,
+                from_document_id=from_document.document_id,
+                to_document_id=to_document.document_id,
+                delta_kind="event_addition",
+                metric_name=event_type,
+                fiscal_year=None,
+                fiscal_period=None,
+                period_end_date=None,
+                previous_value=None,
+                current_value=None,
+                absolute_change=None,
+                percent_change=None,
+                payload_json=json.dumps(
+                    {
+                        "baseline_kind": baseline.kind,
+                        "event_type": event_type,
+                        "current_event_id": event.event_id,
+                        "current_evidence_span_id": event.evidence_span_id,
+                        "severity": event.severity,
+                        "rationale": event.rationale,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    for event_type in sorted(set(previous_by_type) - set(current_by_type)):
+        event = previous_by_type[event_type]
+        deltas.append(
+            DeltaRecord(
+                delta_id=_stable_id("delta", ticker, from_document.document_id, to_document.document_id, "event_resolution", event_type, DERIVED_VERSION),
+                delta_key=f"event_resolved|{event_type}",
+                ticker=ticker,
+                from_document_id=from_document.document_id,
+                to_document_id=to_document.document_id,
+                delta_kind="event_resolution",
+                metric_name=event_type,
+                fiscal_year=None,
+                fiscal_period=None,
+                period_end_date=None,
+                previous_value=None,
+                current_value=None,
+                absolute_change=None,
+                percent_change=None,
+                payload_json=json.dumps(
+                    {
+                        "baseline_kind": baseline.kind,
+                        "event_type": event_type,
+                        "previous_event_id": event.event_id,
+                        "previous_evidence_span_id": event.evidence_span_id,
+                        "severity": event.severity,
+                        "rationale": event.rationale,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    return deltas
+
+
+def _build_rule_deltas(
+    *,
+    ticker: str,
+    baseline: BaselineChoice,
+    from_document: CompanyDocument,
+    to_document: CompanyDocument,
+    previous_rules: list[TriggeredRule],
+    current_rules: list[TriggeredRule],
+) -> list[DeltaRecord]:
+    previous_by_name = {rule.rule_name: rule for rule in previous_rules}
+    current_by_name = {rule.rule_name: rule for rule in current_rules}
+    deltas: list[DeltaRecord] = []
+    for rule_name in sorted(set(current_by_name) - set(previous_by_name)):
+        rule = current_by_name[rule_name]
+        deltas.append(
+            DeltaRecord(
+                delta_id=_stable_id("delta", ticker, from_document.document_id, to_document.document_id, "rule_addition", rule_name, DERIVED_VERSION),
+                delta_key=f"rule_added|{rule_name}",
+                ticker=ticker,
+                from_document_id=from_document.document_id,
+                to_document_id=to_document.document_id,
+                delta_kind="rule_addition",
+                metric_name=rule_name,
+                fiscal_year=None,
+                fiscal_period=None,
+                period_end_date=None,
+                previous_value=None,
+                current_value=None,
+                absolute_change=None,
+                percent_change=None,
+                payload_json=json.dumps(
+                    {
+                        "baseline_kind": baseline.kind,
+                        "rule_name": rule_name,
+                        "current_rule_run_id": rule.rule_run_id,
+                        "severity": rule.severity,
+                        "threshold": rule.threshold,
+                        "rationale": rule.rationale,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    for rule_name in sorted(set(previous_by_name) - set(current_by_name)):
+        rule = previous_by_name[rule_name]
+        deltas.append(
+            DeltaRecord(
+                delta_id=_stable_id("delta", ticker, from_document.document_id, to_document.document_id, "rule_resolution", rule_name, DERIVED_VERSION),
+                delta_key=f"rule_resolved|{rule_name}",
+                ticker=ticker,
+                from_document_id=from_document.document_id,
+                to_document_id=to_document.document_id,
+                delta_kind="rule_resolution",
+                metric_name=rule_name,
+                fiscal_year=None,
+                fiscal_period=None,
+                period_end_date=None,
+                previous_value=None,
+                current_value=None,
+                absolute_change=None,
+                percent_change=None,
+                payload_json=json.dumps(
+                    {
+                        "baseline_kind": baseline.kind,
+                        "rule_name": rule_name,
+                        "previous_rule_run_id": rule.rule_run_id,
+                        "severity": rule.severity,
+                        "threshold": rule.threshold,
+                        "rationale": rule.rationale,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    return deltas
+
+
+def _build_narrative_delta(
+    *,
+    ticker: str,
+    baseline: BaselineChoice,
+    from_document: CompanyDocument,
+    to_document: CompanyDocument,
+    previous_analysis: AnalysisSummary | None,
+    current_analysis: AnalysisSummary | None,
+) -> DeltaRecord | None:
+    previous_summary = previous_analysis.summary.strip() if previous_analysis and previous_analysis.summary else None
+    current_summary = current_analysis.summary.strip() if current_analysis and current_analysis.summary else None
+    if not previous_summary or not current_summary or previous_summary == current_summary:
+        return None
+    return DeltaRecord(
+        delta_id=_stable_id("delta", ticker, from_document.document_id, to_document.document_id, "narrative_change", DERIVED_VERSION),
+        delta_key="narrative_change",
+        ticker=ticker,
+        from_document_id=from_document.document_id,
+        to_document_id=to_document.document_id,
+        delta_kind="narrative_change",
+        metric_name="summary",
+        fiscal_year=None,
+        fiscal_period=None,
+        period_end_date=None,
+        previous_value=None,
+        current_value=None,
+        absolute_change=None,
+        percent_change=None,
+        payload_json=json.dumps(
+            {
+                "baseline_kind": baseline.kind,
+                "previous_analysis_run_id": previous_analysis.analysis_run_id if previous_analysis else None,
+                "current_analysis_run_id": current_analysis.analysis_run_id if current_analysis else None,
+                "previous_summary": previous_summary,
+                "current_summary": current_summary,
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 def _build_timeseries(*, ticker: str, metrics: list[MetricPoint]) -> list[TimeseriesPoint]:
@@ -608,12 +922,24 @@ def _build_snapshot_payload_json(
     *,
     profile: CompanyProfile,
     latest_document: CompanyDocument,
+    baseline: BaselineChoice | None,
     latest_analysis: AnalysisSummary | None,
     latest_metrics: list[MetricPoint],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
+    conflicts: list[ReviewQueueItem],
 ) -> str:
+    health = _build_health_state(
+        baseline=baseline,
+        deltas=deltas,
+        events=events,
+        triggered_rules=triggered_rules,
+        conflicts=conflicts,
+    )
+    delta_counts: dict[str, int] = {}
+    for delta in deltas:
+        delta_counts[delta.delta_kind] = delta_counts.get(delta.delta_kind, 0) + 1
     payload = {
         "ticker": profile.ticker,
         "issuer_name": profile.issuer_name,
@@ -626,11 +952,32 @@ def _build_snapshot_payload_json(
             "document_id": latest_document.document_id,
             "source_name": latest_document.source_name,
             "source_record_id": latest_document.source_record_id,
+            "document_type": latest_document.document_type,
             "title": latest_document.title,
             "as_of": latest_document.source_modified_at or latest_document.updated_at,
         },
+        "baseline": (
+            {
+                "kind": baseline.kind,
+                "comparable": baseline.comparable,
+                "reason": baseline.reason,
+                "document_id": baseline.document.document_id,
+                "source_name": baseline.document.source_name,
+                "source_record_id": baseline.document.source_record_id,
+                "document_type": baseline.document.document_type,
+                "as_of": baseline.document.source_modified_at or baseline.document.updated_at,
+            }
+            if baseline is not None
+            else {
+                "kind": "none",
+                "comparable": False,
+                "reason": "No prior analyzed filing is available for comparison.",
+            }
+        ),
+        "top_card": health,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
+        "delta_count_by_kind": delta_counts,
         "metrics": [
             {
                 "metric_name": metric.metric_name,
@@ -646,11 +993,13 @@ def _build_snapshot_payload_json(
         ],
         "top_deltas": [
             {
+                "delta_kind": delta.delta_kind,
                 "metric_name": delta.metric_name,
                 "absolute_change": delta.absolute_change,
                 "percent_change": delta.percent_change,
                 "previous_value": delta.previous_value,
                 "current_value": delta.current_value,
+                "evidence": json.loads(delta.payload_json),
             }
             for delta in deltas[:10]
         ],
@@ -671,6 +1020,15 @@ def _build_snapshot_payload_json(
             }
             for rule in triggered_rules[:10]
         ],
+        "review_required": [
+            {
+                "item_type": item.item_type,
+                "priority": item.priority,
+                "rationale": item.rationale,
+                "payload": json.loads(item.payload_json),
+            }
+            for item in conflicts
+        ],
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -682,11 +1040,13 @@ def _build_brief_payload_json(
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
+    baseline: BaselineChoice | None,
 ) -> str:
     headline = latest_analysis.summary if latest_analysis and latest_analysis.summary else "No local summary available yet."
     payload = {
         "ticker": ticker,
         "headline": headline,
+        "baseline_kind": baseline.kind if baseline is not None else "none",
         "key_delta_metrics": [delta.metric_name for delta in deltas[:5]],
         "open_risks": [rule.rule_name for rule in triggered_rules[:5]],
         "recent_events": [event.event_type for event in events[:5]],
@@ -748,6 +1108,125 @@ def _build_review_items(
             )
         )
     return items
+
+
+def _build_conflict_review_items(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    baseline: BaselineChoice | None,
+    deltas: list[DeltaRecord],
+) -> list[ReviewQueueItem]:
+    if baseline is None or baseline.kind != "revision":
+        return []
+    changed_metrics = [
+        delta.metric_name
+        for delta in deltas
+        if delta.delta_kind == "metric_change" and delta.metric_name
+    ]
+    if not changed_metrics:
+        return []
+    return [
+        ReviewQueueItem(
+            review_item_id=_stable_id("review", "revision", latest_document.document_id, DERIVED_VERSION),
+            item_type="revision_change",
+            ticker=ticker,
+            document_id=latest_document.document_id,
+            source_key=f"revision:{baseline.document.document_id}->{latest_document.document_id}",
+            priority="medium",
+            rationale="A revised filing changed one or more tracked metrics relative to the prior revision.",
+            payload_json=json.dumps(
+                {
+                    "baseline_document_id": baseline.document.document_id,
+                    "current_document_id": latest_document.document_id,
+                    "changed_metrics": changed_metrics,
+                },
+                sort_keys=True,
+            ),
+        )
+    ]
+
+
+def _build_health_state(
+    *,
+    baseline: BaselineChoice | None,
+    deltas: list[DeltaRecord],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    conflicts: list[ReviewQueueItem],
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    overall_state = "stable"
+    comparability_state = "none"
+    confidence = "medium"
+
+    if baseline is None:
+        comparability_state = "not_comparable"
+        confidence = "low"
+        reasons.append("No prior analyzed baseline exists yet.")
+    else:
+        comparability_state = baseline.kind
+        if baseline.kind == "revision":
+            reasons.append("Snapshot is anchored to the most recent prior revision.")
+            confidence = "high"
+        elif baseline.comparable:
+            reasons.append("Snapshot is anchored to a comparable prior filing.")
+            confidence = "high"
+        else:
+            reasons.append("Snapshot used a weaker source-level baseline.")
+            confidence = "medium"
+
+    if conflicts:
+        overall_state = "review_required"
+        confidence = "medium" if confidence == "high" else confidence
+        reasons.append("A revised filing changed tracked metrics and should be reviewed.")
+
+    if any(rule.severity == "critical" for rule in triggered_rules) or any((event.severity or "") == "critical" for event in events):
+        overall_state = "critical"
+        reasons.append("At least one critical rule or event is active.")
+    elif overall_state == "stable" and (
+        any(rule.severity == "warning" for rule in triggered_rules)
+        or any((event.severity or "") == "warning" for event in events)
+    ):
+        overall_state = "watch"
+        reasons.append("Warning-level rules or events are active.")
+
+    positive_factors: list[str] = []
+    negative_factors: list[str] = []
+    for delta in deltas:
+        if delta.delta_kind == "metric_change" and delta.absolute_change is not None:
+            if delta.absolute_change > 0:
+                positive_factors.append(f"{delta.metric_name} increased")
+            elif delta.absolute_change < 0:
+                negative_factors.append(f"{delta.metric_name} decreased")
+        elif delta.delta_kind in {"rule_addition", "event_addition"} and delta.metric_name:
+            negative_factors.append(f"{delta.metric_name} appeared")
+        elif delta.delta_kind in {"rule_resolution", "event_resolution"} and delta.metric_name:
+            positive_factors.append(f"{delta.metric_name} cleared")
+        elif delta.delta_kind == "narrative_change":
+            reasons.append("Management narrative changed versus the baseline.")
+
+    leverage_state = "stable"
+    if any("debt" in rule.rule_name for rule in triggered_rules) or any("debt" in event.event_type for event in events):
+        leverage_state = "warning"
+        reasons.append("Debt-related signals remain active.")
+
+    disclosure_quality = "stable"
+    if baseline is None:
+        disclosure_quality = "low_context"
+    elif conflicts:
+        disclosure_quality = "review"
+
+    return {
+        "overall_state": overall_state,
+        "comparability_state": comparability_state,
+        "confidence": confidence,
+        "leverage_state": leverage_state,
+        "disclosure_quality": disclosure_quality,
+        "positive_factors": positive_factors[:5],
+        "negative_factors": negative_factors[:5],
+        "reasons": reasons[:8],
+    }
 
 
 def _build_peer_set(conn: sqlite3.Connection, profile: CompanyProfile) -> PeerSetRecord:
