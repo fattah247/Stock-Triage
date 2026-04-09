@@ -20,6 +20,7 @@ class DashboardSnapshot:
     metrics: list[dict[str, object]]
     findings: list[dict[str, object]]
     revisions: list[dict[str, object]]
+    company_snapshots: list[dict[str, object]]
     inbox_rows: list[dict[str, object]]
     digest_rows: list[dict[str, object]]
     review_rows: list[dict[str, object]]
@@ -48,6 +49,7 @@ def load_dashboard_snapshot(
             metrics=_load_metric_snapshot(conn),
             findings=_load_findings(conn, limit=finding_limit),
             revisions=_load_revision_history(conn, limit=50),
+            company_snapshots=_load_company_snapshots(conn),
             inbox_rows=_load_inbox_rows(conn, limit=60),
             digest_rows=[],
             review_rows=[],
@@ -69,6 +71,7 @@ def load_dashboard_snapshot(
         metrics=snapshot.metrics,
         findings=snapshot.findings,
         revisions=snapshot.revisions,
+        company_snapshots=snapshot.company_snapshots,
         inbox_rows=snapshot.inbox_rows,
         digest_rows=digests,
         review_rows=review.rows,
@@ -250,6 +253,30 @@ def _load_revision_history(conn: sqlite3.Connection, *, limit: int) -> list[dict
         (limit,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+        ORDER BY updated_at DESC, ticker ASC
+        """
+    ).fetchall()
+    snapshots: list[dict[str, object]] = []
+    for row in rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        snapshots.append(
+            {
+                "ticker": row["ticker"],
+                "as_of_document_id": row["as_of_document_id"],
+                "as_of_date": row["as_of_date"],
+                "updated_at": row["updated_at"],
+                "payload": payload,
+            }
+        )
+    return snapshots
 
 
 def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:

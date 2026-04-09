@@ -6,6 +6,7 @@
     metrics: [],
     findings: [],
     revisions: [],
+    company_snapshots: [],
     inbox_rows: [],
     digest_rows: [],
     review_rows: [],
@@ -42,6 +43,8 @@
   const metricList = document.getElementById("metricList");
   const findingList = document.getElementById("findingList");
   const revisionList = document.getElementById("revisionList");
+  const snapshotList = document.getElementById("snapshotList");
+  const claimsList = document.getElementById("claimsList");
   const digestList = document.getElementById("digestList");
   const reviewList = document.getElementById("reviewList");
   const kpiList = document.getElementById("kpiList");
@@ -343,6 +346,8 @@
     const revisions = data.revisions
       .filter((item) => (selectedTicker ? item.ticker === selectedTicker : false))
       .sort((a, b) => String(b.latest_revision_at || "").localeCompare(String(a.latest_revision_at || "")));
+    const companySnapshot =
+      (data.company_snapshots || []).find((item) => (selectedTicker ? item.ticker === selectedTicker : false)) || null;
     const inboxRows = (data.inbox_rows || []).slice(0, 20);
     const digestRows = data.digest_rows || [];
     const reviewRows = data.review_rows || [];
@@ -491,6 +496,8 @@
       companyOverview.innerHTML =
         `<div class="emptyState"><strong>Select a company.</strong> Use the left rail or click "focus issuer" from the inbox to move the workspace onto one company.</div>`;
       companyStats.innerHTML = "";
+      snapshotList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Decision-state, baseline context, and v3 rationale appear here once an issuer is focused.</div>`;
+      claimsList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Claim outcomes and thesis discipline are shown per issuer.</div>`;
       documentList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Pick one issuer to review grouped filings here.</div>`;
       metricList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Metrics will appear once the workspace is focused on an issuer.</div>`;
       revisionList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Revision history is shown per issuer.</div>`;
@@ -518,6 +525,83 @@
         <div class="stat"><div class="summaryLabel">Analyzed</div><strong>${analyzedCount}</strong></div>
         <div class="stat"><div class="summaryLabel">Failed</div><strong>${failedCount}</strong></div>
       `;
+      if (companySnapshot) {
+        const payload = companySnapshot.payload || {};
+        const topCard = payload.top_card || {};
+        const baseline = payload.baseline || {};
+        const management = payload.management_credibility || {};
+        const thesis = (payload.thesis_evaluations || []).slice(0, 3);
+        const reviewRequired = (payload.review_required || []).slice(0, 6);
+        snapshotList.innerHTML = `
+          <div class="statsGrid">
+            <div class="stat"><div class="summaryLabel">Decision</div><strong>${esc(topCard.decision_state || "Watch")}</strong></div>
+            <div class="stat"><div class="summaryLabel">Overall State</div><strong>${esc(topCard.overall_state || "unknown")}</strong></div>
+            <div class="stat"><div class="summaryLabel">Comparability</div><strong>${esc(topCard.comparability_state || baseline.kind || "none")}</strong></div>
+            <div class="stat"><div class="summaryLabel">As Of</div><strong>${renderTimestamp(companySnapshot.as_of_date || companySnapshot.updated_at)}</strong></div>
+          </div>
+          <div class="findingStack">
+            <article class="findingCard sev-${statusTag(topCard.overall_state)}">
+              <div class="findingClaim">Why this company currently matters</div>
+              <div class="meta">${(topCard.reasons || []).map(esc).join(" · ") || "No top-card reasons were derived."}</div>
+              <div class="heroBar">
+                <span class="chip">Priority ${esc(topCard.watchlist_priority || "low")}</span>
+                <span class="chip">Thesis ${esc(topCard.thesis_state || "none")}</span>
+                <span class="chip">Credibility ${esc(topCard.management_credibility || "unknown")}</span>
+              </div>
+            </article>
+            <article class="findingCard">
+              <div class="findingClaim">Baseline and review context</div>
+              <div class="meta">Baseline: ${esc(baseline.kind || "none")} · ${esc(baseline.reason || "No prior baseline")}</div>
+              <div class="meta">Positive factors: ${(topCard.positive_factors || []).map(esc).join(" · ") || "none"}</div>
+              <div class="meta">Negative factors: ${(topCard.negative_factors || []).map(esc).join(" · ") || "none"}</div>
+            </article>
+          </div>
+          ${
+            reviewRequired.length
+              ? `<table class="metricTable"><thead><tr><th>Review Item</th><th>Priority</th><th>Rationale</th></tr></thead><tbody>${reviewRequired
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.item_type)}</td><td>${esc(item.priority)}</td><td>${esc(item.rationale || "")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No review-required items in the current snapshot.</strong></div>`
+          }
+        `;
+        claimsList.innerHTML = `
+          <div class="statsGrid">
+            <div class="stat"><div class="summaryLabel">Claims</div><strong>${esc(management.total_claims || 0)}</strong></div>
+            <div class="stat"><div class="summaryLabel">Achieved</div><strong>${esc(management.achieved || 0)}</strong></div>
+            <div class="stat"><div class="summaryLabel">Contradicted</div><strong>${esc(management.contradicted || 0)}</strong></div>
+            <div class="stat"><div class="summaryLabel">Unresolved</div><strong>${esc(management.unresolved || 0)}</strong></div>
+          </div>
+          <div class="findingStack">
+            ${(payload.claim_outcomes || [])
+              .slice(0, 5)
+              .map(
+                (item) => `
+                  <article class="findingCard sev-${statusTag(item.outcome_status)}">
+                    <div class="findingClaim">${esc(item.outcome_status || "Unknown")} claim outcome</div>
+                    <div class="meta">${esc(item.rationale || "")}</div>
+                  </article>
+                `
+              )
+              .join("") || `<div class="emptyState"><strong>No claim outcomes yet.</strong></div>`}
+          </div>
+          ${
+            thesis.length
+              ? `<table class="metricTable"><thead><tr><th>Thesis</th><th>Status</th><th>Score</th></tr></thead><tbody>${thesis
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.thesis_id || "thesis")}</td><td>${esc(item.status || "unknown")}</td><td>${esc(item.score ?? "")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No thesis evaluations for this issuer.</strong></div>`
+          }
+        `;
+      } else {
+        snapshotList.innerHTML = `<div class="emptyState"><strong>No v3 snapshot yet.</strong> Run intelligence for this issuer to generate the decision snapshot.</div>`;
+        claimsList.innerHTML = `<div class="emptyState"><strong>No claim or thesis state yet.</strong> Run intelligence after rules and summary generation.</div>`;
+      }
       documentList.innerHTML = docs.length
         ? `<div class="docGroups">${Array.from(groupedDocs.entries())
             .map(

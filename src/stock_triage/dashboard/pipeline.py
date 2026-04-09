@@ -53,6 +53,7 @@ def export_dashboard(
             metrics=snapshot.metrics,
             findings=snapshot.findings,
             revisions=snapshot.revisions,
+            company_snapshots=snapshot.company_snapshots,
             inbox_rows=snapshot.inbox_rows,
             digest_rows=snapshot.digest_rows,
             review_rows=snapshot.review_rows,
