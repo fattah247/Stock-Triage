@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -213,19 +214,17 @@ def test_financial_report_adapter_paginates_and_combines_report_types(tmp_path, 
 
         def __init__(self, **_kwargs):
             self.counter = 0
+            self.page = SimpleNamespace(url=IDXFinancialReportAdapter.public_url)
 
-        def fetch_json(self, *, source_id, page_url, api_url):
-            del source_id, page_url
+        @contextmanager
+        def open_page(self, *, page_url):
+            del page_url
+            yield self.page
+
+        def fetch_json_from_page(self, *, source_id, page, api_url):
+            del source_id, page
             FakeSession.fetched_urls.append(api_url)
             return self._result_for(api_url)
-
-        def fetch_json_many(self, *, source_id, page_url, api_urls):
-            del source_id, page_url
-            out = []
-            for api_url in api_urls:
-                FakeSession.fetched_urls.append(api_url)
-                out.append(self._result_for(api_url))
-            return out
 
         def _result_for(self, api_url):
             self.counter += 1
@@ -261,3 +260,151 @@ def test_financial_report_adapter_paginates_and_combines_report_types(tmp_path, 
     assert [candidate.source_record_id for candidate in candidates] == ["rdf-1", "rdf-2", "rda-1"]
     assert any("reportType=rda" in url for url in FakeSession.fetched_urls)
     assert any("indexFrom=2" in url for url in FakeSession.fetched_urls)
+
+
+def test_financial_report_adapter_stops_at_saved_cursors(tmp_path, monkeypatch):
+    payloads = {
+        ("rdf", 1): {
+            "ResultCount": 200,
+            "Results": [
+                {
+                    "KodeEmiten": "AAA",
+                    "NamaEmiten": "Issuer AAA",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rdf-cursor",
+                            "File_Modified": "2026-04-08T23:45:55.517",
+                            "File_Name": "rdf-cursor.pdf",
+                            "File_Path": "/files/rdf-cursor.pdf",
+                            "Report_Type": "rdf",
+                        }
+                    ],
+                }
+            ],
+        },
+        ("rda", 1): {
+            "ResultCount": 120,
+            "Results": [
+                {
+                    "KodeEmiten": "BBB",
+                    "NamaEmiten": "Issuer BBB",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rda-new",
+                            "File_Modified": "2026-04-08T21:00:00.000",
+                            "File_Name": "rda-new.pdf",
+                            "File_Path": "/files/rda-new.pdf",
+                            "Report_Type": "rda",
+                        }
+                    ],
+                },
+                {
+                    "KodeEmiten": "CCC",
+                    "NamaEmiten": "Issuer CCC",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rda-cursor",
+                            "File_Modified": "2026-04-07T21:00:00.000",
+                            "File_Name": "rda-cursor.pdf",
+                            "File_Path": "/files/rda-cursor.pdf",
+                            "Report_Type": "rda",
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+    class FakeSession:
+        fetched_urls: list[str] = []
+
+        def __init__(self, **_kwargs):
+            self.counter = 0
+            self.page = SimpleNamespace(url=IDXFinancialReportAdapter.public_url)
+
+        @contextmanager
+        def open_page(self, *, page_url):
+            del page_url
+            yield self.page
+
+        def fetch_json_from_page(self, *, source_id, page, api_url):
+            del source_id, page
+            FakeSession.fetched_urls.append(api_url)
+            return self._result_for(api_url)
+
+        def _result_for(self, api_url):
+            self.counter += 1
+            qs = parse_qs(urlparse(api_url).query)
+            key = (qs["reportType"][0], int(qs["indexFrom"][0]))
+            body_path = tmp_path / f"payload-stop-{self.counter}.json"
+            body_path.write_text(json.dumps(payloads[key]), encoding="utf-8")
+            return SimpleNamespace(status=200, api_url=api_url, body_path=body_path)
+
+    fake_config = SimpleNamespace(
+        browser=SimpleNamespace(
+            profile_dir=tmp_path / "profile",
+            artifacts_dir=tmp_path / "artifacts",
+            headless=True,
+            challenge_timeout_s=1,
+            page_settle_ms=1,
+            channel="",
+        )
+    )
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.PlaywrightSession", FakeSession)
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.load_config", lambda: fake_config)
+
+    adapter = IDXFinancialReportAdapter()
+    candidates = list(
+        adapter.discover(
+            DiscoveryWindow(
+                start=date(2025, 1, 1),
+                end=date(2025, 12, 31),
+                cursor=json.dumps({"rdf": "rdf-cursor", "rda": "rda-cursor"}),
+            )
+        )
+    )
+
+    assert [candidate.source_record_id for candidate in candidates] == ["rda-new"]
+    assert not any("reportType=rdf" in url and "indexFrom=2" in url for url in FakeSession.fetched_urls)
+
+
+def test_financial_report_watermark_merges_new_and_existing_type_cursors():
+    adapter = IDXFinancialReportAdapter()
+    candidates = parse_financial_report_json(
+        {
+            "Results": [
+                {
+                    "KodeEmiten": "BBB",
+                    "NamaEmiten": "Issuer BBB",
+                    "Report_Period": "Audit",
+                    "Report_Year": "2025",
+                    "Attachments": [
+                        {
+                            "File_ID": "rda-new",
+                            "File_Modified": "2026-04-08T21:00:00.000",
+                            "File_Name": "rda-new.pdf",
+                            "File_Path": "/files/rda-new.pdf",
+                            "Report_Type": "rda",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    watermark = adapter.watermark_window(
+        requested_window=DiscoveryWindow(
+            start=date(2025, 1, 1),
+            end=date(2025, 12, 31),
+            cursor=json.dumps({"rdf": "rdf-old", "rda": "rda-old"}),
+        ),
+        candidates=candidates,
+    )
+
+    assert json.loads(watermark.cursor) == {"rdf": "rdf-old", "rda": "rda-new"}

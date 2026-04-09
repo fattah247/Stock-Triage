@@ -399,6 +399,41 @@ class PlaywrightSession:
             finally:
                 context.close()
 
+    def fetch_json_from_page(
+        self,
+        *,
+        source_id: str,
+        page: Any,
+        api_url: str,
+    ) -> BrowserJSONFetchResult:
+        source_root = self.artifacts_dir / source_id
+        source_root.mkdir(parents=True, exist_ok=True)
+        payload = page.evaluate(
+            """async (targetUrl) => {
+                const res = await fetch(targetUrl, { credentials: 'include' });
+                return {
+                  status: res.status,
+                  contentType: res.headers.get('content-type') || '',
+                  text: await res.text(),
+                };
+            }""",
+            api_url,
+        )
+        body_path = self._write_response_body(
+            source_root=source_root,
+            url=api_url,
+            body=payload["text"].encode("utf-8"),
+            content_type=payload["contentType"] or "application/json",
+        )
+        return BrowserJSONFetchResult(
+            source_id=source_id,
+            page_url=page.url,
+            api_url=api_url,
+            status=int(payload["status"]),
+            content_type=payload["contentType"],
+            body_path=body_path,
+        )
+
     def fetch_json_many(
         self,
         *,
