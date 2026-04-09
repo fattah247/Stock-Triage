@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,6 +346,52 @@ class PlaywrightSession:
                     content_type=payload["contentType"],
                     body_path=body_path,
                 )
+            except PlaywrightTimeoutError as exc:
+                raise BrowserBlocked(
+                    "Timed out waiting for IDX access to clear in the browser session."
+                ) from exc
+            finally:
+                context.close()
+
+    @contextmanager
+    def open_page(
+        self,
+        *,
+        page_url: str,
+        wait_selector: str | None = None,
+    ):
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ModuleNotFoundError as exc:  # pragma: no cover - exercised by environment
+            raise BrowserDependencyMissing(
+                "Playwright is not installed. Install with `pip install -e \".[browser]\"`."
+            ) from exc
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=self.headless,
+                channel=self.channel,
+                locale="en-US",
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(page_url, wait_until="domcontentloaded", timeout=self.challenge_timeout_s * 1000)
+
+                if self._is_blocked_page(page):
+                    if self.headless:
+                        raise BrowserBlocked(
+                            "IDX still blocks the headless browser session. "
+                            "Rerun headed and clear the challenge in the browser window."
+                        )
+                    self._wait_until_unblocked(page, wait_selector=wait_selector)
+                elif wait_selector is not None:
+                    page.wait_for_selector(wait_selector, timeout=self.challenge_timeout_s * 1000)
+
+                page.wait_for_timeout(self.page_settle_ms)
+                yield page
             except PlaywrightTimeoutError as exc:
                 raise BrowserBlocked(
                     "Timed out waiting for IDX access to clear in the browser session."

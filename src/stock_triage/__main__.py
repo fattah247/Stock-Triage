@@ -54,12 +54,16 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 persisted_window=wq.submit(lambda conn, name=adapter.name: load_watermark(conn, name)),
             )
             candidates = list(adapter.discover(window))
+            watermark_window = adapter.watermark_window(
+                requested_window=window,
+                candidates=candidates,
+            )
             if adapter.source_class.value == "company_universe":
                 result = wq.submit(lambda conn, c=candidates: persist_companies(conn, c))
             else:
                 result = wq.submit(lambda conn, c=candidates: persist_document_candidates(conn, c))
             wq.submit(
-                lambda conn, a=adapter, w=window, cnt=len(candidates): persist_watermark(
+                lambda conn, a=adapter, w=watermark_window, cnt=len(candidates): persist_watermark(
                     conn,
                     source_name=a.name,
                     source_class=a.source_class,

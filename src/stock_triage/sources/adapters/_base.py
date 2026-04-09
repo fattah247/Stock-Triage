@@ -32,6 +32,15 @@ class _IDXStubAdapter:
     def resume_window(self, watermark: DiscoveryWindow) -> DiscoveryWindow:
         return watermark
 
+    def watermark_window(
+        self,
+        *,
+        requested_window: DiscoveryWindow,
+        candidates: list[DocumentCandidate],
+    ) -> DiscoveryWindow:
+        del candidates
+        return requested_window
+
     def discover(self, window: DiscoveryWindow) -> Iterable[DocumentCandidate]:
         raise NotImplementedError(
             f"{type(self).__name__}.discover() must be implemented by the concrete adapter. "

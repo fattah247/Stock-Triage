@@ -31,6 +31,15 @@ class _FakeAdapter:
             cursor=f"resume:{watermark.cursor}" if watermark.cursor else "resume",
         )
 
+    def watermark_window(
+        self,
+        *,
+        requested_window: DiscoveryWindow,
+        candidates,
+    ) -> DiscoveryWindow:
+        del candidates
+        return requested_window
+
     def discover(self, window: DiscoveryWindow):
         self.windows.append(window)
         return []
