@@ -121,10 +121,71 @@ def test_discovery_window_serialization():
         (IDXDisclosureAdapter, SourceClass.DISCLOSURE),
     ],
 )
-def test_idx_stub_adapter_healthcheck_reports_blocked(adapter_cls, expected_class):
-    a = adapter_cls()
+def test_idx_stub_adapter_healthcheck_reports_blocked(adapter_cls, expected_class, tmp_path):
+    if adapter_cls is IDXCompanyUniverseAdapter:
+        source_dir = tmp_path / "idx_company_profiles"
+        source_dir.mkdir(parents=True)
+        (source_dir / "page.html").write_text(
+            """
+            <script>
+            window.__NUXT__={fetch:{"data-v-ac7150ac:0":{tableData:{data:[
+              {KodeEmiten:"AADI",NamaEmiten:"PT Adaro",TanggalPencatatan:"2024-12-05T00:00:00"}
+            ]}}}}
+            </script>
+            """,
+            encoding="utf-8",
+        )
+        a = adapter_cls(artifacts_root=tmp_path)
+    elif adapter_cls is IDXDisclosureAdapter:
+        source_dir = tmp_path / "idx_disclosure"
+        source_dir.mkdir(parents=True)
+        (source_dir / "page.html").write_text(
+            """
+            <div class="attach-card pb-16 mb-24">
+              <time class="text-small">08 April 2026 22:53:46</time>
+              <h6 class="f-m-20 title">
+                <a href="https://www.idx.co.id/StaticData/NewsAndAnnouncement/ANNOUNCEMENTSTOCK/From_EREP/202604/main.pdf">
+                  Invitation of Annual General Meeting of Shareholders [<span>BRMS</span>]
+                </a>
+              </h6>
+            </div>
+            """,
+            encoding="utf-8",
+        )
+        a = adapter_cls(artifacts_root=tmp_path)
+    else:
+        source_dir = tmp_path / "idx_financial_statements_annual_report" / "responses"
+        source_dir.mkdir(parents=True)
+        (source_dir / "sample.json").write_text(
+            json.dumps(
+                {
+                    "Search": {"year": "2025"},
+                    "ResultCount": 1,
+                    "Results": [
+                        {
+                            "KodeEmiten": "BNBR",
+                            "NamaEmiten": "Bakrie & Brothers Tbk",
+                            "Attachments": [
+                                {
+                                    "File_ID": "file-1",
+                                    "File_Modified": "2026-04-08T23:45:55.517",
+                                    "File_Name": "FinancialStatement-2025-Tahunan-BNBR.pdf",
+                                    "File_Path": "/Portals/0/StaticData/file.pdf",
+                                    "File_Size": 902729,
+                                    "File_Type": ".pdf",
+                                    "Report_Period": "Audit",
+                                    "Report_Type": "rdf",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        a = adapter_cls(artifacts_root=tmp_path)
     h = a.healthcheck()
     assert h["source_class"] == expected_class.value
-    assert h["status"] == "browser_backed_discovery_available"
-    assert h["blocking_reason"] is None
+    assert h["status"] == "ok"
+    assert h["accessible"] is True
     assert h["public_url"].startswith("https://www.idx.co.id/")

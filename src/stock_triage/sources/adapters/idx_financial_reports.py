@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from math import ceil
 from urllib.parse import urlencode
@@ -11,7 +12,7 @@ from ..idx_artifacts import parse_financial_report_json
 from ..types import DiscoveryWindow
 from ..types import DocumentCandidate
 from ..types import SourceClass
-from ._base import _IDXStubAdapter
+from ._base import DEFAULT_BROWSER_ARTIFACTS_ROOT, _IDXStubAdapter
 
 
 class IDXFinancialReportAdapter(_IDXStubAdapter):
@@ -172,3 +173,72 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
         if result_count <= 0:
             return 1
         return ceil(result_count / page_size)
+
+    def healthcheck(self) -> dict[str, object]:
+        year = self._resolve_year(DiscoveryWindow())
+        report_health: dict[str, dict[str, object]] = {}
+        fingerprint_tokens: list[str] = []
+
+        if self.artifacts_root != DEFAULT_BROWSER_ARTIFACTS_ROOT:
+            responses_dir = self.artifacts_root / self.artifact_source_id / "responses"
+            payload = None
+            if responses_dir.exists():
+                for path in sorted(responses_dir.glob("*.json")):
+                    try:
+                        candidate_payload = json.loads(path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+                    if "Results" in candidate_payload:
+                        payload = candidate_payload
+                        break
+            if payload is not None:
+                candidates = parse_financial_report_json(payload)
+                sample_ids = [candidate.source_record_id for candidate in candidates[:5]]
+                fingerprint_tokens.extend(sample_ids)
+                report_health["artifact"] = {
+                    "result_count": int(payload.get("ResultCount") or 0),
+                    "sample_ids": sample_ids,
+                }
+        if not report_health:
+            cfg = load_config()
+            session = PlaywrightSession(
+                profile_dir=cfg.browser.profile_dir,
+                artifacts_dir=cfg.browser.artifacts_dir,
+                headless=cfg.browser.headless,
+                challenge_timeout_s=cfg.browser.challenge_timeout_s,
+                page_settle_ms=cfg.browser.page_settle_ms,
+                channel=cfg.browser.channel,
+            )
+
+            with session.open_page(page_url=self.public_url) as page:
+                for report_type in self.report_types:
+                    payload = self._fetch_payload(
+                        session=session,
+                        page=page,
+                        api_url=self._build_api_url(
+                            year=year,
+                            page_size=self.default_page_size,
+                            index_from=1,
+                            report_type=report_type,
+                        ),
+                    )
+                    candidates = parse_financial_report_json(payload)
+                    sample_ids = [candidate.source_record_id for candidate in candidates[:5]]
+                    fingerprint_tokens.extend(sample_ids)
+                    report_health[report_type] = {
+                        "result_count": int(payload.get("ResultCount") or 0),
+                        "sample_ids": sample_ids,
+                    }
+
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_tokens, sort_keys=True).encode("utf-8")).hexdigest()
+        accessible = any(item["result_count"] > 0 for item in report_health.values())
+        return {
+            "name": self.name,
+            "source_class": self.source_class.value,
+            "public_url": self.public_url,
+            "status": "ok" if accessible else "empty",
+            "accessible": accessible,
+            "year": year,
+            "report_types": report_health,
+            "fingerprint": fingerprint,
+        }

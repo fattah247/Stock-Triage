@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 
 from ...config import load_config
@@ -107,3 +109,37 @@ class IDXCompanyUniverseAdapter(_IDXStubAdapter):
             if rows:
                 return parse_company_profile_rows(rows)
             return parse_company_profiles_html(page.content())
+
+    def healthcheck(self) -> dict[str, object]:
+        mode = "live"
+        if self.artifacts_root != DEFAULT_BROWSER_ARTIFACTS_ROOT and self.artifact_path().exists():
+            mode = "artifact"
+            html = load_artifact_text(artifacts_root=self.artifacts_root, source_id=self.artifact_source_id)
+            candidates = parse_company_profiles_html(html)
+        else:
+            cfg = load_config()
+            session = PlaywrightSession(
+                profile_dir=cfg.browser.profile_dir,
+                artifacts_dir=cfg.browser.artifacts_dir,
+                headless=cfg.browser.headless,
+                challenge_timeout_s=cfg.browser.challenge_timeout_s,
+                page_settle_ms=cfg.browser.page_settle_ms,
+                channel=cfg.browser.channel,
+            )
+            with session.open_page(page_url=self.public_url) as page:
+                rows = page.evaluate(_COMPANY_ROWS_SCRIPT)
+                candidates = parse_company_profile_rows(rows) if rows else parse_company_profiles_html(page.content())
+
+        sample_tickers = [candidate.source_record_id for candidate in candidates[:5]]
+        fingerprint = hashlib.sha256(json.dumps(sample_tickers, sort_keys=True).encode("utf-8")).hexdigest()
+        return {
+            "name": self.name,
+            "source_class": self.source_class.value,
+            "public_url": self.public_url,
+            "status": "ok" if candidates else "empty",
+            "accessible": bool(candidates),
+            "mode": mode,
+            "row_count": len(candidates),
+            "sample_tickers": sample_tickers,
+            "fingerprint": fingerprint,
+        }

@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 7 — Local LLM summary layer** (done).
+**Phase 8 — Dashboard, alerts, and canary monitoring** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -22,7 +22,7 @@ review of source-data and model licensing.
 | 5 | Normalization, extraction, events | done |
 | 6 | Rule engine and evaluation harness | done |
 | 7 | Local LLM summary layer | done |
-| 8 | Dashboard, alerts, canary | pending |
+| 8 | Dashboard, alerts, canary | done |
 | 9 | Exchange-scale hardening | pending |
 
 ## Layout
@@ -109,6 +109,16 @@ python -m stock_triage summary-validate <document_id> --input-file /tmp/output.j
 # If a local Ollama-compatible runtime is running, generate and validate the
 # summary in one step. The default local model is gemma2:9b.
 python -m stock_triage summary-generate <document_id>
+
+# Render the local dashboard plus CSV exports
+python -m stock_triage dashboard-export
+
+# Evaluate watchlist alerts from local config
+python -m stock_triage alerts-run
+
+# Run and inspect source canary checks
+python -m stock_triage canary-run
+python -m stock_triage canary-status
 ```
 
 For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
@@ -167,6 +177,11 @@ Defaults live in `config/default.yaml`. Override either by:
   live Ollama-backed local generation path that defaults to `gemma2:9b`. The
   generation flow uses deterministic evidence-alias expansion before final
   validation so the stored output retains valid DB-backed evidence links.
+- **Phase 8 daily operations.** The repository now exports a local HTML
+  dashboard with issuer search, latest documents, metric snapshots, revision
+  history, and evidence-linked findings; emits watchlist alerts into a local
+  JSONL channel with persisted dedupe; and persists canary health snapshots for
+  source drift and source failures instead of crashing on blocked checks.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

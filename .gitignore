@@ -21,7 +21,9 @@ htmlcov/
 data/files/
 data/db/
 data/logs/
+data/alerts/
 data/browser/
+data/dashboard/
 data/recon/
 data/quarantine/
 data/*.sqlite

@@ -2,7 +2,7 @@
 
 Verifies:
   - Repo boots: config loads and directories materialize.
-  - Config + DB migrations work: schema_migrations records v1.
+  - Config + DB migrations work: schema_migrations records all current versions.
   - A sample document can be stored end-to-end: bytes hit the content-addressed
     store, a `documents` row references the local path + sha256, and a read
     query through a separate connection sees it.
@@ -36,7 +36,7 @@ def test_phase0_end_to_end(tmp_config):
     # 1. Migrations apply via the writer queue.
     with WriterQueue(cfg) as wq:
         applied = wq.submit(run_migrations)
-        assert applied == [1, 2, 3, 4]
+        assert applied == [1, 2, 3, 4, 5]
 
         # 2. Re-running is a no-op.
         again = wq.submit(run_migrations)
@@ -92,7 +92,7 @@ def test_phase0_end_to_end(tmp_config):
         version = rconn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [r["version"] for r in version] == [1, 2, 3, 4]
+        assert [r["version"] for r in version] == [1, 2, 3, 4, 5]
     finally:
         rconn.close()
 

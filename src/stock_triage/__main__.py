@@ -10,11 +10,14 @@ from pathlib import Path
 
 from .config import load_config
 from .db import WriterQueue, run_migrations
+from .dashboard import export_dashboard
 from .download import run_downloads
 from .extract import load_extract_status, run_extract
 from .parse import load_parse_status, run_parse
 from .rules import load_rule_status, run_rules
 from .summary import PROMPT_VERSION, build_summary_context, generate_summary, validate_summary_file
+from .alerts import run_alerts
+from .canary import load_canary_status, run_canary
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -336,6 +339,73 @@ def cmd_summary_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dashboard_export(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = export_dashboard(
+        cfg,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+    )
+    print(
+        "dashboard-export: "
+        f"html={result.html_path} "
+        f"metrics_csv={result.metrics_csv_path} "
+        f"findings_csv={result.findings_csv_path} "
+        f"issuers={result.issuer_count} "
+        f"documents={result.document_count} "
+        f"findings={result.finding_count}"
+    )
+    return 0
+
+
+def cmd_alerts_run(_args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = run_alerts(cfg)
+    print(
+        "alerts-run: "
+        f"selected={result.selected} "
+        f"emitted={result.emitted} "
+        f"skipped_existing={result.skipped_existing}"
+    )
+    return 0
+
+
+def cmd_canary_run(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = run_canary(cfg, source_name=None if args.source == "all" else args.source)
+    for row in result.rows:
+        print(
+            f"{row.source_name}: status={row.status} "
+            f"accessible={1 if row.accessible else 0} "
+            f"drifted={1 if row.drifted else 0}"
+        )
+    return 0
+
+
+def cmd_canary_status(_args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    report = load_canary_status(cfg)
+    for row in report.rows:
+        print(
+            f"{row.source_name}: status={row.status} "
+            f"accessible={1 if row.accessible else 0} "
+            f"drifted={1 if row.drifted else 0} "
+            f"finished_at={row.finished_at}"
+        )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -546,6 +616,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Prompt version identifier for the generated output",
     )
     p_summary_generate.set_defaults(func=cmd_summary_generate)
+    p_dashboard_export = sub.add_parser("dashboard-export", help="Render a local HTML dashboard and CSV exports")
+    p_dashboard_export.add_argument("--output-dir", help="Optional output directory for dashboard artifacts")
+    p_dashboard_export.set_defaults(func=cmd_dashboard_export)
+    p_alerts_run = sub.add_parser("alerts-run", help="Evaluate watchlist alerts and emit local notifications")
+    p_alerts_run.set_defaults(func=cmd_alerts_run)
+    p_canary_run = sub.add_parser("canary-run", help="Run source healthchecks and persist canary snapshots")
+    p_canary_run.add_argument(
+        "--source",
+        choices=["idx_company_universe", "idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for canary checks",
+    )
+    p_canary_run.set_defaults(func=cmd_canary_run)
+    p_canary_status = sub.add_parser("canary-status", help="Show the latest persisted canary result per source")
+    p_canary_status.set_defaults(func=cmd_canary_status)
     args = parser.parse_args(argv)
     return args.func(args)
 

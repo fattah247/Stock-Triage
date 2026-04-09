@@ -50,3 +50,18 @@ llm:
   context_budget_tokens: 8000
   temperature: 0.0
   timeout_s: 600
+
+dashboard:
+  output_dir: "data/dashboard"
+  title: "Stock Triage Dashboard"
+
+alerts:
+  watchlist: []
+  min_severity: "warning"
+  lookback_days: 7
+  channels: ["jsonl"]
+  jsonl_path: "data/alerts/alerts.jsonl"
+
+canary:
+  sources: []
+  tickers: []

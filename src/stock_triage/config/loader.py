@@ -89,6 +89,36 @@ class DownloadConfig(BaseModel):
     retry_backoff_max_seconds: int = 86400
 
 
+class DashboardConfig(BaseModel):
+    output_dir: Path = REPO_ROOT / "data" / "dashboard"
+    title: str = "Stock Triage Dashboard"
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
+class AlertsConfig(BaseModel):
+    watchlist: list[str] = Field(default_factory=list)
+    min_severity: str = "warning"
+    lookback_days: int = 7
+    channels: list[str] = Field(default_factory=lambda: ["jsonl"])
+    jsonl_path: Path = REPO_ROOT / "data" / "alerts" / "alerts.jsonl"
+
+    @field_validator("jsonl_path", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
+class CanaryConfig(BaseModel):
+    sources: list[str] = Field(default_factory=list)
+    tickers: list[str] = Field(default_factory=list)
+
+
 class Config(BaseModel):
     paths: PathsConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -98,6 +128,9 @@ class Config(BaseModel):
     download: DownloadConfig = Field(default_factory=DownloadConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    canary: CanaryConfig = Field(default_factory=CanaryConfig)
 
     def ensure_dirs(self) -> None:
         for p in (
@@ -108,6 +141,8 @@ class Config(BaseModel):
             self.paths.db_path.parent,
             self.browser.profile_dir,
             self.browser.artifacts_dir,
+            self.dashboard.output_dir,
+            self.alerts.jsonl_path.parent,
         ):
             p.mkdir(parents=True, exist_ok=True)
 
