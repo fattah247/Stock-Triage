@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 6 — Rule engine and evaluation harness** (done).
+**Phase 7 — Local LLM summary layer** (in progress).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -21,7 +21,7 @@ review of source-data and model licensing.
 | 4 | Parsing, OCR, chunking | done |
 | 5 | Normalization, extraction, events | done |
 | 6 | Rule engine and evaluation harness | done |
-| 7 | Local LLM summary layer | pending |
+| 7 | Local LLM summary layer | in progress |
 | 8 | Dashboard, alerts, canary | pending |
 | 9 | Exchange-scale hardening | pending |
 
@@ -99,6 +99,16 @@ python -m stock_triage rules --source all --limit 10
 
 # Inspect rule-engine coverage and recent triggered flags
 python -m stock_triage rules-status --source all --trigger-limit 10
+
+# Build curated context for a local summary prompt
+python -m stock_triage summary-context <document_id>
+
+# Validate and persist a local-model JSON output against Appendix C
+python -m stock_triage summary-validate <document_id> --input-file /tmp/output.json --model-name local-model
+
+# If a local Ollama-compatible runtime is running and llm.model_name is set,
+# generate and validate the summary in one step
+python -m stock_triage summary-generate <document_id>
 ```
 
 For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
@@ -151,6 +161,12 @@ Defaults live in `config/default.yaml`. Override either by:
   update documents into the `analyzed` state, and expose coverage plus recent
   trigger reporting via `python -m stock_triage rules-status ...`. Current
   baseline audit notes live in `docs/phase6_rule_audit.md`.
+- **Phase 7 summary bootstrap.** The repository now has an Appendix C output
+  schema, curated summary-context assembly from metrics/rules/evidence, and a
+  validation gate that persists checked outputs into `analysis_runs`. It also
+  includes an Ollama-compatible local generation path through
+  `python -m stock_triage summary-generate ...`, but a running local model
+  service and configured `llm.model_name` are still required.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

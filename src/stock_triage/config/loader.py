@@ -78,7 +78,10 @@ class OCRConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     model_name: str = ""
+    base_url: str = "http://localhost:11434/api"
     context_budget_tokens: int = 8000
+    temperature: float = 0.0
+    timeout_s: int = 120
 
 
 class DownloadConfig(BaseModel):
