@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from stock_triage.__main__ import main
-from stock_triage.dashboard.server import DashboardActionResult, _build_cli_command, create_dashboard_server
+from stock_triage.dashboard.server import DashboardJobState, _build_cli_command, create_dashboard_server
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -40,17 +40,11 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
     _seed_phase8_data(tmp_config)
     calls: list[tuple[str, dict[str, str]]] = []
 
-    def fake_runner(cfg, action: str, params: dict[str, str]) -> DashboardActionResult:
+    def fake_runner(cfg, action: str, params: dict[str, str], job: DashboardJobState) -> None:
         calls.append((action, dict(params)))
-        return DashboardActionResult(
-            action=action,
-            command=["python", "-m", "stock_triage", "download", "--limit", params.get("limit", "5")],
-            returncode=0,
-            stdout="ok\n",
-            stderr="",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            ok=True,
-        )
+        job.set_command(["python", "-m", "stock_triage", "download", "--limit", params.get("limit", "5")])
+        job.append_output("stdout", "ok\n")
+        job.finish(returncode=0, ok=True)
 
     handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0, action_runner=fake_runner)
     thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
@@ -79,8 +73,15 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
             method="POST",
         )
         action_payload = json.loads(urlopen(request).read().decode("utf-8"))
-        assert action_payload["ok"] is True
-        assert action_payload["snapshot"]["action_history"][0]["action"] == "download_financial"
+        assert action_payload["job_id"]
+        stream_payload = urlopen(f"{handle.url}{action_payload['stream_url']}").read().decode("utf-8")
+        assert "event: started" in stream_payload
+        assert "event: stdout" in stream_payload
+        assert "event: complete" in stream_payload
+
+        snapshot_after = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        assert snapshot_after["action_history"][0]["action"] == "download_financial"
+        assert snapshot_after["action_history"][0]["duration_ms"] >= 0
         assert calls == [("download_financial", {"action": "download_financial", "limit": "3"})]
     finally:
         handle.server.shutdown()

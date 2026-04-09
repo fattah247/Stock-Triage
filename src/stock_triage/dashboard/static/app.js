@@ -13,6 +13,10 @@
 
   const state = {
     selectedTicker: null,
+    activeJobId: null,
+    activeJobStartedAt: null,
+    pollingHandle: null,
+    eventSource: null,
   };
 
   const actionEndpoint = bootstrap.actionEndpoint || null;
@@ -40,6 +44,7 @@
   const issuerCount = document.getElementById("issuerCount");
   const documentCount = document.getElementById("documentCount");
   const findingCount = document.getElementById("findingCount");
+  const actionButtons = Array.from(document.querySelectorAll(".actionButton"));
 
   if (opsShell && actionEndpoint && snapshotEndpoint) {
     opsShell.hidden = false;
@@ -99,6 +104,31 @@
           )
           .join("")
       : `<div class="meta">No action has been run from this dashboard yet.</div>`;
+  }
+
+  function setActionButtonsDisabled(disabled) {
+    actionButtons.forEach((button) => {
+      button.disabled = disabled;
+      button.style.opacity = disabled ? "0.65" : "";
+      button.style.pointerEvents = disabled ? "none" : "";
+    });
+  }
+
+  function stopPolling() {
+    if (state.pollingHandle) {
+      window.clearInterval(state.pollingHandle);
+      state.pollingHandle = null;
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    if (!snapshotEndpoint) return;
+    state.pollingHandle = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (state.activeJobId) return;
+      refreshSnapshot().catch(() => {});
+    }, 15000);
   }
 
   function render() {
@@ -312,6 +342,7 @@
 
   async function runAction(action, overrides = {}) {
     if (!actionEndpoint) return;
+    if (state.activeJobId) return;
     const params = new URLSearchParams();
     params.set("action", action);
     params.set("year", yearInput?.value || "");
@@ -325,33 +356,113 @@
     if (actionOutput) {
       actionOutput.textContent = "";
     }
+    stopPolling();
+    setActionButtonsDisabled(true);
     const response = await fetch(actionEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body: params.toString(),
     });
     const result = await response.json();
-    if (actionOutput) {
-      actionOutput.textContent = `${(result.command || []).join(" ")}\n\nstdout:\n${result.stdout || ""}\n\nstderr:\n${
-        result.stderr || ""
-      }`;
+    if (!response.ok && response.status !== 202) {
+      setActionButtonsDisabled(false);
+      startPolling();
+      throw new Error(result.error || `Action start failed: ${response.status}`);
     }
+    state.activeJobId = result.job_id;
+    state.activeJobStartedAt = Date.now();
+    connectJobStream(action, result.stream_url);
+  }
+
+  function connectJobStream(action, streamUrl) {
+    if (!streamUrl) {
+      finishActiveJob(action, false, 1, 0, "Missing stream URL.");
+      return;
+    }
+
+    if (state.eventSource) {
+      state.eventSource.close();
+    }
+    const source = new EventSource(streamUrl);
+    state.eventSource = source;
+    let elapsedHandle = window.setInterval(() => {
+      if (!actionStatus || !state.activeJobStartedAt) return;
+      const elapsed = Math.max(0, Math.floor((Date.now() - state.activeJobStartedAt) / 1000));
+      actionStatus.textContent = `Running ${action}... ${elapsed}s`;
+    }, 1000);
+
+    source.addEventListener("started", (event) => {
+      const payload = JSON.parse(event.data);
+      if (actionOutput) {
+        actionOutput.textContent = `${(payload.command || []).join(" ")}\n\n`;
+      }
+    });
+
+    source.addEventListener("stdout", (event) => {
+      const payload = JSON.parse(event.data);
+      if (actionOutput) {
+        actionOutput.textContent += payload.text || "";
+        actionOutput.scrollTop = actionOutput.scrollHeight;
+      }
+    });
+
+    source.addEventListener("stderr", (event) => {
+      const payload = JSON.parse(event.data);
+      if (actionOutput) {
+        actionOutput.textContent += payload.text || "";
+        actionOutput.scrollTop = actionOutput.scrollHeight;
+      }
+    });
+
+    source.addEventListener("complete", (event) => {
+      const payload = JSON.parse(event.data);
+      window.clearInterval(elapsedHandle);
+      source.close();
+      state.eventSource = null;
+      finishActiveJob(action, payload.ok, payload.returncode, payload.duration_ms);
+    });
+
+    source.onerror = () => {
+      window.clearInterval(elapsedHandle);
+      source.close();
+      state.eventSource = null;
+      finishActiveJob(action, false, 1, 0, "Stream disconnected.");
+    };
+  }
+
+  function finishActiveJob(action, ok, returncode, durationMs, fallbackMessage) {
+    state.activeJobId = null;
+    state.activeJobStartedAt = null;
+    setActionButtonsDisabled(false);
     if (actionStatus) {
-      actionStatus.textContent = result.ok
-        ? `${action} finished.`
-        : `${action} failed (exit ${result.returncode}).`;
+      if (fallbackMessage) {
+        actionStatus.textContent = fallbackMessage;
+      } else {
+        actionStatus.textContent = ok
+          ? `${action} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s.`
+          : `${action} failed (exit ${returncode}).`;
+      }
     }
-    if (response.ok && result.snapshot) {
-      data = result.snapshot;
-      render();
-    } else if (response.ok) {
-      await refreshSnapshot();
-    }
+    refreshSnapshot()
+      .catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      })
+      .finally(() => {
+        startPolling();
+      });
   }
 
   if (search) {
     search.addEventListener("input", render);
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !state.activeJobId) {
+      refreshSnapshot().catch(() => {});
+      startPolling();
+    } else {
+      stopPolling();
+    }
+  });
   if (refreshButton) {
     refreshButton.addEventListener("click", () =>
       refreshSnapshot().catch((error) => {
@@ -387,5 +498,6 @@
     });
   });
 
+  startPolling();
   render();
 })();

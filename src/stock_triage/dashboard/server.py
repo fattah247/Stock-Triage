@@ -10,8 +10,10 @@ import os
 import subprocess
 import sys
 import threading
+import time
+import uuid
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +38,7 @@ class DashboardActionResult:
     stderr: str
     timestamp: str
     ok: bool
+    duration_ms: int
 
 
 @dataclass(frozen=True)
@@ -44,13 +47,93 @@ class DashboardServerHandle:
     url: str
 
 
-ActionRunner = Callable[[Config, str, dict[str, str]], DashboardActionResult]
+@dataclass
+class DashboardJobState:
+    job_id: str
+    action: str
+    timestamp: str
+    command: list[str] = field(default_factory=list)
+    params: dict[str, str] = field(default_factory=dict)
+    stdout_lines: list[str] = field(default_factory=list)
+    stderr_lines: list[str] = field(default_factory=list)
+    events: list[dict[str, object]] = field(default_factory=list)
+    returncode: int | None = None
+    ok: bool | None = None
+    duration_ms: int | None = None
+    finished: bool = False
+    _started_at: float = field(default_factory=time.monotonic, repr=False)
+    _event_seq: int = field(default=0, repr=False)
+    _condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
+
+    def set_command(self, command: list[str]) -> None:
+        with self._condition:
+            self.command = list(command)
+            self._push_event("started", {"command": list(command), "timestamp": self.timestamp})
+            self._condition.notify_all()
+
+    def append_output(self, stream: str, text: str) -> None:
+        if stream == "stdout":
+            target = self.stdout_lines
+        else:
+            target = self.stderr_lines
+        with self._condition:
+            target.append(text)
+            self._push_event(stream, {"text": text})
+            self._condition.notify_all()
+
+    def finish(self, *, returncode: int, ok: bool) -> None:
+        with self._condition:
+            self.returncode = returncode
+            self.ok = ok
+            self.finished = True
+            self.duration_ms = int((time.monotonic() - self._started_at) * 1000)
+            self._push_event(
+                "complete",
+                {
+                    "returncode": returncode,
+                    "ok": ok,
+                    "duration_ms": self.duration_ms,
+                },
+            )
+            self._condition.notify_all()
+
+    def wait_for_events(self, offset: int, *, timeout_s: float = 1.0) -> tuple[list[dict[str, object]], bool]:
+        with self._condition:
+            if offset >= len(self.events) and not self.finished:
+                self._condition.wait(timeout=timeout_s)
+            return self.events[offset:], self.finished
+
+    def to_history_entry(self) -> dict[str, object]:
+        return DashboardActionResult(
+            action=self.action,
+            command=list(self.command),
+            returncode=self.returncode or 0,
+            stdout="".join(self.stdout_lines),
+            stderr="".join(self.stderr_lines),
+            timestamp=self.timestamp,
+            ok=bool(self.ok),
+            duration_ms=self.duration_ms or 0,
+        ).__dict__
+
+    def _push_event(self, event_type: str, payload: dict[str, object]) -> None:
+        self._event_seq += 1
+        self.events.append(
+            {
+                "id": self._event_seq,
+                "type": event_type,
+                **payload,
+            }
+        )
+
+
+ActionRunner = Callable[[Config, str, dict[str, str], DashboardJobState], None]
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
     cfg: Config
     title: str
     action_history: list[dict[str, object]]
+    jobs: dict[str, DashboardJobState]
     action_runner: ActionRunner
     history_lock: threading.Lock
 
@@ -68,6 +151,7 @@ def create_dashboard_server(
     server.cfg = cfg
     server.title = cfg.dashboard.title
     server.action_history = []
+    server.jobs = {}
     server.action_runner = action_runner or _run_cli_action
     server.history_lock = threading.Lock()
     bound_host, bound_port = server.server_address[:2]
@@ -139,6 +223,11 @@ def _handler_factory():
             if parsed.path == "/api/snapshot":
                 self._write_json(HTTPStatus.OK, _snapshot_payload(self.server.cfg, self.server.action_history), emit_body=emit_body)
                 return
+            if parsed.path == "/api/action/stream":
+                params = parse_qs(parsed.query)
+                job_id = params.get("job_id", [""])[0]
+                self._serve_action_stream(job_id)
+                return
             if parsed.path == "/metrics.csv":
                 snapshot = load_dashboard_snapshot(self.server.cfg)
                 payload = _csv_bytes(
@@ -198,19 +287,17 @@ def _handler_factory():
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_action"})
                 return
             try:
-                result = self.server.action_runner(self.server.cfg, action, params)
+                job = self._start_action_job(action, params)
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
-            with self.server.history_lock:
-                self.server.action_history.insert(0, result.__dict__)
-                del self.server.action_history[10:]
-                history = list(self.server.action_history)
             response = {
-                **result.__dict__,
-                "snapshot": _snapshot_payload(self.server.cfg, history),
+                "job_id": job.job_id,
+                "stream_url": f"/api/action/stream?job_id={job.job_id}",
+                "action": job.action,
+                "timestamp": job.timestamp,
             }
-            self._write_json(HTTPStatus.OK if result.ok else HTTPStatus.INTERNAL_SERVER_ERROR, response)
+            self._write_json(HTTPStatus.ACCEPTED, response)
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
             get_logger("stock_triage.dashboard").info(
@@ -231,6 +318,83 @@ def _handler_factory():
                 return
             mime, _ = mimetypes.guess_type(str(path))
             self._write_bytes(HTTPStatus.OK, mime or "application/octet-stream", path.read_bytes(), emit_body=emit_body)
+
+        def _serve_action_stream(self, job_id: str) -> None:
+            if not job_id:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_job_id"})
+                return
+            with self.server.history_lock:
+                job = self.server.jobs.get(job_id)
+            if job is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
+                return
+
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            offset = 0
+            while True:
+                events, finished = job.wait_for_events(offset)
+                for event in events:
+                    payload = json.dumps(event, ensure_ascii=True)
+                    self.wfile.write(f"event: {event['type']}\n".encode("utf-8"))
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    offset += 1
+                if finished and offset >= len(job.events):
+                    self.close_connection = True
+                    break
+
+        def _start_action_job(self, action: str, params: dict[str, str]) -> DashboardJobState:
+            job = DashboardJobState(
+                job_id=uuid.uuid4().hex[:12],
+                action=action,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                params=dict(params),
+            )
+            with self.server.history_lock:
+                self.server.jobs[job.job_id] = job
+                self._prune_jobs_locked()
+
+            thread = threading.Thread(
+                target=self._run_action_job,
+                args=(job, action, params),
+                daemon=True,
+            )
+            thread.start()
+            return job
+
+        def _run_action_job(self, job: DashboardJobState, action: str, params: dict[str, str]) -> None:
+            try:
+                self.server.action_runner(self.server.cfg, action, params, job)
+                if not job.finished:
+                    job.finish(returncode=0, ok=True)
+            except ValueError as exc:
+                job.append_output("stderr", f"{exc}\n")
+                job.finish(returncode=2, ok=False)
+            except Exception as exc:  # noqa: BLE001 - keep UI responsive on failures
+                job.append_output("stderr", f"{type(exc).__name__}: {exc}\n")
+                job.finish(returncode=1, ok=False)
+
+            with self.server.history_lock:
+                self.server.action_history.insert(0, job.to_history_entry())
+                del self.server.action_history[10:]
+                self._prune_jobs_locked()
+
+        def _prune_jobs_locked(self) -> None:
+            stale = [
+                job_id
+                for job_id, job in self.server.jobs.items()
+                if job.finished
+            ]
+            if len(stale) <= 25:
+                return
+            stale.sort(key=lambda job_id: self.server.jobs[job_id].timestamp, reverse=True)
+            for job_id in stale[25:]:
+                self.server.jobs.pop(job_id, None)
 
         def _serve_static(self, asset_name: str, *, emit_body: bool) -> None:
             if "/" in asset_name or not asset_name:
@@ -285,26 +449,31 @@ def _csv_bytes(*, fieldnames: list[str], rows: list[dict[str, object]]) -> bytes
     return buffer.getvalue().encode("utf-8")
 
 
-def _run_cli_action(cfg: Config, action: str, params: dict[str, str]) -> DashboardActionResult:
+def _run_cli_action(cfg: Config, action: str, params: dict[str, str], job: DashboardJobState) -> None:
     command = _build_cli_command(action, params)
     env = os.environ.copy()
-    completed = subprocess.run(
-        [sys.executable, "-m", "stock_triage", *command],
+    full_command = [sys.executable, "-m", "stock_triage", *command]
+    job.set_command(full_command)
+
+    process = subprocess.Popen(
+        full_command,
         cwd=REPO_ROOT,
         env=env,
         text=True,
-        capture_output=True,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
     )
-    return DashboardActionResult(
-        action=action,
-        command=[sys.executable, "-m", "stock_triage", *command],
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        ok=completed.returncode == 0,
-    )
+    readers = [
+        threading.Thread(target=_pipe_stream, args=(process.stdout, job, "stdout"), daemon=True),
+        threading.Thread(target=_pipe_stream, args=(process.stderr, job, "stderr"), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    returncode = process.wait()
+    for reader in readers:
+        reader.join(timeout=1)
+    job.finish(returncode=returncode, ok=returncode == 0)
 
 
 def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
@@ -340,6 +509,18 @@ def _int_arg(raw: str, *, default: int, minimum: int) -> int:
     if value < minimum:
         raise ValueError(f"value must be >= {minimum}")
     return value
+
+
+def _pipe_stream(stream, job: DashboardJobState, stream_name: str) -> None:
+    if stream is None:
+        return
+    try:
+        for line in iter(stream.readline, ""):
+            if not line:
+                break
+            job.append_output(stream_name, line)
+    finally:
+        stream.close()
 
 
 def _is_allowed_artifact_path(path: Path, cfg: Config) -> bool:
