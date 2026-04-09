@@ -308,7 +308,7 @@ def test_extract_cli_uses_run_extract(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_extract",
-        lambda cfg, source_name=None, limit=25, include_extracted=False, retry_failed_only=False: type(
+        lambda cfg, source_name=None, document_id=None, limit=25, include_extracted=False, retry_failed_only=False: type(
             "R",
             (),
             {
@@ -329,6 +329,54 @@ def test_extract_cli_uses_run_extract(tmp_config, monkeypatch, capsys):
     assert "selected=2" in out
     assert "partial=1" in out
     assert "events=1" in out
+
+
+def test_run_extract_can_target_single_document(tmp_config):
+    target_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="extract-target-1",
+        document_type="annual_report",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025"},
+        title="Targeted extract",
+        chunks=[
+            (
+                0,
+                1,
+                None,
+                "Pendapatan 5,082,099 Revenue\nJUMLAH ASET 34,565,439 TOTAL ASSETS\nJUMLAH LIABILITAS 16,011,455",
+            ),
+        ],
+    )
+    _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="extract-target-2",
+        document_type="annual_report",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025"},
+        title="Untouched extract",
+        chunks=[(0, 1, None, "Pendapatan 1 Revenue\nJUMLAH ASET 2 TOTAL ASSETS\nJUMLAH LIABILITAS 1")],
+    )
+
+    result = run_extract(tmp_config, document_id=target_id)
+
+    assert result.selected == 1
+    assert result.extracted + result.partial == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        target = rconn.execute("SELECT process_state FROM documents WHERE document_id = ?", (target_id,)).fetchone()
+        untouched = rconn.execute(
+            "SELECT process_state FROM documents WHERE source_record_id = ?",
+            ("extract-target-2",),
+        ).fetchone()
+        assert target["process_state"] in {"extracted", "analyzed"}
+        assert untouched["process_state"] == "parsed"
+    finally:
+        rconn.close()
 
 
 def test_extract_status_cli_uses_load_extract_status(tmp_config, monkeypatch, capsys):

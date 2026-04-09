@@ -32,6 +32,9 @@ def test_build_cli_command_maps_dashboard_actions() -> None:
         "7",
     ]
     assert _build_cli_command("summary", {"document_id": "doc-123"}) == ["summary-generate", "doc-123"]
+    assert _build_cli_command("parse_one", {"document_id": "doc-123"}) == ["parse", "--document-id", "doc-123"]
+    assert _build_cli_command("extract_one", {"document_id": "doc-123"}) == ["extract", "--document-id", "doc-123"]
+    assert _build_cli_command("rules_one", {"document_id": "doc-123"}) == ["rules", "--document-id", "doc-123"]
     with pytest.raises(ValueError):
         _build_cli_command("summary", {})
 
@@ -52,10 +55,12 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
     try:
         html = urlopen(handle.url).read().decode("utf-8")
         assert "Control Panel" in html
-        assert "Summary (Doc ID)" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
         assert "function render()" in app_js
+        assert "re-parse" in app_js
+        assert "re-extract" in app_js
+        assert "run rules" in app_js
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"

@@ -38,7 +38,6 @@
   const actionHistory = document.getElementById("actionHistory");
   const yearInput = document.getElementById("financialYear");
   const limitInput = document.getElementById("stageLimit");
-  const summaryDocumentIdInput = document.getElementById("summaryDocumentId");
   const refreshButton = document.getElementById("refreshButton");
   const opsShell = document.getElementById("opsShell");
   const issuerCount = document.getElementById("issuerCount");
@@ -259,6 +258,27 @@
                                   )}" data-inline-action="summary">summarize</button>`
                                 : ""
                             }
+                            ${
+                              actionEndpoint && item.document_id
+                                ? `<button class="miniButton ghostButton" type="button" data-document-id="${esc(
+                                    item.document_id
+                                  )}" data-inline-action="parse_one">re-parse</button>`
+                                : ""
+                            }
+                            ${
+                              actionEndpoint && item.document_id
+                                ? `<button class="miniButton ghostButton" type="button" data-document-id="${esc(
+                                    item.document_id
+                                  )}" data-inline-action="extract_one">re-extract</button>`
+                                : ""
+                            }
+                            ${
+                              actionEndpoint && item.document_id
+                                ? `<button class="miniButton ghostButton" type="button" data-document-id="${esc(
+                                    item.document_id
+                                  )}" data-inline-action="rules_one">run rules</button>`
+                                : ""
+                            }
                           </div>
                         </article>
                       `
@@ -347,7 +367,7 @@
     params.set("action", action);
     params.set("year", yearInput?.value || "");
     params.set("limit", limitInput?.value || "");
-    params.set("document_id", summaryDocumentIdInput?.value || "");
+    params.set("document_id", "");
     Object.entries(overrides).forEach(([key, value]) => params.set(key, String(value ?? "")));
 
     if (actionStatus) {
@@ -490,9 +510,6 @@
     const target = event.target.closest("[data-inline-action]");
     if (!target) return;
     const documentId = target.dataset.documentId || "";
-    if (summaryDocumentIdInput) {
-      summaryDocumentIdInput.value = documentId;
-    }
     runAction(target.dataset.inlineAction, { document_id: documentId }).catch((error) => {
       if (actionStatus) actionStatus.textContent = error.message;
     });

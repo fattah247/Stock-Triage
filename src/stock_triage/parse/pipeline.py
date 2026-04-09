@@ -107,6 +107,7 @@ def run_parse(
     cfg: Config,
     *,
     source_name: str | None = None,
+    document_id: str | None = None,
     limit: int = 25,
     include_parsed: bool = False,
     retry_failed_only: bool = False,
@@ -122,6 +123,7 @@ def run_parse(
             documents = _select_documents(
                 reader,
                 source_name=source_name,
+                document_id=document_id,
                 limit=limit,
                 include_parsed=include_parsed,
                 retry_failed_only=retry_failed_only,
@@ -227,10 +229,33 @@ def _select_documents(
     conn: sqlite3.Connection,
     *,
     source_name: str | None,
+    document_id: str | None,
     limit: int,
     include_parsed: bool,
     retry_failed_only: bool,
 ) -> list[ParseDocument]:
+    if document_id:
+        rows = conn.execute(
+            """
+            SELECT document_id, source_name, source_record_id, local_path, mime_type, process_state
+            FROM documents
+            WHERE document_id = ?
+              AND local_path IS NOT NULL
+            LIMIT 1
+            """,
+            (document_id,),
+        ).fetchall()
+        return [
+            ParseDocument(
+                document_id=row["document_id"],
+                source_name=row["source_name"],
+                source_record_id=row["source_record_id"],
+                local_path=Path(row["local_path"]),
+                mime_type=row["mime_type"],
+                process_state=row["process_state"],
+            )
+            for row in rows
+        ]
     if retry_failed_only:
         states = ["failed"]
     else:

@@ -497,6 +497,18 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
         if not document_id:
             raise ValueError("document_id is required for summary generation")
         return ["summary-generate", document_id]
+    if action == "parse_one":
+        if not document_id:
+            raise ValueError("document_id is required for single-document parse")
+        return ["parse", "--document-id", document_id]
+    if action == "extract_one":
+        if not document_id:
+            raise ValueError("document_id is required for single-document extract")
+        return ["extract", "--document-id", document_id]
+    if action == "rules_one":
+        if not document_id:
+            raise ValueError("document_id is required for single-document rules")
+        return ["rules", "--document-id", document_id]
     if action not in mapping:
         raise ValueError(f"unknown action: {action}")
     return mapping[action]

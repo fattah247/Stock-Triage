@@ -238,7 +238,7 @@ def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_parse",
-        lambda cfg, source_name=None, limit=25, include_parsed=False, retry_failed_only=False: type(
+        lambda cfg, source_name=None, document_id=None, limit=25, include_parsed=False, retry_failed_only=False: type(
             "R",
             (),
             {
@@ -259,6 +259,39 @@ def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     assert "selected=2" in out
     assert "ocr_partial=1" in out
     assert "chunks=6" in out
+
+
+def test_run_parse_can_target_single_document(tmp_config):
+    target_id = _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="targeted-1",
+        pdf_bytes=_pdf_bytes_with_pages(["Targeted parse document with enough native text to parse cleanly."]),
+    )
+    _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="targeted-2",
+        pdf_bytes=_pdf_bytes_with_pages(["Another document that should remain untouched by a targeted parse run."]),
+    )
+
+    result = run_parse(tmp_config, document_id=target_id)
+
+    assert result.selected == 1
+    assert result.parsed == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        target = rconn.execute("SELECT process_state FROM documents WHERE document_id = ?", (target_id,)).fetchone()
+        untouched = rconn.execute(
+            "SELECT process_state FROM documents WHERE source_record_id = ?",
+            ("targeted-2",),
+        ).fetchone()
+        assert target["process_state"] == "parsed"
+        assert untouched["process_state"] == "downloaded"
+    finally:
+        rconn.close()
 
 
 def test_run_parse_retry_failed_only_targets_failed_documents(tmp_config, monkeypatch):

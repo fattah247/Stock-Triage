@@ -139,6 +139,7 @@ def run_extract(
     cfg: Config,
     *,
     source_name: str | None = None,
+    document_id: str | None = None,
     limit: int = 25,
     include_extracted: bool = False,
     retry_failed_only: bool = False,
@@ -154,6 +155,7 @@ def run_extract(
             documents = _select_documents(
                 reader,
                 source_name=source_name,
+                document_id=document_id,
                 limit=limit,
                 include_extracted=include_extracted,
                 retry_failed_only=retry_failed_only,
@@ -320,10 +322,47 @@ def _select_documents(
     conn: sqlite3.Connection,
     *,
     source_name: str | None,
+    document_id: str | None,
     limit: int,
     include_extracted: bool,
     retry_failed_only: bool,
 ) -> list[ExtractDocument]:
+    if document_id:
+        rows = conn.execute(
+            """
+            SELECT
+                d.document_id,
+                d.source_name,
+                d.source_record_id,
+                d.document_type,
+                d.ticker,
+                d.parser_version,
+                d.process_state,
+                dc.raw_metadata,
+                dc.title
+            FROM documents d
+            LEFT JOIN document_candidates dc
+              ON dc.source_name = d.source_name
+             AND dc.source_record_id = d.source_record_id
+            WHERE d.document_id = ?
+            LIMIT 1
+            """,
+            (document_id,),
+        ).fetchall()
+        return [
+            ExtractDocument(
+                document_id=row["document_id"],
+                source_name=row["source_name"],
+                source_record_id=row["source_record_id"],
+                document_type=row["document_type"],
+                ticker=row["ticker"],
+                parser_version=row["parser_version"],
+                process_state=row["process_state"],
+                raw_metadata=json.loads(row["raw_metadata"]) if row["raw_metadata"] else {},
+                title=row["title"],
+            )
+            for row in rows
+        ]
     if retry_failed_only:
         states = ["failed"]
     else:

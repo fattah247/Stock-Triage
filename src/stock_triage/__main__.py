@@ -139,6 +139,7 @@ def cmd_parse(args: argparse.Namespace) -> int:
     result = run_parse(
         cfg,
         source_name=source_name,
+        document_id=args.document_id,
         limit=args.limit,
         include_parsed=args.include_parsed,
         retry_failed_only=args.retry_failed,
@@ -194,6 +195,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
     result = run_extract(
         cfg,
         source_name=source_name,
+        document_id=args.document_id,
         limit=args.limit,
         include_extracted=args.include_extracted,
         retry_failed_only=args.retry_failed,
@@ -249,6 +251,7 @@ def cmd_rules(args: argparse.Namespace) -> int:
     result = run_rules(
         cfg,
         source_name=source_name,
+        document_id=args.document_id,
         limit=args.limit,
         include_analyzed=args.include_analyzed,
     )
@@ -585,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Retry only documents currently marked failed",
     )
+    p_parse.add_argument("--document-id", help="Optional single document id to parse")
     p_parse.set_defaults(func=cmd_parse)
     p_parse_status = sub.add_parser("parse-status", help="Show parse-state counts and recent failures")
     p_parse_status.add_argument(
@@ -623,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Retry only documents currently marked failed",
     )
+    p_extract.add_argument("--document-id", help="Optional single document id to extract")
     p_extract.set_defaults(func=cmd_extract)
     p_extract_status = sub.add_parser("extract-status", help="Show extraction-state counts and recent failures")
     p_extract_status.add_argument(
@@ -656,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Re-evaluate documents already marked analyzed",
     )
+    p_rules.add_argument("--document-id", help="Optional single document id to evaluate")
     p_rules.set_defaults(func=cmd_rules)
     p_rules_status = sub.add_parser("rules-status", help="Show rule-engine coverage and recent triggers")
     p_rules_status.add_argument(

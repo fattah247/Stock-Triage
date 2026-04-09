@@ -86,6 +86,7 @@ def run_rules(
     cfg: Config,
     *,
     source_name: str | None = None,
+    document_id: str | None = None,
     limit: int = 25,
     include_analyzed: bool = False,
 ) -> RuleRunResult:
@@ -100,6 +101,7 @@ def run_rules(
             documents = _select_documents(
                 reader,
                 source_name=source_name,
+                document_id=document_id,
                 limit=limit,
                 include_analyzed=include_analyzed,
             )
@@ -206,9 +208,30 @@ def _select_documents(
     conn: sqlite3.Connection,
     *,
     source_name: str | None,
+    document_id: str | None,
     limit: int,
     include_analyzed: bool,
 ) -> list[RuleDocument]:
+    if document_id:
+        rows = conn.execute(
+            """
+            SELECT document_id, source_name, source_record_id, ticker, process_state
+            FROM documents
+            WHERE document_id = ?
+            LIMIT 1
+            """,
+            (document_id,),
+        ).fetchall()
+        return [
+            RuleDocument(
+                document_id=row["document_id"],
+                source_name=row["source_name"],
+                source_record_id=row["source_record_id"],
+                ticker=row["ticker"],
+                process_state=row["process_state"],
+            )
+            for row in rows
+        ]
     states = ["extracted"]
     if include_analyzed:
         states.append("analyzed")

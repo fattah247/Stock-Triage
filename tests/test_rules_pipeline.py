@@ -123,7 +123,7 @@ def test_rules_cli_uses_run_rules(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_rules",
-        lambda cfg, source_name=None, limit=25, include_analyzed=False: type(
+        lambda cfg, source_name=None, document_id=None, limit=25, include_analyzed=False: type(
             "R",
             (),
             {"selected": 2, "analyzed": 2, "triggered": 4},
@@ -136,6 +136,43 @@ def test_rules_cli_uses_run_rules(tmp_config, monkeypatch, capsys):
     assert rc == 0
     assert "selected=2" in out
     assert "triggered=4" in out
+
+
+def test_run_rules_can_target_single_document(tmp_config):
+    target_id = _insert_extracted_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="rules-target-1",
+        ticker="TAMU",
+        metrics=[("net_profit", -10.0, 2024, "2024-12-31")],
+        events=[],
+    )
+    _insert_extracted_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="rules-target-2",
+        ticker="TAMU",
+        metrics=[("net_profit", -10.0, 2024, "2024-12-31")],
+        events=[],
+    )
+
+    result = run_rules(tmp_config, document_id=target_id)
+
+    assert result.selected == 1
+    assert result.analyzed == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        target = rconn.execute("SELECT process_state FROM documents WHERE document_id = ?", (target_id,)).fetchone()
+        untouched = rconn.execute(
+            "SELECT process_state FROM documents WHERE source_record_id = ?",
+            ("rules-target-2",),
+        ).fetchone()
+        assert target["process_state"] == "analyzed"
+        assert untouched["process_state"] == "extracted"
+    finally:
+        rconn.close()
 
 
 def test_rules_status_cli_uses_load_rule_status(tmp_config, monkeypatch, capsys):
