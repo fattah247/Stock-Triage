@@ -18,14 +18,16 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     result = run_intelligence(tmp_config, ticker="TAMU")
 
     assert result.selected_tickers == 1
-    assert result.deltas == 6
+    assert result.deltas == 8
     assert result.snapshots == 1
-    assert result.timeseries == 3
+    assert result.timeseries == 7
     assert result.briefs == 1
-    assert result.review_items == 4
+    assert result.review_items == 5
     assert result.peer_sets == 1
     assert result.sector_rollups == 1
     assert result.thesis_evaluations == 1
+    assert result.claims == 3
+    assert result.claim_outcomes == 3
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
     try:
@@ -39,8 +41,12 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
             """,
             ("TAMU",),
         ).fetchall()
-        assert len(deltas) == 6
-        metric_delta = next(row for row in deltas if row["delta_kind"] == "metric_change")
+        assert len(deltas) == 8
+        metric_delta = next(
+            row
+            for row in deltas
+            if row["delta_kind"] == "metric_change" and row["metric_name"] == "revenue"
+        )
         assert metric_delta["metric_name"] == "revenue"
         assert metric_delta["previous_value"] == 4000000.0
         assert metric_delta["current_value"] == 5082099.0
@@ -75,13 +81,26 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["baseline"]["document_id"] == "doc-tamu-b"
         assert payload["top_card"]["overall_state"] == "critical"
         assert payload["top_card"]["leverage_state"] == "warning"
+        assert payload["top_card"]["management_credibility"] == "deteriorating"
         assert payload["top_card"]["thesis_state"] == "broken"
         assert payload["top_card"]["decision_state"] == "Avoid Candidate"
         assert payload["top_card"]["watchlist_priority"] == "high"
         assert "revenue increased" in payload["top_card"]["positive_factors"]
         assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
-        assert payload["delta_count_by_kind"]["metric_change"] == 1
+        assert payload["delta_count_by_kind"]["metric_change"] == 3
         assert payload["review_required"][0]["item_type"] == "revision_change"
+        assert payload["management_credibility"]["achieved"] == 2
+        assert payload["management_credibility"]["contradicted"] == 1
+        assert payload["management_credibility"]["credibility_state"] == "deteriorating"
+        assert {claim["claim_type"] for claim in payload["claims"]} == {
+            "debt_reduction_claim",
+            "margin_improvement_claim",
+            "revenue_growth_claim",
+        }
+        assert {outcome["outcome_status"] for outcome in payload["claim_outcomes"]} == {
+            "Achieved",
+            "Contradicted",
+        }
         assert payload["thesis_evaluations"][0]["status"] == "broken"
         assert payload["thesis_evaluations"][0]["details"]["matched_stop"][0]["kind"] == "rule_present"
 
@@ -93,17 +112,21 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
                 "review_queue_items",
                 "peer_sets",
                 "sector_rollups",
+                "management_claims",
+                "claim_outcomes",
                 "thesis_definitions",
                 "thesis_conditions",
                 "thesis_evaluations",
             )
         }
         assert counts == {
-            "company_timeseries": 3,
+            "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 4,
+            "review_queue_items": 5,
             "peer_sets": 1,
             "sector_rollups": 1,
+            "management_claims": 3,
+            "claim_outcomes": 3,
             "thesis_definitions": 1,
             "thesis_conditions": 3,
             "thesis_evaluations": 1,
@@ -119,7 +142,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
     first = run_intelligence(tmp_config, ticker="TAMU")
     second = run_intelligence(tmp_config, ticker="TAMU")
 
-    assert first.deltas == second.deltas == 6
+    assert first.deltas == second.deltas == 8
     assert first.snapshots == second.snapshots == 1
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
@@ -135,17 +158,21 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
                 "review_queue_items",
                 "peer_sets",
                 "sector_rollups",
+                "management_claims",
+                "claim_outcomes",
                 "thesis_evaluations",
             )
         }
         assert counts == {
-            "document_deltas": 6,
+            "document_deltas": 8,
             "company_snapshots": 1,
-            "company_timeseries": 3,
+            "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 4,
+            "review_queue_items": 5,
             "peer_sets": 1,
             "sector_rollups": 1,
+            "management_claims": 3,
+            "claim_outcomes": 3,
             "thesis_evaluations": 1,
         }
     finally:
@@ -166,9 +193,11 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "intelligence-run:" in captured
-    assert "derived_version=phase12-v1" in captured
+    assert "derived_version=phase13-v1" in captured
     assert "selected_tickers=1" in captured
     assert "thesis_evaluations=1" in captured
+    assert "claims=3" in captured
+    assert "claim_outcomes=3" in captured
 
 
 def _seed_phase10_inputs(tmp_config) -> None:
@@ -276,6 +305,60 @@ def _seed_phase10_inputs(tmp_config) -> None:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    "metric-tamu-liabilities-prev",
+                    "doc-tamu-b",
+                    "TAMU",
+                    "total_liabilities",
+                    800000.0,
+                    "800,000",
+                    "USD",
+                    "units",
+                    2024,
+                    "Annual",
+                    "2024-12-31",
+                    "audited",
+                    "consolidated",
+                    "bilingual",
+                    None,
+                    older,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_items (
+                    metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                    unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                    language_variant, evidence_span_id, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "metric-tamu-op-profit-prev",
+                    "doc-tamu-b",
+                    "TAMU",
+                    "operating_profit",
+                    200000.0,
+                    "200,000",
+                    "USD",
+                    "units",
+                    2024,
+                    "Annual",
+                    "2024-12-31",
+                    "audited",
+                    "consolidated",
+                    "bilingual",
+                    None,
+                    older,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_items (
+                    metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                    unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                    language_variant, evidence_span_id, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
                     "metric-tamu-revenue-oldest",
                     "doc-tamu-c",
                     "TAMU",
@@ -292,6 +375,96 @@ def _seed_phase10_inputs(tmp_config) -> None:
                     "bilingual",
                     "span-tamu-1",
                     (now - timedelta(days=730)).isoformat(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_items (
+                    metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                    unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                    language_variant, evidence_span_id, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "metric-tamu-liabilities-current",
+                    "doc-tamu-a",
+                    "TAMU",
+                    "total_liabilities",
+                    950000.0,
+                    "950,000",
+                    "USD",
+                    "units",
+                    2024,
+                    "Annual",
+                    "2024-12-31",
+                    "audited",
+                    "consolidated",
+                    "bilingual",
+                    "span-tamu-1",
+                    newer,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_items (
+                    metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                    unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                    language_variant, evidence_span_id, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "metric-tamu-op-profit-current",
+                    "doc-tamu-a",
+                    "TAMU",
+                    "operating_profit",
+                    350000.0,
+                    "350,000",
+                    "USD",
+                    "units",
+                    2024,
+                    "Annual",
+                    "2024-12-31",
+                    "audited",
+                    "consolidated",
+                    "bilingual",
+                    "span-tamu-1",
+                    newer,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO document_chunks (
+                    chunk_id, document_id, section_label, page_start, page_end, char_start, char_end, text, ord
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "chunk-claim-prev",
+                    "doc-tamu-b",
+                    "Outlook",
+                    12,
+                    12,
+                    0,
+                    180,
+                    "Management expects revenue growth in 2025. The company plans to reduce debt over the next 12 months. Management expects margins to improve after restructuring.",
+                    1,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO evidence_spans (
+                    span_id, document_id, chunk_id, page_start, page_end, char_start, char_end, excerpt_text, display_anchor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "span-tamu-prev-claim",
+                    "doc-tamu-b",
+                    "chunk-claim-prev",
+                    12,
+                    12,
+                    0,
+                    150,
+                    "Management expects revenue growth in 2025. The company plans to reduce debt over the next 12 months. Management expects margins to improve after restructuring.",
+                    "p12",
                 ),
             )
             conn.execute(

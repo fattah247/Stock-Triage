@@ -13,8 +13,8 @@ source-data and model licensing.
 
 **Phase 9 — Exchange-scale hardening** (done). On the active v3 branch,
 **Phase 10 — derived intelligence foundation**, **Phase 11 — change
-detection and snapshot assembly**, and **Phase 12 — thesis engine and alert
-upgrades** are implemented.
+detection and snapshot assembly**, **Phase 12 — thesis engine and alert
+upgrades**, and **Phase 13 — management claim ledger** are implemented.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -36,6 +36,7 @@ V3 preview on this branch:
 | 10 | Derived intelligence foundation | done |
 | 11 | Change detection and snapshot assembly | done |
 | 12 | Thesis engine and alert upgrades | done |
+| 13 | Management claim ledger | done |
 
 ## Layout
 
@@ -123,8 +124,8 @@ python -m stock_triage summary-validate <document_id> --input-file /tmp/output.j
 python -m stock_triage summary-generate <document_id>
 
 # Build the v3-derived layer: revision-aware deltas, current snapshots,
-# health-state explanations, thesis evaluations, review items, peer sets,
-# and sector rollups.
+# health-state explanations, claim ledger and outcomes, thesis evaluations,
+# review items, peer sets, and sector rollups.
 python -m stock_triage intelligence-run --limit 25
 
 # Render the local dashboard plus CSV exports
@@ -228,6 +229,12 @@ Defaults live in `config/default.yaml`. Override either by:
   `thesis_definitions`, `thesis_conditions`, and `thesis_evaluations`, updates
   snapshot decision state and watchlist priority, and upgrades alerts so broken,
   weakening, or improving theses can surface as evidence-backed local signals.
+- **V3 Phase 13 claim ledger.** `python -m stock_triage intelligence-run ...`
+  now also extracts deterministic management claims from narrative chunks,
+  persists `management_claims`, evaluates those claims into
+  `claim_outcomes` when later evidence exists, and exposes credibility summary
+  state such as achieved rate, contradicted rate, unresolved rate, and recycled
+  claim count inside the current company snapshot.
 
 Example local thesis file (`data/theses.yaml`):
 

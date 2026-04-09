@@ -19,8 +19,15 @@ from .thesis import (
     load_local_theses,
     sync_local_theses,
 )
+from .claims import (
+    ClaimCredibilitySummary,
+    ClaimOutcomeRecord,
+    ClaimRecord,
+    evaluate_claim_outcomes,
+    extract_claims_for_documents,
+)
 
-DERIVED_VERSION = "phase12-v1"
+DERIVED_VERSION = "phase13-v1"
 
 
 @dataclass(frozen=True)
@@ -173,6 +180,9 @@ class CompanyIntelligenceBundle:
     timeseries: list[TimeseriesPoint]
     triggered_rules: list[TriggeredRule]
     events: list[EventSignal]
+    claims: list[ClaimRecord]
+    claim_outcomes: list[ClaimOutcomeRecord]
+    credibility_summary: ClaimCredibilitySummary
     thesis_evaluations: list[ThesisEvaluationRecord]
     snapshot_payload_json: str
     brief_payload_json: str
@@ -192,6 +202,8 @@ class IntelligenceRunResult:
     peer_sets: int = 0
     sector_rollups: int = 0
     thesis_evaluations: int = 0
+    claims: int = 0
+    claim_outcomes: int = 0
 
 
 def run_intelligence(
@@ -227,6 +239,8 @@ def run_intelligence(
                     peer_sets=result.peer_sets + counts["peer_sets"],
                     sector_rollups=result.sector_rollups + counts["sector_rollups"],
                     thesis_evaluations=result.thesis_evaluations + counts["thesis_evaluations"],
+                    claims=result.claims + counts["claims"],
+                    claim_outcomes=result.claim_outcomes + counts["claim_outcomes"],
                 )
         finally:
             reader.close()
@@ -287,6 +301,18 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         current_analysis=latest_analysis,
     )
     timeseries = _build_timeseries(ticker=ticker, metrics=_load_ticker_metrics(conn, ticker))
+    claims = extract_claims_for_documents(
+        conn,
+        ticker=ticker,
+        documents=documents,
+        latest_document_id=latest_document.document_id,
+    )
+    claim_outcomes, credibility_summary = evaluate_claim_outcomes(
+        conn,
+        claims=claims,
+        latest_document_id=latest_document.document_id,
+        assessment_date=latest_document.source_modified_at or latest_document.updated_at,
+    )
     conflict_items = _build_conflict_review_items(
         ticker=ticker,
         latest_document=latest_document,
@@ -308,6 +334,11 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         document_id=latest_document.document_id,
         evaluations=thesis_evaluations,
     )
+    claim_items = _build_claim_review_items(
+        ticker=ticker,
+        document_id=latest_document.document_id,
+        claim_outcomes=claim_outcomes,
+    )
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
@@ -317,7 +348,10 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
-        conflicts=conflict_items + thesis_items,
+        conflicts=conflict_items + thesis_items + claim_items,
+        claims=claims,
+        claim_outcomes=claim_outcomes,
+        credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
     )
     brief_payload_json = _build_brief_payload_json(
@@ -327,6 +361,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         events=latest_events,
         triggered_rules=latest_rules,
         baseline=baseline,
+        credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
     )
     review_items = _build_review_items(
@@ -337,6 +372,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     )
     review_items.extend(conflict_items)
     review_items.extend(thesis_items)
+    review_items.extend(claim_items)
     peer_set = _build_peer_set(conn, profile)
     sector_rollup = _build_sector_rollup(conn, profile)
     return CompanyIntelligenceBundle(
@@ -348,6 +384,9 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         timeseries=timeseries,
         triggered_rules=latest_rules,
         events=latest_events,
+        claims=claims,
+        claim_outcomes=claim_outcomes,
+        credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
         snapshot_payload_json=snapshot_payload_json,
         brief_payload_json=brief_payload_json,
@@ -962,6 +1001,9 @@ def _build_snapshot_payload_json(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     conflicts: list[ReviewQueueItem],
+    claims: list[ClaimRecord],
+    claim_outcomes: list[ClaimOutcomeRecord],
+    credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> str:
     health = _build_health_state(
@@ -970,6 +1012,7 @@ def _build_snapshot_payload_json(
         events=events,
         triggered_rules=triggered_rules,
         conflicts=conflicts,
+        credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
     )
     delta_counts: dict[str, int] = {}
@@ -1012,6 +1055,41 @@ def _build_snapshot_payload_json(
         "top_card": health,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
+        "management_credibility": {
+            "total_claims": credibility_summary.total_claims,
+            "achieved": credibility_summary.achieved,
+            "partially_supported": credibility_summary.partially_supported,
+            "missed": credibility_summary.missed,
+            "contradicted": credibility_summary.contradicted,
+            "unresolved": credibility_summary.unresolved,
+            "achieved_rate": credibility_summary.achieved_rate,
+            "missed_rate": credibility_summary.missed_rate,
+            "unresolved_rate": credibility_summary.unresolved_rate,
+            "recycled_claim_count": credibility_summary.recycled_claim_count,
+            "credibility_state": credibility_summary.credibility_state,
+        },
+        "claims": [
+            {
+                "claim_id": claim.claim_id,
+                "claim_type": claim.claim_type,
+                "claim_text": claim.claim_text,
+                "claim_topic": claim.claim_topic,
+                "claim_subject": claim.claim_subject,
+                "claim_time_horizon": claim.claim_time_horizon,
+                "claim_confidence": claim.claim_confidence,
+                "status": claim.status,
+            }
+            for claim in claims
+        ],
+        "claim_outcomes": [
+            {
+                "claim_id": outcome.claim_id,
+                "outcome_status": outcome.outcome_status,
+                "rationale": outcome.rationale,
+                "details": json.loads(outcome.payload_json),
+            }
+            for outcome in claim_outcomes
+        ],
         "thesis_evaluations": [
             {
                 "thesis_id": evaluation.thesis_id,
@@ -1086,6 +1164,7 @@ def _build_brief_payload_json(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     baseline: BaselineChoice | None,
+    credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> str:
     headline = latest_analysis.summary if latest_analysis and latest_analysis.summary else "No local summary available yet."
@@ -1097,6 +1176,7 @@ def _build_brief_payload_json(
         "open_risks": [rule.rule_name for rule in triggered_rules[:5]],
         "recent_events": [event.event_type for event in events[:5]],
         "verify_next": latest_analysis.what_to_verify[:5] if latest_analysis else [],
+        "management_credibility_state": credibility_summary.credibility_state,
         "thesis_statuses": [evaluation.status for evaluation in thesis_evaluations],
     }
     return json.dumps(payload, sort_keys=True)
@@ -1201,6 +1281,7 @@ def _build_health_state(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     conflicts: list[ReviewQueueItem],
+    credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> dict[str, Any]:
     reasons: list[str] = []
@@ -1275,12 +1356,17 @@ def _build_health_state(
     elif conflicts:
         disclosure_quality = "review"
 
+    management_credibility = credibility_summary.credibility_state
+    if management_credibility == "deteriorating":
+        reasons.append("Management claim delivery deteriorated versus prior expectations.")
+
     return {
         "overall_state": overall_state,
         "comparability_state": comparability_state,
         "confidence": confidence,
         "leverage_state": leverage_state,
         "disclosure_quality": disclosure_quality,
+        "management_credibility": management_credibility,
         "thesis_state": _aggregate_thesis_state(thesis_evaluations),
         "decision_state": _decision_state_for(thesis_evaluations, overall_state, confidence),
         "watchlist_priority": _watchlist_priority_for(thesis_evaluations, overall_state, conflicts),
@@ -1445,6 +1531,31 @@ def _build_thesis_review_items(
     return items
 
 
+def _build_claim_review_items(
+    *,
+    ticker: str,
+    document_id: str,
+    claim_outcomes: list[ClaimOutcomeRecord],
+) -> list[ReviewQueueItem]:
+    items: list[ReviewQueueItem] = []
+    for outcome in claim_outcomes:
+        if outcome.outcome_status not in {"Contradicted", "Open", "Not Yet Testable"}:
+            continue
+        items.append(
+            ReviewQueueItem(
+                review_item_id=_stable_id("review", "claim", outcome.claim_id, document_id, DERIVED_VERSION),
+                item_type="claim_contradicted" if outcome.outcome_status == "Contradicted" else "claim_unresolved",
+                ticker=ticker,
+                document_id=document_id,
+                source_key=outcome.claim_id,
+                priority="high" if outcome.outcome_status == "Contradicted" else "medium",
+                rationale=outcome.rationale,
+                payload_json=outcome.payload_json,
+            )
+        )
+    return items
+
+
 def _aggregate_thesis_state(evaluations: list[ThesisEvaluationRecord]) -> str:
     statuses = {evaluation.status for evaluation in evaluations}
     if not statuses:
@@ -1564,6 +1675,10 @@ def _build_sector_rollup(conn: sqlite3.Connection, profile: CompanyProfile) -> S
 
 def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle) -> dict[str, int]:
     now = datetime.now(timezone.utc).isoformat()
+    claim_status_by_id = {
+        outcome.claim_id: outcome.outcome_status.lower().replace(" ", "_")
+        for outcome in bundle.claim_outcomes
+    }
     for delta in bundle.deltas:
         conn.execute(
             """
@@ -1691,6 +1806,71 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             ),
         )
 
+    for claim in bundle.claims:
+        conn.execute(
+            """
+            INSERT INTO management_claims (
+                claim_id, ticker, source_document_id, claim_text, claim_topic, claim_date,
+                evidence_span_id, status, derived_version, created_at, updated_at,
+                claim_type, claim_subject, claim_time_horizon, claim_confidence, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(claim_id)
+            DO UPDATE SET
+                ticker = excluded.ticker,
+                source_document_id = excluded.source_document_id,
+                claim_text = excluded.claim_text,
+                claim_topic = excluded.claim_topic,
+                claim_date = excluded.claim_date,
+                evidence_span_id = excluded.evidence_span_id,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                claim_type = excluded.claim_type,
+                claim_subject = excluded.claim_subject,
+                claim_time_horizon = excluded.claim_time_horizon,
+                claim_confidence = excluded.claim_confidence,
+                payload_json = excluded.payload_json
+            """,
+            (
+                claim.claim_id,
+                claim.ticker,
+                claim.source_document_id,
+                claim.claim_text,
+                claim.claim_topic,
+                claim.claim_date,
+                claim.evidence_span_id,
+                claim_status_by_id.get(claim.claim_id, claim.status),
+                DERIVED_VERSION,
+                now,
+                now,
+                claim.claim_type,
+                claim.claim_subject,
+                claim.claim_time_horizon,
+                claim.claim_confidence,
+                claim.payload_json,
+            ),
+        )
+
+    for outcome in bundle.claim_outcomes:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO claim_outcomes (
+                outcome_id, claim_id, outcome_status, assessment_date, rationale, evidence_span_id,
+                payload_json, derived_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                outcome.outcome_id,
+                outcome.claim_id,
+                outcome.outcome_status,
+                outcome.assessment_date,
+                outcome.rationale,
+                outcome.evidence_span_id,
+                outcome.payload_json,
+                DERIVED_VERSION,
+                now,
+            ),
+        )
+
     conn.execute(
         """
         INSERT INTO decision_briefs (
@@ -1807,6 +1987,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "peer_sets": 1,
         "sector_rollups": 1,
         "thesis_evaluations": len(bundle.thesis_evaluations),
+        "claims": len(bundle.claims),
+        "claim_outcomes": len(bundle.claim_outcomes),
     }
 
 

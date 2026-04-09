@@ -507,7 +507,9 @@ def cmd_intelligence_run(args: argparse.Namespace) -> int:
         f"review_items={result.review_items} "
         f"peer_sets={result.peer_sets} "
         f"sector_rollups={result.sector_rollups} "
-        f"thesis_evaluations={result.thesis_evaluations}"
+        f"thesis_evaluations={result.thesis_evaluations} "
+        f"claims={result.claims} "
+        f"claim_outcomes={result.claim_outcomes}"
     )
     return 0
 
