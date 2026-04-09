@@ -8,6 +8,7 @@ from datetime import date
 
 from .config import load_config
 from .db import WriterQueue, run_migrations
+from .download import run_downloads
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -93,6 +94,25 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_download(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    result = run_downloads(cfg, source_name=source_name, limit=args.limit)
+    print(
+        "download: "
+        f"selected={result.selected} "
+        f"fetched={result.fetched} "
+        f"inserted={result.inserted} "
+        f"skipped={result.skipped} "
+        f"not_modified={result.not_modified} "
+        f"failed={result.failed}"
+    )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -144,6 +164,20 @@ def main(argv: list[str] | None = None) -> int:
     p_discover.add_argument("--year", type=int, help="Convenience year selector for financial reports")
     p_discover.add_argument("--cursor", help="Optional adapter cursor")
     p_discover.set_defaults(func=cmd_discover)
+    p_download = sub.add_parser("download", help="Download candidate attachments into the file store")
+    p_download.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for queued document candidates",
+    )
+    p_download.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of attachment candidates to process",
+    )
+    p_download.set_defaults(func=cmd_download)
     args = parser.parse_args(argv)
     return args.func(args)
 

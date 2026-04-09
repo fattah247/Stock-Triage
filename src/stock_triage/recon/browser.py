@@ -115,6 +115,32 @@ class BrowserJSONFetchResult:
 
 
 @dataclass(frozen=True)
+class BrowserBinaryFetchResult:
+    source_id: str
+    page_url: str
+    resource_url: str
+    final_url: str
+    status: int
+    content_type: str
+    headers: dict[str, str]
+    body: bytes
+    fetched_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "page_url": self.page_url,
+            "resource_url": self.resource_url,
+            "final_url": self.final_url,
+            "status": self.status,
+            "content_type": self.content_type,
+            "headers": self.headers,
+            "body_size": len(self.body),
+            "fetched_at": self.fetched_at,
+        }
+
+
+@dataclass(frozen=True)
 class BrowserFinding:
     source_id: str
     source_class: str
@@ -509,6 +535,80 @@ class PlaywrightSession:
                         )
                     )
                 return results
+            except PlaywrightTimeoutError as exc:
+                raise BrowserBlocked(
+                    "Timed out waiting for IDX access to clear in the browser session."
+                ) from exc
+            finally:
+                context.close()
+
+    def fetch_resource(
+        self,
+        *,
+        source_id: str,
+        page_url: str,
+        resource_url: str,
+        headers: dict[str, str] | None = None,
+        wait_selector: str | None = None,
+    ) -> BrowserBinaryFetchResult:
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ModuleNotFoundError as exc:  # pragma: no cover - exercised by environment
+            raise BrowserDependencyMissing(
+                "Playwright is not installed. Install with `pip install -e \".[browser]\"`."
+            ) from exc
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=self.headless,
+                channel=self.channel,
+                locale="en-US",
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(page_url, wait_until="domcontentloaded", timeout=self.challenge_timeout_s * 1000)
+
+                if self._is_blocked_page(page):
+                    if self.headless:
+                        raise BrowserBlocked(
+                            "IDX still blocks the headless browser session. "
+                            "Rerun headed and clear the challenge in the browser window."
+                        )
+                    self._wait_until_unblocked(page, wait_selector=wait_selector)
+                elif wait_selector is not None:
+                    page.wait_for_selector(wait_selector, timeout=self.challenge_timeout_s * 1000)
+
+                page.wait_for_timeout(self.page_settle_ms)
+                payload = page.evaluate(
+                    """async ({ targetUrl, extraHeaders }) => {
+                        const res = await fetch(targetUrl, {
+                          credentials: 'include',
+                          headers: extraHeaders || {},
+                        });
+                        const body = Array.from(new Uint8Array(await res.arrayBuffer()));
+                        return {
+                          finalUrl: res.url,
+                          status: res.status,
+                          contentType: res.headers.get('content-type') || '',
+                          headers: Object.fromEntries(res.headers.entries()),
+                          body,
+                        };
+                    }""",
+                    {"targetUrl": resource_url, "extraHeaders": headers or {}},
+                )
+                return BrowserBinaryFetchResult(
+                    source_id=source_id,
+                    page_url=page_url,
+                    resource_url=resource_url,
+                    final_url=payload["finalUrl"] or resource_url,
+                    status=int(payload["status"]),
+                    content_type=payload["contentType"],
+                    headers=dict(payload["headers"]),
+                    body=bytes(payload["body"]),
+                )
             except PlaywrightTimeoutError as exc:
                 raise BrowserBlocked(
                     "Timed out waiting for IDX access to clear in the browser session."

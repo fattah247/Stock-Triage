@@ -17,7 +17,7 @@ review of source-data and model licensing.
 | 0 | Repo, config, SQLite schema, file storage | done |
 | 1 | Source reconnaissance and proof of access | done |
 | 2 | Universe and discovery layer | done |
-| 3 | Download, versioning, file store | pending |
+| 3 | Download, versioning, file store | in progress |
 | 4 | Parsing, OCR, chunking | pending |
 | 5 | Normalization, extraction, events | pending |
 | 6 | Rule engine and evaluation harness | pending |
@@ -31,6 +31,7 @@ review of source-data and model licensing.
 src/stock_triage/
   config/         # YAML + env loader (pydantic-validated)
   db/             # SQLite connection, migrations, single-writer queue
+  download/       # Phase 3 downloader + document/version persistence
   migrations/     # Numbered .sql migration files
   storage/        # Content-addressed file store (sha256)
   logging_setup/  # JSON logging + per-stage counters
@@ -70,6 +71,9 @@ python -m stock_triage discover disclosure
 
 # Discover financial-report attachment candidates incrementally
 python -m stock_triage discover financial_report --year 2025
+
+# Download attachment candidates into the file store and documents table
+python -m stock_triage download --source idx_financial_reports --limit 10
 ```
 
 ## Configuration
@@ -90,6 +94,10 @@ Defaults live in `config/default.yaml`. Override either by:
 - **Phase 2 discovery layer.** The repository now supports live company-universe
   sync with issuer enrichment plus incremental disclosure and financial-report
   discovery backed by persisted source watermarks in SQLite.
+- **Phase 3 bootstrap.** Download now persists concrete `documents` and
+  `document_versions` rows, stores bytes in the content-addressed file store,
+  and uses the warmed browser session for IDX attachment routes that block
+  plain HTTP clients.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.
