@@ -21,6 +21,7 @@ class DashboardSnapshot:
     findings: list[dict[str, object]]
     revisions: list[dict[str, object]]
     company_snapshots: list[dict[str, object]]
+    sector_rollups: list[dict[str, object]]
     inbox_rows: list[dict[str, object]]
     digest_rows: list[dict[str, object]]
     review_rows: list[dict[str, object]]
@@ -50,6 +51,7 @@ def load_dashboard_snapshot(
             findings=_load_findings(conn, limit=finding_limit),
             revisions=_load_revision_history(conn, limit=50),
             company_snapshots=_load_company_snapshots(conn),
+            sector_rollups=_load_sector_rollups(conn),
             inbox_rows=_load_inbox_rows(conn, limit=60),
             digest_rows=[],
             review_rows=[],
@@ -72,6 +74,7 @@ def load_dashboard_snapshot(
         findings=snapshot.findings,
         revisions=snapshot.revisions,
         company_snapshots=snapshot.company_snapshots,
+        sector_rollups=snapshot.sector_rollups,
         inbox_rows=snapshot.inbox_rows,
         digest_rows=digests,
         review_rows=review.rows,
@@ -277,6 +280,26 @@ def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]
             }
         )
     return snapshots
+
+
+def _load_sector_rollups(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT sector, subsector, rollup_key, payload_json, updated_at
+        FROM sector_rollups
+        ORDER BY updated_at DESC, sector ASC, COALESCE(subsector, '') ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "sector": row["sector"],
+            "subsector": row["subsector"],
+            "rollup_key": row["rollup_key"],
+            "payload": json.loads(row["payload_json"] or "{}"),
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
 
 
 def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:

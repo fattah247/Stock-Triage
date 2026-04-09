@@ -7,6 +7,7 @@
     findings: [],
     revisions: [],
     company_snapshots: [],
+    sector_rollups: [],
     inbox_rows: [],
     digest_rows: [],
     review_rows: [],
@@ -45,6 +46,7 @@
   const revisionList = document.getElementById("revisionList");
   const snapshotList = document.getElementById("snapshotList");
   const claimsList = document.getElementById("claimsList");
+  const sectorExplorer = document.getElementById("sectorExplorer");
   const digestList = document.getElementById("digestList");
   const reviewList = document.getElementById("reviewList");
   const kpiList = document.getElementById("kpiList");
@@ -348,6 +350,17 @@
       .sort((a, b) => String(b.latest_revision_at || "").localeCompare(String(a.latest_revision_at || "")));
     const companySnapshot =
       (data.company_snapshots || []).find((item) => (selectedTicker ? item.ticker === selectedTicker : false)) || null;
+    const sectorRollup = companySnapshot
+      ? (data.sector_rollups || []).find((item) => {
+          const payload = item.payload || {};
+          const snapshotPayload = companySnapshot.payload || {};
+          return (
+            item.rollup_key === "peer_intelligence" &&
+            item.sector === (snapshotPayload.sector || selectedIssuer?.sector) &&
+            (item.subsector || "") === (snapshotPayload.subsector || selectedIssuer?.subsector || "")
+          );
+        }) || null
+      : null;
     const inboxRows = (data.inbox_rows || []).slice(0, 20);
     const digestRows = data.digest_rows || [];
     const reviewRows = data.review_rows || [];
@@ -498,6 +511,7 @@
       companyStats.innerHTML = "";
       snapshotList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Decision-state, baseline context, and v3 rationale appear here once an issuer is focused.</div>`;
       claimsList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Claim outcomes and thesis discipline are shown per issuer.</div>`;
+      sectorExplorer.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Peer ranks, comparability warnings, and sector leaders appear here per issuer.</div>`;
       documentList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Pick one issuer to review grouped filings here.</div>`;
       metricList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Metrics will appear once the workspace is focused on an issuer.</div>`;
       revisionList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Revision history is shown per issuer.</div>`;
@@ -532,6 +546,11 @@
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
         const reviewRequired = (payload.review_required || []).slice(0, 6);
+        const peerComparison = payload.peer_comparison || {};
+        const sectorContext = payload.sector_context || {};
+        const metricRanks = Object.entries(peerComparison.metric_ranks || {});
+        const peerRows = (peerComparison.peer_rows || []).slice(0, 8);
+        const leaders = sectorRollup?.payload?.metric_summaries || {};
         snapshotList.innerHTML = `
           <div class="statsGrid">
             <div class="stat"><div class="summaryLabel">Decision</div><strong>${esc(topCard.decision_state || "Watch")}</strong></div>
@@ -598,9 +617,89 @@
               : `<div class="emptyState"><strong>No thesis evaluations for this issuer.</strong></div>`
           }
         `;
+        sectorExplorer.innerHTML = `
+          <div class="statsGrid">
+            <div class="stat"><div class="summaryLabel">Peer Set</div><strong>${esc(peerComparison.peer_key || "none")}</strong></div>
+            <div class="stat"><div class="summaryLabel">Comparable Peers</div><strong>${esc(peerComparison.comparable_peer_count || 0)}</strong></div>
+            <div class="stat"><div class="summaryLabel">Peer Anomalies</div><strong>${esc((peerComparison.anomalies || []).length)}</strong></div>
+            <div class="stat"><div class="summaryLabel">Sector Red-Flag Density</div><strong>${esc(sectorContext.heatmap?.red_flag_density ?? sectorRollup?.payload?.heatmap?.red_flag_density ?? "0")}</strong></div>
+          </div>
+          ${
+            (peerComparison.comparability_warnings || []).length
+              ? `<div class="findingStack">${(peerComparison.comparability_warnings || [])
+                  .slice(0, 5)
+                  .map((item) => `<article class="findingCard sev-warning"><div class="findingClaim">Comparability warning</div><div class="meta">${esc(item)}</div></article>`)
+                  .join("")}</div>`
+              : `<div class="emptyState"><strong>No comparability warnings for this peer set.</strong></div>`
+          }
+          ${
+            metricRanks.length
+              ? `<table class="metricTable"><thead><tr><th>Metric</th><th>Rank</th><th>Peer Median</th><th>Gap %</th><th>Anomaly</th></tr></thead><tbody>${metricRanks
+                  .map(
+                    ([metricName, item]) =>
+                      `<tr><td>${esc(item.label || metricName)}</td><td>${esc(item.rank)}/${esc(item.sample_size)}</td><td>${esc(item.peer_median ?? "")}</td><td>${esc(
+                        item.relative_gap_pct != null ? Number(item.relative_gap_pct).toFixed(2) : ""
+                      )}</td><td>${esc(item.anomaly || "-")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No comparable peer metrics yet.</strong></div>`
+          }
+          ${
+            peerRows.length
+              ? `<table class="metricTable"><thead><tr><th>Peer</th><th>Revenue Growth</th><th>Op Margin</th><th>Event Density</th><th>Warnings</th></tr></thead><tbody>${peerRows
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.ticker)}<div class="meta">${esc(item.issuer_name || "")}</div></td><td>${esc(item.metrics?.revenue_growth_pct ?? "")}</td><td>${esc(
+                        item.metrics?.operating_margin_pct ?? ""
+                      )}</td><td>${esc(item.metrics?.event_density ?? "")}</td><td>${esc((item.comparability_warnings || []).join("; ") || "-")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No peer table yet.</strong></div>`
+          }
+          ${
+            Object.keys(leaders).length
+              ? `<div class="docGroups">${Object.entries(leaders)
+                  .slice(0, 3)
+                  .map(
+                    ([metricName, item]) => `
+                      <section class="docGroup">
+                        <div class="docGroupHeader">
+                          <div>
+                            <h3>${esc(item.label || metricName)}</h3>
+                            <div class="meta">Median ${esc(item.median ?? "")} · sample ${esc(item.sample_size ?? 0)}</div>
+                          </div>
+                        </div>
+                        <div class="docList">
+                          <article class="docItem">
+                            <div>
+                              <div class="docTitle">Leaders</div>
+                              <div class="meta">${(item.leaders || [])
+                                .map((leader) => `${leader.ticker} (${leader.value})`)
+                                .map(esc)
+                                .join(" · ") || "none"}</div>
+                            </div>
+                          </article>
+                          <article class="docItem">
+                            <div>
+                              <div class="docTitle">Laggards</div>
+                              <div class="meta">${(item.laggards || [])
+                                .map((laggard) => `${laggard.ticker} (${laggard.value})`)
+                                .map(esc)
+                                .join(" · ") || "none"}</div>
+                            </div>
+                          </article>
+                        </div>
+                      </section>
+                    `
+                  )
+                  .join("")}</div>`
+              : `<div class="emptyState"><strong>No sector rollup yet.</strong> Run intelligence to rebuild sector explorer inputs.</div>`
+          }
+        `;
       } else {
         snapshotList.innerHTML = `<div class="emptyState"><strong>No v3 snapshot yet.</strong> Run intelligence for this issuer to generate the decision snapshot.</div>`;
         claimsList.innerHTML = `<div class="emptyState"><strong>No claim or thesis state yet.</strong> Run intelligence after rules and summary generation.</div>`;
+        sectorExplorer.innerHTML = `<div class="emptyState"><strong>No peer or sector explorer yet.</strong> Run intelligence to populate comparative views.</div>`;
       }
       documentList.innerHTML = docs.length
         ? `<div class="docGroups">${Array.from(groupedDocs.entries())

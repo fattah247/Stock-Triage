@@ -62,6 +62,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Open Review Queue" in html
         assert "Decision Snapshot" in html
         assert "Claims and Thesis" in html
+        assert "Sector and Peer Explorer" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
@@ -83,6 +84,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "digest_rows" in snapshot
         assert "intelligence_kpis" in snapshot
         assert "company_snapshots" in snapshot
+        assert "sector_rollups" in snapshot
 
         local_path = quote(str(tmp_config.paths.data_dir / "tamu-annual-report.pdf"), safe="")
         artifact = urlopen(f"{handle.url}/artifact?path={local_path}").read()
