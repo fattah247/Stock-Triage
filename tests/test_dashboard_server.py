@@ -59,6 +59,9 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         html = urlopen(handle.url).read().decode("utf-8")
         assert "Control Panel" in html
         assert "Summary (Doc ID)" in html
+        app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
+        assert "window.__DASHBOARD_BOOTSTRAP__" in html
+        assert "function render()" in app_js
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"

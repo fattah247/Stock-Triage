@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import Config
 from ..logging_setup import get_logger
+from .assets import read_static_asset
 from .pipeline import load_dashboard_snapshot, render_dashboard_html
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -127,8 +128,13 @@ def _handler_factory():
                     snapshot_endpoint="/api/snapshot",
                     artifact_endpoint="/artifact",
                     action_history=snapshot["action_history"],
+                    static_root="/static",
                 )
                 self._write_bytes(HTTPStatus.OK, "text/html; charset=utf-8", html.encode("utf-8"), emit_body=emit_body)
+                return
+            if parsed.path.startswith("/static/"):
+                asset_name = parsed.path.removeprefix("/static/")
+                self._serve_static(asset_name, emit_body=emit_body)
                 return
             if parsed.path == "/api/snapshot":
                 self._write_json(HTTPStatus.OK, _snapshot_payload(self.server.cfg, self.server.action_history), emit_body=emit_body)
@@ -225,6 +231,18 @@ def _handler_factory():
                 return
             mime, _ = mimetypes.guess_type(str(path))
             self._write_bytes(HTTPStatus.OK, mime or "application/octet-stream", path.read_bytes(), emit_body=emit_body)
+
+        def _serve_static(self, asset_name: str, *, emit_body: bool) -> None:
+            if "/" in asset_name or not asset_name:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"}, emit_body=emit_body)
+                return
+            try:
+                payload = read_static_asset(asset_name)
+            except FileNotFoundError:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "asset_not_found"}, emit_body=emit_body)
+                return
+            mime, _ = mimetypes.guess_type(asset_name)
+            self._write_bytes(HTTPStatus.OK, mime or "application/octet-stream", payload, emit_body=emit_body)
 
         def _write_json(self, status: HTTPStatus, payload: dict[str, object], *, emit_body: bool = True) -> None:
             self._write_bytes(

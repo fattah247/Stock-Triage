@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <link rel="stylesheet" href="__STATIC_ROOT__/app.css">
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <article class="panel heroCard">
+        <div class="sectionEyebrow">Local IDX Filing Workspace</div>
+        <h1 class="heroTitle">__TITLE__</h1>
+        <p class="lead">Operate the pipeline from one place, then review each issuer in a focused company workspace instead of scanning one long flat report.</p>
+        <div class="heroBar">
+          <span class="chip">Company-first navigation</span>
+          <span class="chip">Documents grouped per issuer</span>
+          <span class="chip">Evidence-linked findings</span>
+          <a class="chip" href="__METRICS_HREF__">metrics.csv</a>
+          <a class="chip" href="__FINDINGS_HREF__">findings.csv</a>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="sectionEyebrow">System Snapshot</div>
+        <h2>What is in scope right now</h2>
+        <div class="summaryStrip">
+          <div class="summaryCard">
+            <div class="summaryLabel">Issuers</div>
+            <div id="issuerCount" class="summaryValue">__ISSUER_COUNT__</div>
+          </div>
+          <div class="summaryCard">
+            <div class="summaryLabel">Documents</div>
+            <div id="documentCount" class="summaryValue">__DOCUMENT_COUNT__</div>
+          </div>
+          <div class="summaryCard">
+            <div class="summaryLabel">Findings</div>
+            <div id="findingCount" class="summaryValue">__FINDING_COUNT__</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section id="opsShell" class="opsShell" hidden>
+      <article class="panel panelDark">
+        <div class="sectionEyebrow">Workflow</div>
+        <h2>Control Panel</h2>
+        <p class="lead">Run the common pipeline stages here instead of typing commands.</p>
+        <div class="controlGrid">
+          <button class="actionButton" data-action="discover_company" type="button">Discover Companies</button>
+          <button class="actionButton" data-action="discover_disclosure" type="button">Discover Disclosures</button>
+          <button class="actionButton" data-action="discover_financial" type="button">Discover Financials</button>
+          <button class="actionButton" data-action="download_financial" type="button">Download Financials</button>
+          <button class="actionButton" data-action="download_disclosure" type="button">Download Disclosures</button>
+          <button class="actionButton" data-action="parse" type="button">Parse</button>
+          <button class="actionButton" data-action="extract" type="button">Extract</button>
+          <button class="actionButton" data-action="rules" type="button">Run Rules</button>
+          <button class="actionButton" data-action="alerts" type="button">Alerts</button>
+          <button class="actionButton" data-action="canary" type="button">Canary</button>
+          <button class="actionButton" data-action="export" type="button">Export Snapshot</button>
+          <button class="actionButton" data-action="summary" type="button">Summary (Doc ID)</button>
+        </div>
+        <div class="controlToolbar">
+          <label>Year <input id="financialYear" type="number" min="2000" step="1"></label>
+          <label>Limit <input id="stageLimit" type="number" min="1" step="1" value="5"></label>
+          <label>Document ID <input id="summaryDocumentId" placeholder="Paste a document id or click summarize on a filing"></label>
+          <button id="refreshButton" class="ghostButton" type="button">Refresh Data</button>
+        </div>
+      </article>
+      <article class="panel panelDark">
+        <div class="sectionEyebrow">Recent Run</div>
+        <h2>Action Output</h2>
+        <div id="actionStatus" class="meta metaLight">Ready.</div>
+        <pre id="actionOutput" class="terminal">Select an action to run it from the dashboard.</pre>
+        <div id="actionHistory"></div>
+      </article>
+    </section>
+
+    <section class="workspace">
+      <aside class="sidebar">
+        <article class="panel searchBox">
+          <div class="sectionEyebrow">Navigate</div>
+          <h2>Companies</h2>
+          <input id="issuerSearch" placeholder="Search ticker, issuer, sector">
+          <div class="meta">Pick a company to focus the entire workspace.</div>
+        </article>
+        <article class="panel">
+          <div id="issuerList" class="issuerStack"></div>
+        </article>
+      </aside>
+
+      <section class="mainColumn">
+        <article class="panel focusHeader">
+          <div id="companyOverview" class="focusCard"></div>
+          <div id="companyStats" class="statsGrid"></div>
+        </article>
+
+        <section class="contentGrid">
+          <article class="panel span7">
+            <div class="sectionEyebrow">Company Filings</div>
+            <h2>Documents</h2>
+            <div id="documentList"></div>
+          </article>
+          <article class="panel span5">
+            <div class="sectionEyebrow">Signals</div>
+            <h2>Findings</h2>
+            <div id="findingList"></div>
+          </article>
+          <article class="panel span6">
+            <div class="sectionEyebrow">Normalized Facts</div>
+            <h2>Metrics</h2>
+            <div id="metricList"></div>
+          </article>
+          <article class="panel span6">
+            <div class="sectionEyebrow">Versioning</div>
+            <h2>Revision History</h2>
+            <div id="revisionList"></div>
+          </article>
+          <article class="panel span6">
+            <div class="sectionEyebrow">Pipeline Health</div>
+            <h2>Backlog</h2>
+            <div id="backlogList"></div>
+          </article>
+          <article class="panel span6">
+            <div class="sectionEyebrow">Source Health</div>
+            <h2>Canary</h2>
+            <div id="canaryList"></div>
+          </article>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    window.__DASHBOARD_BOOTSTRAP__ = __BOOTSTRAP_JSON__;
+  </script>
+  <script src="__STATIC_ROOT__/app.js"></script>
+</body>
+</html>

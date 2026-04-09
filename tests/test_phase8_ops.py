@@ -18,6 +18,8 @@ def test_export_dashboard_writes_html_and_csv(tmp_config):
     assert result.html_path.exists()
     assert result.metrics_csv_path.exists()
     assert result.findings_csv_path.exists()
+    assert (result.html_path.parent / "static" / "app.css").exists()
+    assert (result.html_path.parent / "static" / "app.js").exists()
     html = result.html_path.read_text(encoding="utf-8")
     assert "Stock Triage Dashboard" in html
     assert "TAMU" in html
