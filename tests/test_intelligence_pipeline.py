@@ -13,6 +13,7 @@ from .test_phase8_ops import _seed_phase8_data
 
 def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
 
     result = run_intelligence(tmp_config, ticker="TAMU")
 
@@ -21,9 +22,10 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     assert result.snapshots == 1
     assert result.timeseries == 3
     assert result.briefs == 1
-    assert result.review_items == 3
+    assert result.review_items == 4
     assert result.peer_sets == 1
     assert result.sector_rollups == 1
+    assert result.thesis_evaluations == 1
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
     try:
@@ -71,12 +73,17 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["latest_summary"] == "Debt refinancing remains a monitoring point."
         assert payload["baseline"]["kind"] == "revision"
         assert payload["baseline"]["document_id"] == "doc-tamu-b"
-        assert payload["top_card"]["overall_state"] == "review_required"
+        assert payload["top_card"]["overall_state"] == "critical"
         assert payload["top_card"]["leverage_state"] == "warning"
+        assert payload["top_card"]["thesis_state"] == "broken"
+        assert payload["top_card"]["decision_state"] == "Avoid Candidate"
+        assert payload["top_card"]["watchlist_priority"] == "high"
         assert "revenue increased" in payload["top_card"]["positive_factors"]
         assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
         assert payload["delta_count_by_kind"]["metric_change"] == 1
         assert payload["review_required"][0]["item_type"] == "revision_change"
+        assert payload["thesis_evaluations"][0]["status"] == "broken"
+        assert payload["thesis_evaluations"][0]["details"]["matched_stop"][0]["kind"] == "rule_present"
 
         counts = {
             table: rconn.execute(f"SELECT COUNT(*) AS cnt FROM {table}").fetchone()["cnt"]
@@ -86,14 +93,20 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
                 "review_queue_items",
                 "peer_sets",
                 "sector_rollups",
+                "thesis_definitions",
+                "thesis_conditions",
+                "thesis_evaluations",
             )
         }
         assert counts == {
             "company_timeseries": 3,
             "decision_briefs": 1,
-            "review_queue_items": 3,
+            "review_queue_items": 4,
             "peer_sets": 1,
             "sector_rollups": 1,
+            "thesis_definitions": 1,
+            "thesis_conditions": 3,
+            "thesis_evaluations": 1,
         }
     finally:
         rconn.close()
@@ -101,6 +114,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
 
 def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
     _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
 
     first = run_intelligence(tmp_config, ticker="TAMU")
     second = run_intelligence(tmp_config, ticker="TAMU")
@@ -121,6 +135,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
                 "review_queue_items",
                 "peer_sets",
                 "sector_rollups",
+                "thesis_evaluations",
             )
         }
         assert counts == {
@@ -128,9 +143,10 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
             "company_snapshots": 1,
             "company_timeseries": 3,
             "decision_briefs": 1,
-            "review_queue_items": 3,
+            "review_queue_items": 4,
             "peer_sets": 1,
             "sector_rollups": 1,
+            "thesis_evaluations": 1,
         }
     finally:
         rconn.close()
@@ -138,6 +154,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
 
 def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_intelligence",
@@ -149,8 +166,9 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "intelligence-run:" in captured
-    assert "derived_version=phase11-v1" in captured
+    assert "derived_version=phase12-v1" in captured
     assert "selected_tickers=1" in captured
+    assert "thesis_evaluations=1" in captured
 
 
 def _seed_phase10_inputs(tmp_config) -> None:
@@ -366,3 +384,43 @@ def _seed_phase10_inputs(tmp_config) -> None:
             )
 
         wq.submit(_insert)
+
+
+def _write_phase12_theses(tmp_config) -> None:
+    tmp_config.theses.definition_path.write_text(
+        json.dumps(
+            {
+                "theses": [
+                    {
+                        "thesis_id": "tamu-balance-sheet",
+                        "ticker": "TAMU",
+                        "thesis_name": "TAMU balance-sheet repair",
+                        "thesis_text": "TAMU should improve revenue while avoiding debt-stress stop rules.",
+                        "owner_scope": "watchlist",
+                        "status": "active",
+                        "review_cadence": "after_each_filing",
+                        "conditions": [
+                            {
+                                "severity": "positive",
+                                "kind": "metric_delta",
+                                "metric_name": "revenue",
+                                "operator": "gte",
+                                "value": 20,
+                            },
+                            {
+                                "severity": "warning",
+                                "kind": "event_present",
+                                "event_type": "debt_refinancing",
+                            },
+                            {
+                                "severity": "stop",
+                                "kind": "rule_present",
+                                "rule_name": "debt_surge",
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )

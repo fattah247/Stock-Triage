@@ -40,6 +40,9 @@ def tmp_config(tmp_path: Path):
             "min_chars_per_page": 50,
             "languages": "eng",
         },
+        "theses": {
+            "definition_path": str(tmp_path / "data" / "theses.yaml"),
+        },
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(raw))

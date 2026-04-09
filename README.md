@@ -12,8 +12,9 @@ source-data and model licensing.
 ## Status
 
 **Phase 9 — Exchange-scale hardening** (done). On the active v3 branch,
-**Phase 10 — derived intelligence foundation** and **Phase 11 — change
-detection and snapshot assembly** are implemented.
+**Phase 10 — derived intelligence foundation**, **Phase 11 — change
+detection and snapshot assembly**, and **Phase 12 — thesis engine and alert
+upgrades** are implemented.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -34,6 +35,7 @@ V3 preview on this branch:
 |-------|-------------|--------|
 | 10 | Derived intelligence foundation | done |
 | 11 | Change detection and snapshot assembly | done |
+| 12 | Thesis engine and alert upgrades | done |
 
 ## Layout
 
@@ -121,7 +123,8 @@ python -m stock_triage summary-validate <document_id> --input-file /tmp/output.j
 python -m stock_triage summary-generate <document_id>
 
 # Build the v3-derived layer: revision-aware deltas, current snapshots,
-# health-state explanations, review items, peer sets, and sector rollups.
+# health-state explanations, thesis evaluations, review items, peer sets,
+# and sector rollups.
 python -m stock_triage intelligence-run --limit 25
 
 # Render the local dashboard plus CSV exports
@@ -220,6 +223,36 @@ Defaults live in `config/default.yaml`. Override either by:
   explanation, persists review items for revised filings, and builds company
   timeseries, peer sets, sector rollups, and decision briefs through
   `python -m stock_triage intelligence-run ...`.
+- **V3 Phase 12 thesis engine.** `python -m stock_triage intelligence-run ...`
+  now also syncs local thesis definitions from `data/theses.yaml`, persists
+  `thesis_definitions`, `thesis_conditions`, and `thesis_evaluations`, updates
+  snapshot decision state and watchlist priority, and upgrades alerts so broken,
+  weakening, or improving theses can surface as evidence-backed local signals.
+
+Example local thesis file (`data/theses.yaml`):
+
+```yaml
+theses:
+  - thesis_id: tamu-balance-sheet
+    ticker: TAMU
+    thesis_name: TAMU balance-sheet repair
+    thesis_text: TAMU should improve revenue while avoiding debt-stress stop rules.
+    owner_scope: watchlist
+    status: active
+    review_cadence: after_each_filing
+    conditions:
+      - severity: positive
+        kind: metric_delta
+        metric_name: revenue
+        operator: gte
+        value: 20
+      - severity: warning
+        kind: event_present
+        event_type: debt_refinancing
+      - severity: stop
+        kind: rule_present
+        rule_name: debt_surge
+```
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

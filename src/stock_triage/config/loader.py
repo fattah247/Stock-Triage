@@ -121,6 +121,16 @@ class CanaryConfig(BaseModel):
     tickers: list[str] = Field(default_factory=list)
 
 
+class ThesesConfig(BaseModel):
+    definition_path: Path = REPO_ROOT / "data" / "theses.yaml"
+
+    @field_validator("definition_path", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
 class Config(BaseModel):
     paths: PathsConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -133,6 +143,7 @@ class Config(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
+    theses: ThesesConfig = Field(default_factory=ThesesConfig)
 
     def ensure_dirs(self) -> None:
         for p in (
@@ -145,6 +156,7 @@ class Config(BaseModel):
             self.browser.artifacts_dir,
             self.dashboard.output_dir,
             self.alerts.jsonl_path.parent,
+            self.theses.definition_path.parent,
         ):
             p.mkdir(parents=True, exist_ok=True)
 

@@ -26,6 +26,8 @@ class AlertSignal:
     local_path: str | None
     original_url: str | None
     updated_at: str
+    suggested_next_action: str | None = None
+    details: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,9 @@ def _load_signals(
             rr.rationale AS claim,
             d.local_path,
             d.original_url,
-            rr.evaluated_at AS updated_at
+            rr.evaluated_at AS updated_at,
+            'review now' AS suggested_next_action,
+            NULL AS details_json
         FROM rule_runs rr
         JOIN documents d ON d.document_id = rr.document_id
         WHERE rr.triggered = 1
@@ -113,14 +117,46 @@ def _load_signals(
             ev.rationale AS claim,
             d.local_path,
             d.original_url,
-            ev.detected_at AS updated_at
+            ev.detected_at AS updated_at,
+            'review now' AS suggested_next_action,
+            NULL AS details_json
         FROM events ev
         JOIN documents d ON d.document_id = ev.document_id
         WHERE d.ticker IS NOT NULL
           AND ev.detected_at >= ?
+        UNION ALL
+        SELECT
+            d.document_id,
+            d.source_name,
+            te.ticker,
+            'thesis' AS signal_kind,
+            td.thesis_name AS signal_name,
+            CASE te.status
+                WHEN 'broken' THEN 'critical'
+                WHEN 'improving' THEN 'warning'
+                WHEN 'weakening' THEN 'warning'
+                ELSE 'info'
+            END AS severity,
+            te.rationale AS claim,
+            d.local_path,
+            d.original_url,
+            te.evaluated_at AS updated_at,
+            CASE te.status
+                WHEN 'broken' THEN 'review now'
+                WHEN 'improving' THEN 'monitor thesis'
+                WHEN 'weakening' THEN 'review thesis'
+                ELSE 'monitor'
+            END AS suggested_next_action,
+            te.payload_json AS details_json
+        FROM thesis_evaluations te
+        JOIN thesis_definitions td ON td.thesis_id = te.thesis_id
+        LEFT JOIN documents d ON d.document_id = te.document_id
+        WHERE te.ticker IS NOT NULL
+          AND te.evaluated_at >= ?
+          AND te.status IN ('broken', 'improving', 'weakening')
         ORDER BY updated_at DESC
         """,
-        (since, since),
+        (since, since, since),
     ).fetchall()
     signals: list[AlertSignal] = []
     for row in rows:
@@ -141,6 +177,8 @@ def _load_signals(
                 local_path=row["local_path"],
                 original_url=row["original_url"],
                 updated_at=row["updated_at"],
+                suggested_next_action=row["suggested_next_action"],
+                details=json.loads(row["details_json"]) if row["details_json"] else None,
             )
         )
     return signals
@@ -158,6 +196,8 @@ def _signal_payload(signal: AlertSignal) -> dict[str, object]:
         "local_path": signal.local_path,
         "original_url": signal.original_url,
         "updated_at": signal.updated_at,
+        "suggested_next_action": signal.suggested_next_action,
+        "details": signal.details or {},
     }
 
 

@@ -8,6 +8,7 @@ from stock_triage.alerts import run_alerts
 from stock_triage.canary import load_canary_status, run_canary
 from stock_triage.dashboard import export_dashboard
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
+from stock_triage.intelligence import run_intelligence
 
 
 def test_export_dashboard_writes_html_and_csv(tmp_config):
@@ -50,6 +51,63 @@ def test_run_alerts_persists_and_dedupes_watchlist_signals(tmp_config):
         assert row["cnt"] == 2
     finally:
         rconn.close()
+
+
+def test_run_alerts_includes_broken_thesis_signals(tmp_config):
+    _seed_phase8_data(tmp_config)
+    tmp_config.alerts.watchlist = ["TAMU"]
+    tmp_config.alerts.jsonl_path = tmp_config.paths.data_dir / "alerts" / "alerts.jsonl"
+    tmp_config.theses.definition_path.write_text(
+        json.dumps(
+            {
+                "theses": [
+                    {
+                        "thesis_id": "tamu-alert-thesis",
+                        "ticker": "TAMU",
+                        "thesis_name": "TAMU debt cleanup",
+                        "thesis_text": "No debt stress should remain active.",
+                        "conditions": [
+                            {
+                                "severity": "stop",
+                                "kind": "rule_present",
+                                "rule_name": "debt_surge",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+
+        def _bump_latest(conn):
+            later = datetime.now(timezone.utc).isoformat()
+            earlier = "2025-01-01T00:00:00+00:00"
+            conn.execute(
+                "UPDATE documents SET source_modified_at = ?, updated_at = ?, created_at = ? WHERE document_id = 'doc-tamu-a'",
+                (later, later, later),
+            )
+            conn.execute(
+                "UPDATE documents SET source_modified_at = ?, updated_at = ?, created_at = ? WHERE document_id = 'doc-tamu-b'",
+                (earlier, earlier, earlier),
+            )
+
+        wq.submit(_bump_latest)
+
+    run_intelligence(tmp_config, ticker="TAMU")
+    result = run_alerts(tmp_config)
+
+    assert result.selected == 3
+    assert result.emitted == 3
+
+    lines = [json.loads(line) for line in tmp_config.alerts.jsonl_path.read_text(encoding="utf-8").strip().splitlines()]
+    thesis_payload = next(line for line in lines if line["signal_kind"] == "thesis")
+    assert thesis_payload["signal_name"] == "TAMU debt cleanup"
+    assert thesis_payload["severity"] == "critical"
+    assert thesis_payload["suggested_next_action"] == "review now"
+    assert thesis_payload["details"]["matched_stop"][0]["kind"] == "rule_present"
 
 
 def test_run_canary_persists_and_detects_drift(tmp_config, monkeypatch):

@@ -67,3 +67,6 @@ alerts:
 canary:
   sources: []
   tickers: []
+
+theses:
+  definition_path: "data/theses.yaml"

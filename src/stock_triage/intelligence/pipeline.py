@@ -11,8 +11,16 @@ from typing import Any
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from .thesis import (
+    LocalThesisCondition,
+    LocalThesisDefinition,
+    ThesisEvaluationRecord,
+    load_db_theses,
+    load_local_theses,
+    sync_local_theses,
+)
 
-DERIVED_VERSION = "phase11-v1"
+DERIVED_VERSION = "phase12-v1"
 
 
 @dataclass(frozen=True)
@@ -165,6 +173,7 @@ class CompanyIntelligenceBundle:
     timeseries: list[TimeseriesPoint]
     triggered_rules: list[TriggeredRule]
     events: list[EventSignal]
+    thesis_evaluations: list[ThesisEvaluationRecord]
     snapshot_payload_json: str
     brief_payload_json: str
     review_items: list[ReviewQueueItem]
@@ -182,6 +191,7 @@ class IntelligenceRunResult:
     review_items: int = 0
     peer_sets: int = 0
     sector_rollups: int = 0
+    thesis_evaluations: int = 0
 
 
 def run_intelligence(
@@ -195,6 +205,8 @@ def run_intelligence(
     result = IntelligenceRunResult()
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
+        local_theses = load_local_theses(cfg.theses.definition_path)
+        wq.submit(lambda conn, theses=local_theses: sync_local_theses(conn, theses=theses))
         reader = connect(cfg.paths.db_path, read_only=True)
         try:
             configure_pragmas(reader, cfg)
@@ -214,6 +226,7 @@ def run_intelligence(
                     review_items=result.review_items + counts["review_items"],
                     peer_sets=result.peer_sets + counts["peer_sets"],
                     sector_rollups=result.sector_rollups + counts["sector_rollups"],
+                    thesis_evaluations=result.thesis_evaluations + counts["thesis_evaluations"],
                 )
         finally:
             reader.close()
@@ -259,6 +272,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     previous_rules = _load_triggered_rules(conn, baseline.document.document_id) if baseline is not None else []
     latest_analysis = _load_latest_analysis(conn, latest_document.document_id)
     previous_analysis = _load_latest_analysis(conn, baseline.document.document_id) if baseline is not None else None
+    theses = load_db_theses(conn, ticker=ticker)
     deltas = _build_deltas(
         ticker=ticker,
         baseline=baseline,
@@ -279,6 +293,21 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         baseline=baseline,
         deltas=deltas,
     )
+    thesis_evaluations = _evaluate_theses(
+        theses=theses,
+        ticker=ticker,
+        latest_document=latest_document,
+        baseline=baseline,
+        deltas=deltas,
+        events=latest_events,
+        triggered_rules=latest_rules,
+        review_items=conflict_items,
+    )
+    thesis_items = _build_thesis_review_items(
+        ticker=ticker,
+        document_id=latest_document.document_id,
+        evaluations=thesis_evaluations,
+    )
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
@@ -288,7 +317,8 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
-        conflicts=conflict_items,
+        conflicts=conflict_items + thesis_items,
+        thesis_evaluations=thesis_evaluations,
     )
     brief_payload_json = _build_brief_payload_json(
         ticker=ticker,
@@ -297,6 +327,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         events=latest_events,
         triggered_rules=latest_rules,
         baseline=baseline,
+        thesis_evaluations=thesis_evaluations,
     )
     review_items = _build_review_items(
         ticker=ticker,
@@ -305,6 +336,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         triggered_rules=latest_rules,
     )
     review_items.extend(conflict_items)
+    review_items.extend(thesis_items)
     peer_set = _build_peer_set(conn, profile)
     sector_rollup = _build_sector_rollup(conn, profile)
     return CompanyIntelligenceBundle(
@@ -316,6 +348,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         timeseries=timeseries,
         triggered_rules=latest_rules,
         events=latest_events,
+        thesis_evaluations=thesis_evaluations,
         snapshot_payload_json=snapshot_payload_json,
         brief_payload_json=brief_payload_json,
         review_items=review_items,
@@ -929,6 +962,7 @@ def _build_snapshot_payload_json(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     conflicts: list[ReviewQueueItem],
+    thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> str:
     health = _build_health_state(
         baseline=baseline,
@@ -936,6 +970,7 @@ def _build_snapshot_payload_json(
         events=events,
         triggered_rules=triggered_rules,
         conflicts=conflicts,
+        thesis_evaluations=thesis_evaluations,
     )
     delta_counts: dict[str, int] = {}
     for delta in deltas:
@@ -977,6 +1012,16 @@ def _build_snapshot_payload_json(
         "top_card": health,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
+        "thesis_evaluations": [
+            {
+                "thesis_id": evaluation.thesis_id,
+                "status": evaluation.status,
+                "score": evaluation.score,
+                "rationale": evaluation.rationale,
+                "details": json.loads(evaluation.payload_json),
+            }
+            for evaluation in thesis_evaluations
+        ],
         "delta_count_by_kind": delta_counts,
         "metrics": [
             {
@@ -1041,6 +1086,7 @@ def _build_brief_payload_json(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     baseline: BaselineChoice | None,
+    thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> str:
     headline = latest_analysis.summary if latest_analysis and latest_analysis.summary else "No local summary available yet."
     payload = {
@@ -1051,6 +1097,7 @@ def _build_brief_payload_json(
         "open_risks": [rule.rule_name for rule in triggered_rules[:5]],
         "recent_events": [event.event_type for event in events[:5]],
         "verify_next": latest_analysis.what_to_verify[:5] if latest_analysis else [],
+        "thesis_statuses": [evaluation.status for evaluation in thesis_evaluations],
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -1154,6 +1201,7 @@ def _build_health_state(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     conflicts: list[ReviewQueueItem],
+    thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> dict[str, Any]:
     reasons: list[str] = []
     overall_state = "stable"
@@ -1180,6 +1228,16 @@ def _build_health_state(
         overall_state = "review_required"
         confidence = "medium" if confidence == "high" else confidence
         reasons.append("A revised filing changed tracked metrics and should be reviewed.")
+
+    thesis_statuses = {evaluation.status for evaluation in thesis_evaluations}
+    if "broken" in thesis_statuses:
+        overall_state = "critical"
+        reasons.append("At least one configured thesis is broken.")
+    elif overall_state not in {"critical", "review_required"} and "weakening" in thesis_statuses:
+        overall_state = "watch"
+        reasons.append("At least one configured thesis is weakening.")
+    elif overall_state == "stable" and "improving" in thesis_statuses:
+        reasons.append("A configured thesis is improving.")
 
     if any(rule.severity == "critical" for rule in triggered_rules) or any((event.severity or "") == "critical" for event in events):
         overall_state = "critical"
@@ -1223,10 +1281,231 @@ def _build_health_state(
         "confidence": confidence,
         "leverage_state": leverage_state,
         "disclosure_quality": disclosure_quality,
+        "thesis_state": _aggregate_thesis_state(thesis_evaluations),
+        "decision_state": _decision_state_for(thesis_evaluations, overall_state, confidence),
+        "watchlist_priority": _watchlist_priority_for(thesis_evaluations, overall_state, conflicts),
         "positive_factors": positive_factors[:5],
         "negative_factors": negative_factors[:5],
         "reasons": reasons[:8],
     }
+
+
+def _evaluate_theses(
+    *,
+    theses: list[LocalThesisDefinition],
+    ticker: str,
+    latest_document: CompanyDocument,
+    baseline: BaselineChoice | None,
+    deltas: list[DeltaRecord],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    review_items: list[ReviewQueueItem],
+) -> list[ThesisEvaluationRecord]:
+    evaluations: list[ThesisEvaluationRecord] = []
+    for thesis in theses:
+        matched_positive: list[dict[str, Any]] = []
+        matched_warning: list[dict[str, Any]] = []
+        matched_stop: list[dict[str, Any]] = []
+        unsupported: list[dict[str, Any]] = []
+        for condition in thesis.conditions:
+            matched = _match_condition(
+                condition,
+                baseline=baseline,
+                deltas=deltas,
+                events=events,
+                triggered_rules=triggered_rules,
+                review_items=review_items,
+            )
+            record = {
+                "severity": condition.severity,
+                "kind": condition.kind,
+                "payload": condition.payload,
+            }
+            if matched is None:
+                unsupported.append(record)
+            elif matched:
+                if condition.severity == "positive":
+                    matched_positive.append(record)
+                elif condition.severity == "stop":
+                    matched_stop.append(record)
+                else:
+                    matched_warning.append(record)
+        status, score, rationale = _status_for_thesis(
+            matched_positive=matched_positive,
+            matched_warning=matched_warning,
+            matched_stop=matched_stop,
+            unsupported=unsupported,
+        )
+        payload = {
+            "ticker": ticker,
+            "baseline_kind": baseline.kind if baseline is not None else "none",
+            "matched_positive": matched_positive,
+            "matched_warning": matched_warning,
+            "matched_stop": matched_stop,
+            "unsupported": unsupported,
+            "review_cadence": thesis.review_cadence,
+            "notes": thesis.notes,
+        }
+        evaluations.append(
+            ThesisEvaluationRecord(
+                thesis_evaluation_id=_stable_id("thesis-eval", thesis.thesis_id, ticker, latest_document.document_id, DERIVED_VERSION),
+                thesis_id=thesis.thesis_id,
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                status=status,
+                score=score,
+                rationale=rationale,
+                payload_json=json.dumps(payload, sort_keys=True),
+            )
+        )
+    return evaluations
+
+
+def _match_condition(
+    condition: LocalThesisCondition,
+    *,
+    baseline: BaselineChoice | None,
+    deltas: list[DeltaRecord],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    review_items: list[ReviewQueueItem],
+) -> bool | None:
+    kind = condition.kind
+    payload = condition.payload
+    if kind == "metric_delta":
+        metric_name = payload.get("metric_name")
+        operator = payload.get("operator") or "gte"
+        threshold = float(payload.get("value", 0))
+        metric_deltas = [
+            delta for delta in deltas
+            if delta.delta_kind == "metric_change" and delta.metric_name == metric_name and delta.percent_change is not None
+        ]
+        if not metric_deltas or baseline is None:
+            return None
+        value = metric_deltas[0].percent_change or 0.0
+        return _compare_numeric(value, operator, threshold)
+    if kind == "rule_present":
+        rule_name = payload.get("rule_name")
+        return any(rule.rule_name == rule_name for rule in triggered_rules)
+    if kind == "rule_absent":
+        rule_name = payload.get("rule_name")
+        return not any(rule.rule_name == rule_name for rule in triggered_rules)
+    if kind == "event_present":
+        event_type = payload.get("event_type")
+        return any(event.event_type == event_type for event in events)
+    if kind == "event_absent":
+        event_type = payload.get("event_type")
+        return not any(event.event_type == event_type for event in events)
+    if kind == "review_item_present":
+        item_type = payload.get("item_type")
+        return any(item.item_type == item_type for item in review_items)
+    return None
+
+
+def _status_for_thesis(
+    *,
+    matched_positive: list[dict[str, Any]],
+    matched_warning: list[dict[str, Any]],
+    matched_stop: list[dict[str, Any]],
+    unsupported: list[dict[str, Any]],
+) -> tuple[str, float, str]:
+    if matched_stop:
+        return "broken", 0.0, "One or more stop-rule conditions were triggered."
+    if matched_warning:
+        return "weakening", 0.35, "Warning conditions are active against the thesis."
+    if matched_positive:
+        return "improving", 0.8, "Positive thesis conditions are currently satisfied."
+    if unsupported and not (matched_positive or matched_warning or matched_stop):
+        return "unsupported", 0.2, "The thesis cannot be fully evaluated from current derived inputs."
+    return "intact", 0.6, "No warning or stop conditions are currently active."
+
+
+def _build_thesis_review_items(
+    *,
+    ticker: str,
+    document_id: str,
+    evaluations: list[ThesisEvaluationRecord],
+) -> list[ReviewQueueItem]:
+    items: list[ReviewQueueItem] = []
+    for evaluation in evaluations:
+        if evaluation.status not in {"broken", "weakening"}:
+            continue
+        items.append(
+            ReviewQueueItem(
+                review_item_id=_stable_id("review", "thesis", evaluation.thesis_id, document_id, DERIVED_VERSION),
+                item_type="thesis_broken" if evaluation.status == "broken" else "thesis_warning",
+                ticker=ticker,
+                document_id=document_id,
+                source_key=evaluation.thesis_id,
+                priority="high" if evaluation.status == "broken" else "medium",
+                rationale=evaluation.rationale,
+                payload_json=evaluation.payload_json,
+            )
+        )
+    return items
+
+
+def _aggregate_thesis_state(evaluations: list[ThesisEvaluationRecord]) -> str:
+    statuses = {evaluation.status for evaluation in evaluations}
+    if not statuses:
+        return "none"
+    if "broken" in statuses:
+        return "broken"
+    if "weakening" in statuses:
+        return "weakening"
+    if "improving" in statuses:
+        return "improving"
+    if "unsupported" in statuses:
+        return "unsupported"
+    return "intact"
+
+
+def _decision_state_for(
+    thesis_evaluations: list[ThesisEvaluationRecord],
+    overall_state: str,
+    confidence: str,
+) -> str:
+    thesis_state = _aggregate_thesis_state(thesis_evaluations)
+    if thesis_state == "broken":
+        return "Avoid Candidate"
+    if overall_state in {"critical", "review_required"}:
+        return "Review"
+    if thesis_state == "improving" and confidence != "low":
+        return "Buy Candidate"
+    if thesis_state in {"weakening", "unsupported"}:
+        return "Watch"
+    if confidence == "low":
+        return "Insufficient Signal"
+    return "Watch"
+
+
+def _watchlist_priority_for(
+    thesis_evaluations: list[ThesisEvaluationRecord],
+    overall_state: str,
+    conflicts: list[ReviewQueueItem],
+) -> str:
+    thesis_state = _aggregate_thesis_state(thesis_evaluations)
+    if thesis_state == "broken" or overall_state == "critical":
+        return "high"
+    if conflicts or thesis_state == "weakening" or overall_state == "review_required":
+        return "medium"
+    if thesis_state == "improving":
+        return "medium"
+    return "low"
+
+
+def _compare_numeric(value: float, operator: str, threshold: float) -> bool:
+    if operator == "gt":
+        return value > threshold
+    if operator == "gte":
+        return value >= threshold
+    if operator == "lt":
+        return value < threshold
+    if operator == "lte":
+        return value <= threshold
+    if operator == "eq":
+        return value == threshold
+    return False
 
 
 def _build_peer_set(conn: sqlite3.Connection, profile: CompanyProfile) -> PeerSetRecord:
@@ -1390,6 +1669,28 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             ),
         )
 
+    for evaluation in bundle.thesis_evaluations:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO thesis_evaluations (
+                thesis_evaluation_id, thesis_id, ticker, document_id, status, score, rationale,
+                payload_json, derived_version, evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evaluation.thesis_evaluation_id,
+                evaluation.thesis_id,
+                evaluation.ticker,
+                evaluation.document_id,
+                evaluation.status,
+                evaluation.score,
+                evaluation.rationale,
+                evaluation.payload_json,
+                DERIVED_VERSION,
+                now,
+            ),
+        )
+
     conn.execute(
         """
         INSERT INTO decision_briefs (
@@ -1505,6 +1806,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "review_items": len(bundle.review_items),
         "peer_sets": 1,
         "sector_rollups": 1,
+        "thesis_evaluations": len(bundle.thesis_evaluations),
     }
 
 
