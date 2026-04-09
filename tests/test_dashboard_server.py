@@ -57,10 +57,12 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Control Panel" in html
         assert "Run Daily Sweep" in html
         assert "Advanced actions" in html
+        assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
         assert "function render()" in app_js
         assert "daily_sweep" in app_js
+        assert "renderTimestamp" in app_js
         assert "re-parse" in app_js
         assert "re-extract" in app_js
         assert "run rules" in app_js
@@ -91,6 +93,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
 
         snapshot_after = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot_after["action_history"][0]["action"] == "download_financial"
+        assert snapshot_after["action_history"][0]["params"]["limit"] == "3"
         assert snapshot_after["action_history"][0]["duration_ms"] >= 0
         assert calls == [("download_financial", {"action": "download_financial", "limit": "3"})]
     finally:

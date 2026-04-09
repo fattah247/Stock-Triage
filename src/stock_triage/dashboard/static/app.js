@@ -22,6 +22,8 @@
     queueName: null,
     queueIndex: 0,
     queueTotal: 0,
+    highlightedKeys: { inbox: new Map(), documents: new Map(), findings: new Map() },
+    lastFailedHistory: null,
   };
 
   const actionEndpoint = bootstrap.actionEndpoint || null;
@@ -42,6 +44,12 @@
   const actionStatus = document.getElementById("actionStatus");
   const actionOutput = document.getElementById("actionOutput");
   const actionHistory = document.getElementById("actionHistory");
+  const actionErrorPanel = document.getElementById("actionErrorPanel");
+  const actionErrorTitle = document.getElementById("actionErrorTitle");
+  const actionErrorSummary = document.getElementById("actionErrorSummary");
+  const actionErrorDetails = document.getElementById("actionErrorDetails");
+  const copyCommandButton = document.getElementById("copyCommandButton");
+  const retryActionButton = document.getElementById("retryActionButton");
   const yearInput = document.getElementById("financialYear");
   const limitInput = document.getElementById("stageLimit");
   const refreshButton = document.getElementById("refreshButton");
@@ -93,6 +101,88 @@
     return actionLabels[action] || String(action || "").replaceAll("_", " ");
   }
 
+  function absoluteTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZoneName: "short",
+    }).format(date);
+  }
+
+  function relativeTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const diffMs = date.getTime() - Date.now();
+    const diffSeconds = Math.round(diffMs / 1000);
+    const ranges = [
+      { unit: "day", seconds: 86400 },
+      { unit: "hour", seconds: 3600 },
+      { unit: "minute", seconds: 60 },
+      { unit: "second", seconds: 1 },
+    ];
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    for (const range of ranges) {
+      if (Math.abs(diffSeconds) >= range.seconds || range.unit === "second") {
+        return formatter.format(Math.round(diffSeconds / range.seconds), range.unit);
+      }
+    }
+    return absoluteTime(value);
+  }
+
+  function renderTimestamp(value) {
+    if (!value) return "";
+    return `<span class="timeLabel" title="${esc(absoluteTime(value))}">${esc(relativeTime(value))}</span>`;
+  }
+
+  function updateHighlights(previous, next) {
+    if (!previous) return;
+    const now = Date.now();
+    const groups = [
+      ["inbox", previous.inbox_rows || [], next.inbox_rows || [], inboxKey],
+      ["documents", previous.documents || [], next.documents || [], documentKey],
+      ["findings", previous.findings || [], next.findings || [], findingKey],
+    ];
+    groups.forEach(([name, prevRows, nextRows, keyFn]) => {
+      const prevKeys = new Set(prevRows.map(keyFn));
+      const bucket = state.highlightedKeys[name];
+      nextRows.forEach((item) => {
+        const key = keyFn(item);
+        if (!prevKeys.has(key)) {
+          bucket.set(key, now + 12000);
+        }
+      });
+      for (const [key, expiresAt] of bucket.entries()) {
+        if (expiresAt <= now) bucket.delete(key);
+      }
+    });
+  }
+
+  function hasHighlight(group, key) {
+    const expiresAt = state.highlightedKeys[group]?.get(key);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+      state.highlightedKeys[group].delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  function inboxKey(item) {
+    return [item.kind, item.document_id || "", item.ticker || "", item.happened_at || "", item.title || ""].join("|");
+  }
+
+  function documentKey(item) {
+    return String(item.document_id || `${item.source_name || ""}|${item.source_record_id || ""}`);
+  }
+
+  function findingKey(item) {
+    return [item.document_id || "", item.finding_type || "", item.name || "", item.claim || "", item.finished_at || ""].join("|");
+  }
+
   function normalizeSeverity(value, fallback = "info") {
     const level = String(value || "").toLowerCase();
     if (["critical", "warning", "info", "ok"].includes(level)) return level;
@@ -141,26 +231,49 @@
     if (lastActivity) {
       const firstInbox = (data.inbox_rows || [])[0];
       lastActivity.textContent = firstInbox
-        ? `${firstInbox.kind} · ${firstInbox.ticker || firstInbox.source_name || "system"} · ${firstInbox.happened_at || ""}`
+        ? `${firstInbox.kind} · ${firstInbox.ticker || firstInbox.source_name || "system"} · ${relativeTime(firstInbox.happened_at)}`
         : "No recent inbox activity";
+      if (firstInbox?.happened_at) {
+        lastActivity.title = absoluteTime(firstInbox.happened_at);
+      }
     }
   }
 
   function renderHistory() {
     if (!actionHistory) return;
     const rows = (data.action_history || []).slice(0, 10);
+    state.lastFailedHistory = rows.find((item) => item.ok === false) || null;
     actionHistory.innerHTML = rows.length
       ? rows
           .map(
             (item) =>
-              `<div class="historyItem"><div><strong>${esc(item.action)}</strong> <span class="meta">${esc(
+              `<div class="historyItem ${item.ok === false ? "failed" : ""}"><div><strong>${esc(actionLabel(item.action))}</strong> <span class="meta">${renderTimestamp(
                 item.timestamp
               )}</span></div><div class="meta">${esc((item.command || []).join(" "))}</div><div class="meta">exit=${esc(
                 item.returncode
-              )}</div></div>`
+              )}${item.duration_ms ? ` · ${esc(Math.max(1, Math.round(item.duration_ms / 1000)))}s` : ""}</div></div>`
           )
           .join("")
       : `<div class="meta">No action has been run from this dashboard yet.</div>`;
+    renderActionError();
+  }
+
+  function renderActionError() {
+    if (!actionErrorPanel || !actionErrorTitle || !actionErrorSummary || !actionErrorDetails) return;
+    const item = state.lastFailedHistory;
+    if (!item) {
+      actionErrorPanel.hidden = true;
+      return;
+    }
+    const stderrLines = String(item.stderr || "").trim().split("\n").filter(Boolean);
+    const stdoutLines = String(item.stdout || "").trim().split("\n").filter(Boolean);
+    const detailLines = (stderrLines.length ? stderrLines : stdoutLines).slice(-20);
+    actionErrorTitle.textContent = `${actionLabel(item.action)} failed`;
+    actionErrorSummary.innerHTML = `${renderTimestamp(item.timestamp)} · exit ${esc(item.returncode)} · ${esc(
+      (item.command || []).join(" ")
+    )}`;
+    actionErrorDetails.textContent = detailLines.join("\n") || "No stderr was captured for this failure.";
+    actionErrorPanel.hidden = false;
   }
 
   function setActionButtonsDisabled(disabled) {
@@ -246,7 +359,7 @@
         ? inboxRows
             .map(
               (item) => `
-                <article class="inboxItem">
+                <article class="inboxItem ${hasHighlight("inbox", inboxKey(item)) ? "freshRow" : ""}">
                   <div class="inboxKind sev-${esc(item.severity || "info")}">${esc(item.kind || "update")}</div>
                   <div>
                     <div class="inboxTitle">${esc(item.title || item.kind || "Update")}</div>
@@ -259,7 +372,7 @@
                             ? `<span class="chip">${esc(item.source_name)}</span>`
                             : ""
                       }
-                      ${item.happened_at ? `<span class="chip">${esc(item.happened_at)}</span>` : ""}
+                      ${item.happened_at ? `<span class="chip">${renderTimestamp(item.happened_at)}</span>` : ""}
                     </div>
                   </div>
                   <div class="inboxActions">
@@ -299,8 +412,8 @@
         )} is the active focus. Documents are grouped below by source so you can move from recent inbox activity into a single issuer without re-scanning the rest of the market.</div>
         <div class="heroBar">
           <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
-          <span class="chip">Last seen ${esc(selectedIssuer.last_seen_at || "")}</span>
-          <span class="chip">Latest filing ${esc(selectedIssuer.latest_document_at || "")}</span>
+          <span class="chip">Last seen ${renderTimestamp(selectedIssuer.last_seen_at || "")}</span>
+          <span class="chip">Latest filing ${renderTimestamp(selectedIssuer.latest_document_at || "")}</span>
         </div>
       `;
       companyStats.innerHTML = `
@@ -325,12 +438,12 @@
                   <div class="docList">${items
                     .map(
                       (item) => `
-                        <article class="docItem">
+                        <article class="docItem ${hasHighlight("documents", documentKey(item)) ? "freshRow" : ""}">
                           <div>
                             <div class="docTitle">${esc(item.document_type || "document")}<span class="meta"> · ${esc(
                         item.source_record_id || ""
                       )}</span></div>
-                            <div class="meta">${esc(item.updated_at || item.retrieved_at || "")}</div>
+                            <div class="meta">${renderTimestamp(item.updated_at || item.retrieved_at || "")}</div>
                             <div class="tagRow">
                               <span class="tag">${esc(item.process_state || "unknown")}</span>
                               <span class="tag">${esc(item.triggered_rules || 0)} rules</span>
@@ -402,7 +515,7 @@
         ? `<table class="metricTable"><thead><tr><th>Source Record</th><th>Revisions</th><th>Latest</th></tr></thead><tbody>${revisions
             .map(
               (item) =>
-                `<tr><td>${esc(item.source_record_id)}</td><td>${esc(item.revision_count)}</td><td>${esc(
+                `<tr><td>${esc(item.source_record_id)}</td><td>${esc(item.revision_count)}</td><td>${renderTimestamp(
                   item.latest_revision_at
                 )}</td></tr>`
             )
@@ -413,10 +526,11 @@
             .slice(0, 80)
             .map(
               (item) => `
-                <article class="findingCard sev-${findingSeverity(item)}">
+                <article class="findingCard sev-${findingSeverity(item)} ${hasHighlight("findings", findingKey(item)) ? "freshRow" : ""}">
                   <div><span class="severity sev-${findingSeverity(item)}">${esc(item.finding_type)}:${esc(item.name)}</span></div>
                   <div class="findingClaim">${esc(item.claim)}</div>
                   <div class="meta">${esc(item.summary)}</div>
+                  <div class="meta">${renderTimestamp(item.finished_at)}</div>
                   <div class="meta">${esc(item.evidence)}</div>
                   <div class="heroBar">
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">attachment</a>` : ""}
@@ -445,7 +559,7 @@
             const level = item.status === "failed" ? "critical" : item.drifted ? "warning" : "ok";
             return `<tr><td>${esc(item.source_name)}</td><td><span class="statusPill sev-${level}">${esc(
               item.status
-            )}</span></td><td>${esc(item.accessible)}</td><td>${esc(item.drifted)}</td><td>${esc(item.finished_at)}</td></tr>`;
+            )}</span></td><td>${esc(item.accessible)}</td><td>${esc(item.drifted)}</td><td>${renderTimestamp(item.finished_at)}</td></tr>`;
           })
           .join("")}</tbody></table>`
       : `<div class="emptyState"><strong>No canary checks yet.</strong> Run canary from the control panel when you want a fresh source-health readout.</div>`;
@@ -458,7 +572,9 @@
     if (!response.ok) {
       throw new Error(`Snapshot refresh failed: ${response.status}`);
     }
-    data = await response.json();
+    const nextData = await response.json();
+    updateHighlights(data, nextData);
+    data = nextData;
     render();
   }
 
@@ -483,6 +599,9 @@
     state.queueTotal = state.queuedActions.length;
     if (actionOutput) {
       actionOutput.textContent = "Starting daily sweep.\n";
+    }
+    if (actionErrorPanel) {
+      actionErrorPanel.hidden = true;
     }
     stopPolling();
     setActionButtonsDisabled(true);
@@ -527,6 +646,9 @@
     }
     if (actionOutput && !options.preserveOutput) {
       actionOutput.textContent = "";
+    }
+    if (actionErrorPanel) {
+      actionErrorPanel.hidden = true;
     }
     if (actionOutput && options.preserveOutput) {
       actionOutput.textContent += `\n== ${actionLabel(action)} ==\n`;
@@ -680,6 +802,29 @@
         if (actionStatus) actionStatus.textContent = error.message;
       })
     );
+  }
+
+  if (copyCommandButton) {
+    copyCommandButton.addEventListener("click", async () => {
+      const item = state.lastFailedHistory;
+      if (!item) return;
+      try {
+        await navigator.clipboard.writeText((item.command || []).join(" "));
+        if (actionStatus) actionStatus.textContent = "Copied failing command.";
+      } catch {
+        if (actionStatus) actionStatus.textContent = "Clipboard copy failed.";
+      }
+    });
+  }
+
+  if (retryActionButton) {
+    retryActionButton.addEventListener("click", () => {
+      const item = state.lastFailedHistory;
+      if (!item) return;
+      runAction(item.action, item.params || {}).catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+    });
   }
 
   document.querySelectorAll(".actionButton").forEach((button) => {

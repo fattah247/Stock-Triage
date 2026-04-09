@@ -310,6 +310,22 @@ input {
   background: rgba(255, 255, 255, 0.72);
 }
 
+.freshRow {
+  animation: freshPulse 2.6s ease-out;
+  box-shadow: 0 0 0 2px rgba(15, 118, 96, 0.16);
+}
+
+@keyframes freshPulse {
+  0% {
+    background: rgba(15, 118, 96, 0.16);
+    transform: translateY(-1px);
+  }
+  100% {
+    background: rgba(255, 255, 255, 0.72);
+    transform: translateY(0);
+  }
+}
+
 .inboxKind {
   min-width: 90px;
   padding: 6px 10px;
@@ -368,6 +384,11 @@ input {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.timeLabel {
+  text-decoration: dotted underline;
+  text-underline-offset: 3px;
 }
 
 .inboxActions {
@@ -633,6 +654,38 @@ input {
   padding: 16px;
   display: grid;
   gap: 14px;
+}
+
+.actionError {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(160, 53, 45, 0.35);
+  background: rgba(160, 53, 45, 0.12);
+}
+
+.actionErrorHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.actionErrorButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.terminalCompact {
+  min-height: 0;
+  max-height: 220px;
+}
+
+.historyItem.failed {
+  border-left: 3px solid rgba(160, 53, 45, 0.7);
+  padding-left: 10px;
 }
 
 .controlGrid {

@@ -90,6 +90,17 @@
           <div class="sectionEyebrow">Recent Run</div>
           <h2>Action Output</h2>
           <div id="actionStatus" class="meta metaLight">Ready.</div>
+          <div id="actionErrorPanel" class="actionError" hidden>
+            <div class="actionErrorHeader">
+              <strong id="actionErrorTitle">Action failed</strong>
+              <div class="actionErrorButtons">
+                <button id="copyCommandButton" class="ghostButton miniButton" type="button">Copy command</button>
+                <button id="retryActionButton" class="ghostButton miniButton" type="button">Retry</button>
+              </div>
+            </div>
+            <div id="actionErrorSummary" class="meta metaLight"></div>
+            <pre id="actionErrorDetails" class="terminal terminalCompact"></pre>
+          </div>
           <pre id="actionOutput" class="terminal">Run the daily sweep or pick a specific action from the advanced list.</pre>
           <div id="actionHistory"></div>
         </article>

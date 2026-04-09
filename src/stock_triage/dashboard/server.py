@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 @dataclass(frozen=True)
 class DashboardActionResult:
     action: str
+    params: dict[str, str]
     command: list[str]
     returncode: int
     stdout: str
@@ -106,6 +107,7 @@ class DashboardJobState:
     def to_history_entry(self) -> dict[str, object]:
         return DashboardActionResult(
             action=self.action,
+            params=dict(self.params),
             command=list(self.command),
             returncode=self.returncode or 0,
             stdout="".join(self.stdout_lines),
