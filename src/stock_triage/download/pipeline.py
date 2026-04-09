@@ -60,6 +60,17 @@ class DownloadPersistResult:
 
 
 @dataclass(frozen=True)
+class DownloadAttemptPersist:
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    http_status: int | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    document_id: str | None = None
+
+
+@dataclass(frozen=True)
 class DownloadRunResult:
     selected: int = 0
     fetched: int = 0
@@ -194,9 +205,19 @@ def run_downloads(
 
             for candidate in candidates:
                 existing = _latest_download(reader, candidate)
+                started_at = datetime.now(timezone.utc)
                 try:
                     fetched = downloader.fetch(candidate, existing=existing)
                 except Exception as exc:  # noqa: BLE001 - surfaced in summary/logs
+                    finished_at = datetime.now(timezone.utc)
+                    failure = _attempt_from_exception(exc, started_at=started_at, finished_at=finished_at)
+                    wq.submit(
+                        lambda conn, c=candidate, a=failure: _persist_download_attempt(
+                            conn,
+                            candidate=c,
+                            attempt=a,
+                        )
+                    )
                     result = _replace_result(result, failed=result.failed + 1)
                     log.warning(
                         "download failed",
@@ -211,11 +232,34 @@ def run_downloads(
                     continue
 
                 if fetched is None:
+                    finished_at = datetime.now(timezone.utc)
+                    wq.submit(
+                        lambda conn, c=candidate, a=DownloadAttemptPersist(
+                            status="not_modified",
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            document_id=existing.document_id if existing is not None else None,
+                        ): _persist_download_attempt(conn, candidate=c, attempt=a)
+                    )
                     result = _replace_result(result, not_modified=result.not_modified + 1)
                     continue
 
                 persist = wq.submit(
                     lambda conn, c=candidate, f=fetched: _persist_download(conn, candidate=c, fetched=f)
+                )
+                finished_at = datetime.now(timezone.utc)
+                attempt_status = "downloaded" if persist.inserted else "duplicate"
+                http_status = None
+                if fetched.original_url.startswith("http"):
+                    http_status = 200
+                wq.submit(
+                    lambda conn, c=candidate, a=DownloadAttemptPersist(
+                        status=attempt_status,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        http_status=http_status,
+                        document_id=persist.document_id,
+                    ): _persist_download_attempt(conn, candidate=c, attempt=a)
                 )
                 result = _replace_result(result, fetched=result.fetched + 1)
                 if persist.inserted:
@@ -391,6 +435,39 @@ def _persist_download(
     return DownloadPersistResult(inserted=True, document_id=document_id)
 
 
+def _persist_download_attempt(
+    conn: sqlite3.Connection,
+    *,
+    candidate: DownloadCandidate,
+    attempt: DownloadAttemptPersist,
+) -> None:
+    attempt_id = _stable_id(
+        f"download-attempt:{candidate.candidate_id}:{attempt.started_at.isoformat()}:{attempt.status}"
+    )
+    conn.execute(
+        """
+        INSERT INTO download_attempts (
+            attempt_id, candidate_id, source_name, source_record_id, attachment_url,
+            status, http_status, error_code, error_detail, document_id, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            attempt_id,
+            candidate.candidate_id,
+            candidate.source_name,
+            candidate.source_record_id,
+            candidate.attachment_url,
+            attempt.status,
+            attempt.http_status,
+            attempt.error_code,
+            attempt.error_detail,
+            attempt.document_id,
+            attempt.started_at.isoformat(),
+            attempt.finished_at.isoformat(),
+        ),
+    )
+
+
 def _document_type(candidate: DownloadCandidate) -> str:
     if candidate.source_name == "idx_financial_reports":
         if candidate.raw_metadata.get("report_type") == "rda":
@@ -417,6 +494,25 @@ def _validate_download_bytes(*, body: bytes, mime_type: str | None, filename: st
     expected_pdf = normalized_mime == "application/pdf" or (filename or url).lower().endswith(".pdf")
     if expected_pdf and not body.startswith(b"%PDF-"):
         raise ValueError(f"Expected PDF bytes from {url}, but received non-PDF content")
+
+
+def _attempt_from_exception(exc: Exception, *, started_at: datetime, finished_at: datetime) -> DownloadAttemptPersist:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return DownloadAttemptPersist(
+            status="failed",
+            started_at=started_at,
+            finished_at=finished_at,
+            http_status=exc.response.status_code,
+            error_code=f"http_{exc.response.status_code}",
+            error_detail=str(exc),
+        )
+    return DownloadAttemptPersist(
+        status="failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        error_code=type(exc).__name__,
+        error_detail=str(exc),
+    )
 
 
 def _stable_id(value: str) -> str:

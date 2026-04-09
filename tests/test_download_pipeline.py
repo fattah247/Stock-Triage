@@ -70,6 +70,18 @@ def test_run_downloads_persists_documents_and_version_groups(tmp_config):
         assert version is not None
         assert version["source_name"] == "idx_disclosures"
         assert version["source_record_id"] == "disc-1"
+        attempt = rconn.execute(
+            """
+            SELECT status, document_id
+            FROM download_attempts
+            WHERE candidate_id = 'idx_disclosures:disc-1'
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert attempt is not None
+        assert attempt["status"] == "downloaded"
+        assert attempt["document_id"] is not None
     finally:
         rconn.close()
 
@@ -267,6 +279,55 @@ def test_run_downloads_include_existing_reconsiders_prior_documents(tmp_config):
             """
         ).fetchone()
         assert row["n"] == 2
+    finally:
+        rconn.close()
+
+
+def test_run_downloads_persists_failed_attempts(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-fail",
+        ticker="BRMS",
+        title="Advertisement Submission",
+        attachment_url="https://example.test/disclosures/disc-fail.pdf",
+        attachment_filename="disc-fail.pdf",
+        raw_metadata={"filename": "disc-fail.pdf"},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(404, request=request)
+        )
+    )
+    try:
+        result = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=client)
+    finally:
+        client.close()
+
+    assert result.failed == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        attempt = rconn.execute(
+            """
+            SELECT status, http_status, error_code, document_id
+            FROM download_attempts
+            WHERE candidate_id = 'idx_disclosures:disc-fail'
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert attempt is not None
+        assert attempt["status"] == "failed"
+        assert attempt["http_status"] == 404
+        assert attempt["error_code"] == "http_404"
+        assert attempt["document_id"] is None
     finally:
         rconn.close()
 
