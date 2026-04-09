@@ -53,6 +53,7 @@ def export_dashboard(
             metrics=snapshot.metrics,
             findings=snapshot.findings,
             revisions=snapshot.revisions,
+            inbox_rows=snapshot.inbox_rows,
             backlog_rows=snapshot.backlog_rows,
             canary_rows=snapshot.canary_rows,
             metrics_href=metrics_csv_path.name,

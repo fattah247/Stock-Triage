@@ -24,6 +24,7 @@ def test_export_dashboard_writes_html_and_csv(tmp_config):
     assert "Stock Triage Dashboard" in html
     assert "TAMU" in html
     assert "Debt refinancing remains a monitoring point." in html
+    assert "What changed recently" in html
 
 
 def test_run_alerts_persists_and_dedupes_watchlist_signals(tmp_config):

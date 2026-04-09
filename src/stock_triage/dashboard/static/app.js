@@ -6,6 +6,7 @@
     metrics: [],
     findings: [],
     revisions: [],
+    inbox_rows: [],
     backlog_rows: [],
     canary_rows: [],
     action_history: [],
@@ -33,6 +34,7 @@
   const revisionList = document.getElementById("revisionList");
   const backlogList = document.getElementById("backlogList");
   const canaryList = document.getElementById("canaryList");
+  const inboxList = document.getElementById("inboxList");
   const actionStatus = document.getElementById("actionStatus");
   const actionOutput = document.getElementById("actionOutput");
   const actionHistory = document.getElementById("actionHistory");
@@ -43,6 +45,8 @@
   const issuerCount = document.getElementById("issuerCount");
   const documentCount = document.getElementById("documentCount");
   const findingCount = document.getElementById("findingCount");
+  const canaryStatus = document.getElementById("canaryStatus");
+  const lastActivity = document.getElementById("lastActivity");
   const actionButtons = Array.from(document.querySelectorAll(".actionButton"));
 
   if (opsShell && actionEndpoint && snapshotEndpoint) {
@@ -86,6 +90,18 @@
     if (issuerCount) issuerCount.textContent = String(data.issuers.length);
     if (documentCount) documentCount.textContent = String(data.documents.length);
     if (findingCount) findingCount.textContent = String(data.findings.length);
+    if (canaryStatus) {
+      const failed = (data.canary_rows || []).filter((item) => item.status === "failed").length;
+      const drifted = (data.canary_rows || []).filter((item) => item.drifted).length;
+      canaryStatus.textContent = failed ? `${failed} failed` : drifted ? `${drifted} drifted` : "ok";
+      canaryStatus.className = failed ? "sev-critical" : drifted ? "sev-warning" : "sev-ok";
+    }
+    if (lastActivity) {
+      const firstInbox = (data.inbox_rows || [])[0];
+      lastActivity.textContent = firstInbox
+        ? `${firstInbox.kind} · ${firstInbox.ticker || firstInbox.source_name || "system"} · ${firstInbox.happened_at || ""}`
+        : "No recent inbox activity";
+    }
   }
 
   function renderHistory() {
@@ -156,22 +172,24 @@
     const revisions = data.revisions
       .filter((item) => (selectedTicker ? item.ticker === selectedTicker : false))
       .sort((a, b) => String(b.latest_revision_at || "").localeCompare(String(a.latest_revision_at || "")));
+    const inboxRows = (data.inbox_rows || []).slice(0, 20);
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
 
     issuerList.innerHTML = issuers.length
       ? issuers
-          .slice(0, 120)
           .map(
             (item) => `
               <button class="issuerCard ${item.ticker === state.selectedTicker ? "active" : ""}" type="button" data-ticker="${esc(
                 item.ticker
               )}">
-                <div class="issuerTicker">${esc(item.ticker)}</div>
+                <div class="issuerLine">
+                  <div class="issuerTicker">${esc(item.ticker)}</div>
+                  <div class="issuerCountBadge">${esc(item.document_count || 0)}</div>
+                </div>
                 <div class="issuerName">${esc(item.issuer_name)}</div>
                 <div class="issuerMeta">
                   <span>${esc(item.sector || "unknown")}</span>
-                  <span>${esc(item.document_count || 0)} docs</span>
                   <span>${esc(item.latest_document_at || item.last_seen_at || "")}</span>
                 </div>
               </button>
@@ -180,9 +198,47 @@
           .join("")
       : `<div class="emptyState">No issuer matches this search.</div>`;
 
+    if (inboxList) {
+      inboxList.className = "inboxList";
+      inboxList.innerHTML = inboxRows.length
+        ? inboxRows
+            .map(
+              (item) => `
+                <article class="inboxItem">
+                  <div class="inboxKind sev-${esc(item.severity || "info")}">${esc(item.kind || "update")}</div>
+                  <div>
+                    <div class="inboxTitle">${esc(item.title || item.kind || "Update")}</div>
+                    <div class="inboxSummary">${esc(item.summary || "")}</div>
+                    <div class="inboxMeta">
+                      ${
+                        item.ticker
+                          ? `<span class="chip">${esc(item.ticker)}</span>`
+                          : item.source_name
+                            ? `<span class="chip">${esc(item.source_name)}</span>`
+                            : ""
+                      }
+                      ${item.happened_at ? `<span class="chip">${esc(item.happened_at)}</span>` : ""}
+                    </div>
+                  </div>
+                  <div class="inboxActions">
+                    ${
+                      item.ticker
+                        ? `<button class="ghostButton miniButton" type="button" data-focus-ticker="${esc(item.ticker)}">focus issuer</button>`
+                        : ""
+                    }
+                    ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">open file</a>` : ""}
+                    ${item.original_url ? `<a class="chip" href="${esc(item.original_url)}">origin</a>` : ""}
+                  </div>
+                </article>
+              `
+            )
+            .join("")
+        : `<div class="emptyState">No recent cross-issuer activity yet. Run discovery or process a few documents to populate this inbox.</div>`;
+    }
+
     if (!selectedIssuer) {
       companyOverview.innerHTML =
-        `<div class="emptyState">Select a company from the left rail to view grouped documents, metrics, and findings.</div>`;
+        `<div class="emptyState">Select a company from the left rail or use the inbox above to focus the workspace on an issuer with recent activity.</div>`;
       companyStats.innerHTML = "";
       documentList.innerHTML = `<div class="emptyState">No documents to show.</div>`;
       metricList.innerHTML = `<div class="emptyState">No metrics to show.</div>`;
@@ -198,7 +254,7 @@
         <h2 class="focusTitle">${esc(selectedIssuer.issuer_name)}</h2>
         <div class="focusSubtitle">${esc(
           selectedIssuer.ticker
-        )} is the active focus. Everything below is scoped to this issuer so you do not need to mentally regroup flat rows.</div>
+        )} is the active focus. Documents are grouped below by source so you can move from recent inbox activity into a single issuer without re-scanning the rest of the market.</div>
         <div class="heroBar">
           <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
           <span class="chip">Last seen ${esc(selectedIssuer.last_seen_at || "")}</span>
@@ -504,6 +560,14 @@
     if (issuerTarget) {
       state.selectedTicker = issuerTarget.dataset.ticker || null;
       render();
+      return;
+    }
+
+    const focusTarget = event.target.closest("[data-focus-ticker]");
+    if (focusTarget) {
+      state.selectedTicker = focusTarget.dataset.focusTicker || null;
+      render();
+      companyOverview?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
 

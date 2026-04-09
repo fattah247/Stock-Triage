@@ -19,6 +19,7 @@ class DashboardSnapshot:
     metrics: list[dict[str, object]]
     findings: list[dict[str, object]]
     revisions: list[dict[str, object]]
+    inbox_rows: list[dict[str, object]]
     backlog_rows: list[dict[str, object]]
     canary_rows: list[dict[str, object]]
 
@@ -43,6 +44,7 @@ def load_dashboard_snapshot(
             metrics=_load_metric_snapshot(conn),
             findings=_load_findings(conn, limit=finding_limit),
             revisions=_load_revision_history(conn, limit=50),
+            inbox_rows=_load_inbox_rows(conn, limit=60),
             backlog_rows=[],
             canary_rows=[],
         )
@@ -57,6 +59,7 @@ def load_dashboard_snapshot(
         metrics=snapshot.metrics,
         findings=snapshot.findings,
         revisions=snapshot.revisions,
+        inbox_rows=snapshot.inbox_rows,
         backlog_rows=[row.__dict__ for row in backlog.rows],
         canary_rows=[row.__dict__ for row in canary.rows],
     )
@@ -234,6 +237,215 @@ def _load_revision_history(conn: sqlite3.Connection, *, limit: int) -> list[dict
         (limit,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+
+    document_rows = conn.execute(
+        """
+        SELECT
+            d.updated_at AS happened_at,
+            d.ticker,
+            d.document_id,
+            d.source_name,
+            d.document_type,
+            d.process_state,
+            d.local_path,
+            d.original_url
+        FROM documents d
+        ORDER BY d.updated_at DESC, d.document_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in document_rows:
+        rows.append(
+            {
+                "kind": "document",
+                "happened_at": row["happened_at"],
+                "ticker": row["ticker"],
+                "document_id": row["document_id"],
+                "source_name": row["source_name"],
+                "severity": "ok",
+                "title": f"{row['ticker'] or 'Unknown'} {row['document_type'] or 'document'}",
+                "summary": f"{row['source_name']} is now {row['process_state']}.",
+                "local_path": row["local_path"],
+                "original_url": row["original_url"],
+            }
+        )
+
+    rule_rows = conn.execute(
+        """
+        SELECT
+            rr.evaluated_at AS happened_at,
+            rr.ticker,
+            rr.document_id,
+            rr.rule_name,
+            rr.severity,
+            rr.rationale,
+            d.local_path,
+            d.original_url
+        FROM rule_runs rr
+        JOIN documents d ON d.document_id = rr.document_id
+        WHERE rr.triggered = 1
+        ORDER BY rr.evaluated_at DESC, rr.rule_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in rule_rows:
+        rows.append(
+            {
+                "kind": "rule",
+                "happened_at": row["happened_at"],
+                "ticker": row["ticker"],
+                "document_id": row["document_id"],
+                "source_name": "rule_runs",
+                "severity": row["severity"] or "warning",
+                "title": row["rule_name"],
+                "summary": row["rationale"] or "Rule triggered.",
+                "local_path": row["local_path"],
+                "original_url": row["original_url"],
+            }
+        )
+
+    analysis_rows = conn.execute(
+        """
+        SELECT
+            ar.finished_at AS happened_at,
+            d.ticker,
+            ar.document_id,
+            d.local_path,
+            d.original_url,
+            ar.output_json
+        FROM analysis_runs ar
+        JOIN documents d ON d.document_id = ar.document_id
+        ORDER BY ar.finished_at DESC, ar.analysis_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in analysis_rows:
+        payload = json.loads(row["output_json"])
+        rows.append(
+            {
+                "kind": "summary",
+                "happened_at": row["happened_at"],
+                "ticker": row["ticker"],
+                "document_id": row["document_id"],
+                "source_name": "analysis_runs",
+                "severity": "info",
+                "title": "Summary generated",
+                "summary": payload.get("summary", ""),
+                "local_path": row["local_path"],
+                "original_url": row["original_url"],
+            }
+        )
+
+    event_rows = conn.execute(
+        """
+        SELECT
+            e.detected_at AS happened_at,
+            e.ticker,
+            e.document_id,
+            e.event_type,
+            e.severity,
+            e.rationale,
+            d.local_path,
+            d.original_url
+        FROM events e
+        JOIN documents d ON d.document_id = e.document_id
+        ORDER BY e.detected_at DESC, e.event_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in event_rows:
+        rows.append(
+            {
+                "kind": "event",
+                "happened_at": row["happened_at"],
+                "ticker": row["ticker"],
+                "document_id": row["document_id"],
+                "source_name": "events",
+                "severity": row["severity"] or "info",
+                "title": row["event_type"],
+                "summary": row["rationale"] or row["event_type"],
+                "local_path": row["local_path"],
+                "original_url": row["original_url"],
+            }
+        )
+
+    alert_rows = conn.execute(
+        """
+        SELECT
+            ae.created_at AS happened_at,
+            ae.ticker,
+            ae.document_id,
+            ae.signal_name,
+            ae.severity,
+            d.local_path,
+            d.original_url
+        FROM alert_events ae
+        JOIN documents d ON d.document_id = ae.document_id
+        ORDER BY ae.created_at DESC, ae.alert_event_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in alert_rows:
+        rows.append(
+            {
+                "kind": "alert",
+                "happened_at": row["happened_at"],
+                "ticker": row["ticker"],
+                "document_id": row["document_id"],
+                "source_name": "alert_events",
+                "severity": row["severity"] or "warning",
+                "title": row["signal_name"],
+                "summary": "Watchlist alert emitted.",
+                "local_path": row["local_path"],
+                "original_url": row["original_url"],
+            }
+        )
+
+    canary_rows = conn.execute(
+        """
+        SELECT
+            finished_at AS happened_at,
+            source_name,
+            status,
+            accessible,
+            drifted
+        FROM canary_runs
+        ORDER BY finished_at DESC, canary_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    for row in canary_rows:
+        severity = "critical" if row["status"] == "failed" else "warning" if row["drifted"] else "ok"
+        rows.append(
+            {
+                "kind": "canary",
+                "happened_at": row["happened_at"],
+                "ticker": None,
+                "document_id": None,
+                "source_name": row["source_name"],
+                "severity": severity,
+                "title": f"{row['source_name']} canary",
+                "summary": f"status={row['status']} accessible={row['accessible']} drifted={row['drifted']}",
+                "local_path": None,
+                "original_url": None,
+            }
+        )
+
+    def _sort_key(item: dict[str, object]) -> tuple[str, str]:
+        return (str(item.get("happened_at") or ""), str(item.get("title") or ""))
+
+    rows.sort(key=_sort_key, reverse=True)
+    return rows[:limit]
 
 
 def _evidence_preview(span_ids: list[str], evidence_map: dict[str, dict[str, object]]) -> str:
