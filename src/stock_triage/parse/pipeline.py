@@ -40,6 +40,7 @@ class ParsedPage:
 class ChunkRecord:
     chunk_id: str
     document_id: str
+    section_label: str | None
     page_start: int
     page_end: int
     char_start: int
@@ -239,45 +240,88 @@ def _ocr_page_text(cfg: Config, page: fitz.Page) -> str:
 def _build_chunks(document_id: str, pages: list[ParsedPage]) -> list[ChunkRecord]:
     chunks: list[ChunkRecord] = []
     ord_value = 0
+    current_section: str | None = None
     for page in pages:
         if not _visible_text(page.text):
             continue
-        start = 0
-        while start < len(page.text):
-            end = min(start + CHUNK_TARGET_CHARS, len(page.text))
-            if end < len(page.text):
-                split = max(
-                    page.text.rfind("\n\n", start, end),
-                    page.text.rfind("\n", start, end),
-                    page.text.rfind(" ", start, end),
-                )
-                if split > start:
-                    end = split
-            chunk_text = page.text[start:end].strip()
-            if not chunk_text:
-                start = end + 1
+        for start, end, block_text in _page_blocks(page.text):
+            heading = _section_heading(block_text)
+            if heading is not None:
+                current_section = heading
                 continue
-            char_start = page.text.find(chunk_text, start, end + len(chunk_text))
-            char_end = char_start + len(chunk_text)
-            chunks.append(
-                ChunkRecord(
-                    chunk_id=_stable_id(
-                        f"chunk:{document_id}:{page.page_number}:{ord_value}:{char_start}:{char_end}"
-                    ),
-                    document_id=document_id,
-                    page_start=page.page_number,
-                    page_end=page.page_number,
-                    char_start=char_start,
-                    char_end=char_end,
-                    text=chunk_text,
-                    ord=ord_value,
+
+            relative_start = 0
+            while relative_start < len(block_text):
+                relative_end = min(relative_start + CHUNK_TARGET_CHARS, len(block_text))
+                if relative_end < len(block_text):
+                    split = max(
+                        block_text.rfind("\n\n", relative_start, relative_end),
+                        block_text.rfind("\n", relative_start, relative_end),
+                        block_text.rfind(" ", relative_start, relative_end),
+                    )
+                    if split > relative_start:
+                        relative_end = split
+                chunk_text = block_text[relative_start:relative_end].strip()
+                if not chunk_text:
+                    relative_start = relative_end + 1
+                    continue
+                char_start = start + block_text.find(chunk_text, relative_start, relative_end + len(chunk_text))
+                char_end = char_start + len(chunk_text)
+                chunks.append(
+                    ChunkRecord(
+                        chunk_id=_stable_id(
+                            f"chunk:{document_id}:{page.page_number}:{ord_value}:{char_start}:{char_end}"
+                        ),
+                        document_id=document_id,
+                        section_label=current_section,
+                        page_start=page.page_number,
+                        page_end=page.page_number,
+                        char_start=char_start,
+                        char_end=char_end,
+                        text=chunk_text,
+                        ord=ord_value,
+                    )
                 )
-            )
-            ord_value += 1
-            start = char_end
-            while start < len(page.text) and page.text[start].isspace():
-                start += 1
+                ord_value += 1
+                relative_start = block_text.find(chunk_text, relative_start, relative_end + len(chunk_text)) + len(chunk_text)
+                while relative_start < len(block_text) and block_text[relative_start].isspace():
+                    relative_start += 1
     return chunks
+
+
+def _page_blocks(text: str) -> list[tuple[int, int, str]]:
+    blocks: list[tuple[int, int, str]] = []
+    cursor = 0
+    for raw_block in re.split(r"\n{2,}", text):
+        block = raw_block.strip()
+        if not block:
+            cursor += len(raw_block) + 2
+            continue
+        start = text.find(block, cursor)
+        end = start + len(block)
+        blocks.append((start, end, block))
+        cursor = end
+    return blocks
+
+
+def _section_heading(block_text: str) -> str | None:
+    lines = [line.strip() for line in block_text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    line = lines[0]
+    if len(line) > 120 or line.endswith("."):
+        return None
+    words = re.findall(r"[A-Za-z][A-Za-z/&-]*", line)
+    if len(words) < 2 or len(words) > 12:
+        return None
+    letters = [ch for ch in line if ch.isalpha()]
+    if not letters:
+        return None
+    uppercase_ratio = sum(ch.isupper() for ch in letters) / len(letters)
+    titlecase_ratio = sum(word[:1].isupper() for word in words) / len(words)
+    if uppercase_ratio >= 0.75 or titlecase_ratio >= 0.75:
+        return line
+    return None
 
 
 def _persist_parse_success(
@@ -300,7 +344,7 @@ def _persist_parse_success(
             (
                 chunk.chunk_id,
                 chunk.document_id,
-                None,
+                chunk.section_label,
                 chunk.page_start,
                 chunk.page_end,
                 chunk.char_start,

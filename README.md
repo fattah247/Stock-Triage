@@ -119,7 +119,8 @@ Defaults live in `config/default.yaml`. Override either by:
   reconsidered with `--include-quarantined`.
 - **Phase 4 bootstrap.** Parse now supports native PDF text extraction,
   threshold-based OCR fallback routing, page-aware chunk persistence into
-  `document_chunks`, and document-level parse state updates via
+  `document_chunks`, section-label heuristics for heading blocks, and
+  document-level parse state updates via
   `python -m stock_triage parse ...`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB

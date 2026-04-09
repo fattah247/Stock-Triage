@@ -196,6 +196,44 @@ def test_run_parse_tolerates_blank_ocr_pages_when_other_pages_have_text(tmp_conf
         rconn.close()
 
 
+def test_run_parse_persists_section_labels_from_heading_blocks(tmp_config):
+    document_id = _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="sections-1",
+        pdf_bytes=_pdf_bytes_with_pages(
+            [
+                "MANAGEMENT DISCUSSION AND ANALYSIS\n\nRevenue increased materially in 2025 and margins expanded.\n\nRISK FACTORS\n\nLiquidity pressure remains a key risk to monitor.",
+            ]
+        ),
+    )
+
+    result = run_parse(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    assert result.selected == 1
+    assert result.parsed == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        rows = rconn.execute(
+            """
+            SELECT section_label, text
+            FROM document_chunks
+            WHERE document_id = ?
+            ORDER BY ord
+            """,
+            (document_id,),
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["section_label"] == "MANAGEMENT DISCUSSION AND ANALYSIS"
+        assert "Revenue increased materially" in rows[0]["text"]
+        assert rows[1]["section_label"] == "RISK FACTORS"
+        assert "Liquidity pressure remains" in rows[1]["text"]
+    finally:
+        rconn.close()
+
+
 def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
