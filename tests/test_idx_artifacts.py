@@ -13,6 +13,7 @@ from stock_triage.sources.adapters import (
     IDXFinancialReportAdapter,
 )
 from stock_triage.sources.idx_artifacts import (
+    parse_company_profile_rows,
     parse_company_profiles_html,
     parse_disclosure_html,
     parse_financial_report_json,
@@ -23,7 +24,7 @@ def test_parse_company_profiles_html_extracts_candidates():
     html = """
     <script>
     window.__NUXT__={fetch:{"data-v-ac7150ac:0":{tableData:{data:[
-      {KodeEmiten:"AADI",NamaEmiten:"PT Adaro Andalan Indonesia Tbk",TanggalPencatatan:"2024-12-05T00:00:00",Website:"www.adaroindonesia.com",Email:"corsec@adaroindonesia.com",Telepon:"(021) 2553 3065"},
+      {KodeEmiten:"AADI",NamaEmiten:"PT Adaro Andalan Indonesia Tbk",TanggalPencatatan:"2024-12-05T00:00:00",Website:"www.adaroindonesia.com",Email:"corsec@adaroindonesia.com",Telepon:"(021) 2553 3065",Fax:"(021) 2553 3066",Alamat:"Cyber 2 Tower Lantai 26\\nJakarta",KegiatanUsahaUtama:"Coal mining and holding",NPWP:"02.433.115.9-091.000",Logo:"\\u002FPortals\\u002F0\\u002FStaticData\\u002FListedCompanies\\u002FLogoEmiten\\u002FAADI.jpg"},
       {KodeEmiten:"BBCA",NamaEmiten:"PT Bank Central Asia Tbk.",TanggalPencatatan:"2000-05-31T00:00:00",Website:"www.bca.co.id",Email:"investor_relations@bca.co.id",Telepon:"021-23588000"}
     ]}}}
     </script>
@@ -32,6 +33,53 @@ def test_parse_company_profiles_html_extracts_candidates():
     assert [c.ticker for c in candidates] == ["AADI", "BBCA"]
     assert candidates[0].source_class is SourceClass.COMPANY_UNIVERSE
     assert candidates[1].raw_metadata["website"] == "www.bca.co.id"
+    assert candidates[0].raw_metadata["address"] == "Cyber 2 Tower Lantai 26\nJakarta"
+    assert candidates[0].raw_metadata["fax"] == "(021) 2553 3066"
+    assert candidates[0].raw_metadata["npwp"] == "02.433.115.9-091.000"
+    assert candidates[0].raw_metadata["business_activity"] == "Coal mining and holding"
+    assert candidates[0].raw_metadata["logo_url"] == "https://www.idx.co.id/Portals/0/StaticData/ListedCompanies/LogoEmiten/AADI.jpg"
+
+
+def test_parse_company_profile_rows_extracts_enriched_candidates():
+    candidates = parse_company_profile_rows(
+        [
+            {
+                "KodeEmiten": "AADI",
+                "NamaEmiten": "PT Adaro Andalan Indonesia Tbk",
+                "TanggalPencatatan": "2024-12-05T00:00:00",
+                "Website": "www.adaroindonesia.com",
+                "Email": "corsec@adaroindonesia.com",
+                "Telepon": "(021) 2553 3065",
+                "Fax": "(021) 2553 3066",
+                "Alamat": "Cyber 2 Tower Lantai 26\nJakarta",
+                "BAE": "PT. Datindo Entrycom",
+                "Industri": "Batu Bara",
+                "SubIndustri": "Produksi Batu Bara",
+                "Sektor": "Energi",
+                "SubSektor": "Minyak, Gas & Batu Bara",
+                "KegiatanUsahaUtama": "Coal mining and holding",
+                "NPWP": "02.433.115.9-091.000",
+                "NPKP": "01.111.222.3-444.000",
+                "PapanPencatatan": "Utama",
+                "Logo": "/Portals/0/StaticData/ListedCompanies/LogoEmiten/AADI.jpg",
+                "Status": 0,
+                "EfekEmiten_Saham": True,
+                "EfekEmiten_Obligasi": False,
+                "EfekEmiten_ETF": False,
+                "EfekEmiten_EBA": False,
+                "EfekEmiten_SPEI": False,
+            }
+        ]
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.ticker == "AADI"
+    assert candidate.raw_metadata["share_registrar"] == "PT. Datindo Entrycom"
+    assert candidate.raw_metadata["industry"] == "Batu Bara"
+    assert candidate.raw_metadata["listing_board"] == "Utama"
+    assert candidate.raw_metadata["listed_instruments"] == ["stock"]
+    assert candidate.raw_metadata["status_code"] == 0
 
 
 def test_parse_disclosure_html_extracts_candidates():
@@ -69,6 +117,57 @@ def test_idx_company_universe_adapter_reads_artifact(tmp_path):
     candidates = list(adapter.discover(DiscoveryWindow()))
     assert len(candidates) == 1
     assert candidates[0].ticker == "AADI"
+
+
+def test_idx_company_universe_adapter_reads_live_rows(tmp_path, monkeypatch):
+    class FakePage:
+        def evaluate(self, script):
+            del script
+            return [
+                {
+                    "KodeEmiten": "AADI",
+                    "NamaEmiten": "PT Adaro Andalan Indonesia Tbk",
+                    "TanggalPencatatan": "2024-12-05T00:00:00",
+                    "Website": "www.adaroindonesia.com",
+                    "Email": "corsec@adaroindonesia.com",
+                    "Telepon": "(021) 2553 3065",
+                    "Alamat": "Cyber 2 Tower Lantai 26\nJakarta",
+                    "Sektor": "Energi",
+                    "PapanPencatatan": "Utama",
+                }
+            ]
+
+        def content(self):
+            raise AssertionError("content() should not be used when live rows are available")
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            self.page = FakePage()
+
+        @contextmanager
+        def open_page(self, *, page_url):
+            assert page_url == IDXCompanyUniverseAdapter.public_url
+            yield self.page
+
+    fake_config = SimpleNamespace(
+        browser=SimpleNamespace(
+            profile_dir=tmp_path / "profile",
+            artifacts_dir=tmp_path / "artifacts",
+            headless=True,
+            challenge_timeout_s=1,
+            page_settle_ms=1,
+            channel="",
+        )
+    )
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_company_universe.PlaywrightSession", FakeSession)
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_company_universe.load_config", lambda: fake_config)
+
+    adapter = IDXCompanyUniverseAdapter()
+    candidates = list(adapter.discover(DiscoveryWindow()))
+
+    assert len(candidates) == 1
+    assert candidates[0].ticker == "AADI"
+    assert candidates[0].raw_metadata["sector"] == "Energi"
 
 
 def test_idx_disclosure_adapter_reads_artifact(tmp_path):

@@ -2,11 +2,11 @@
 
 The repository now includes browser-backed proof-of-access tooling for IDX
 surfaces (see `docs/phase1_recon.md` and `scripts/run_browser_recon.py`).
-Phase 2 bootstrap discovery is available:
+Phase 2 discovery is available:
 
-- company universe parses from saved browser artifacts
-- disclosures parse from saved browser artifacts
-- financial reports fetch JSON through the warmed browser session
+- company universe syncs live issuer metadata through the warmed browser session
+- disclosures run incrementally against the live IDX listing surface
+- financial reports fetch incremental JSON pages through the warmed browser session
 """
 
 from .idx_company_universe import IDXCompanyUniverseAdapter

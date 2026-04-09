@@ -10,13 +10,13 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 2 — Universe and discovery bootstrap** (in progress).
+**Phase 2 — Universe and discovery layer** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Repo, config, SQLite schema, file storage | done |
 | 1 | Source reconnaissance and proof of access | done |
-| 2 | Universe and discovery layer | in progress |
+| 2 | Universe and discovery layer | done |
 | 3 | Download, versioning, file store | pending |
 | 4 | Parsing, OCR, chunking | pending |
 | 5 | Normalization, extraction, events | pending |
@@ -62,13 +62,13 @@ pytest -q
 # Run the Phase 1 browser-backed proof-of-access flow for IDX
 python scripts/run_browser_recon.py
 
-# Persist the company universe from browser artifacts
+# Sync the live company universe and issuer metadata through the warmed browser session
 python -m stock_triage discover company_universe
 
-# Persist disclosures from browser artifacts
+# Discover disclosures incrementally
 python -m stock_triage discover disclosure
 
-# Persist financial-report attachment candidates through the warmed browser session
+# Discover financial-report attachment candidates incrementally
 python -m stock_triage discover financial_report --year 2025
 ```
 
@@ -87,9 +87,9 @@ Defaults live in `config/default.yaml`. Override either by:
 - **Browser-backed IDX access.** Phase 1 now includes an operator-assisted
   Playwright session that persists browser state under `data/browser/` and
   writes proof artifacts under `data/recon/browser/`.
-- **Phase 2 bootstrap.** The initial discovery layer can already persist the
-  company universe, disclosures, financial-report attachment candidates, and
-  source watermarks into SQLite.
+- **Phase 2 discovery layer.** The repository now supports live company-universe
+  sync with issuer enrichment plus incremental disclosure and financial-report
+  discovery backed by persisted source watermarks in SQLite.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

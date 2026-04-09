@@ -13,6 +13,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Iterable
 
 from .types import DocumentCandidate, SourceClass
 
@@ -28,6 +29,12 @@ _DATE_FIELD_RE = re.compile(r'TanggalPencatatan:"(?P<listing_date>[^"]+)"')
 _WEBSITE_FIELD_RE = re.compile(r'Website:"(?P<website>[^"]*)"')
 _EMAIL_FIELD_RE = re.compile(r'Email:"(?P<email>[^"]*)"')
 _PHONE_FIELD_RE = re.compile(r'Telepon:"(?P<phone>[^"]*)"')
+_FAX_FIELD_RE = re.compile(r'Fax:"(?P<fax>[^"]*)"')
+_ADDRESS_FIELD_RE = re.compile(r'Alamat:"(?P<address>[^"]*)"')
+_BUSINESS_ACTIVITY_FIELD_RE = re.compile(r'KegiatanUsahaUtama:"(?P<business_activity>[^"]*)"')
+_NPWP_FIELD_RE = re.compile(r'NPWP:"(?P<npwp>[^"]*)"')
+_NPKP_FIELD_RE = re.compile(r'NPKP:"(?P<npkp>[^"]*)"')
+_LOGO_FIELD_RE = re.compile(r'Logo:"(?P<logo>[^"]*)"')
 _ATTACH_CARD_SPLIT_RE = re.compile(r'<div[^>]+class="attach-card[^"]*"[^>]*>', re.IGNORECASE)
 _TIME_RE = re.compile(r"<time[^>]*>(?P<ts>.*?)</time>", re.DOTALL | re.IGNORECASE)
 _TITLE_RE = re.compile(
@@ -49,30 +56,61 @@ def load_artifact_text(*, artifacts_root: Path, source_id: str, filename: str = 
 
 
 def parse_company_profiles_html(html_text: str) -> list[DocumentCandidate]:
+    rows: list[dict[str, Any]] = []
+    for match in _COMPANY_OBJECT_RE.finditer(html_text):
+        rows.append(
+            {
+                "KodeEmiten": _decode_js_string(match.group("ticker")).strip(),
+                "NamaEmiten": _decode_js_string(match.group("name")).strip(),
+                "TanggalPencatatan": _extract_optional(match.group("body"), _DATE_FIELD_RE),
+                "Website": _extract_optional(match.group("body"), _WEBSITE_FIELD_RE),
+                "Email": _extract_optional(match.group("body"), _EMAIL_FIELD_RE),
+                "Telepon": _extract_optional(match.group("body"), _PHONE_FIELD_RE),
+                "Fax": _extract_optional(match.group("body"), _FAX_FIELD_RE),
+                "Alamat": _extract_optional(match.group("body"), _ADDRESS_FIELD_RE),
+                "KegiatanUsahaUtama": _extract_optional(match.group("body"), _BUSINESS_ACTIVITY_FIELD_RE),
+                "NPWP": _extract_optional(match.group("body"), _NPWP_FIELD_RE),
+                "NPKP": _extract_optional(match.group("body"), _NPKP_FIELD_RE),
+                "Logo": _extract_optional(match.group("body"), _LOGO_FIELD_RE),
+            }
+        )
+    return parse_company_profile_rows(rows)
+
+
+def parse_company_profile_rows(rows: Iterable[dict[str, Any]]) -> list[DocumentCandidate]:
     candidates: list[DocumentCandidate] = []
     seen: set[str] = set()
 
-    for match in _COMPANY_OBJECT_RE.finditer(html_text):
-        ticker = _decode_js_string(match.group("ticker")).strip()
+    for row in rows:
+        ticker = _string_or_none(row.get("KodeEmiten"))
         if not ticker or ticker in seen:
             continue
         seen.add(ticker)
 
-        name = _decode_js_string(match.group("name")).strip()
-        body = match.group("body")
-        listing_date = _extract_optional(body, _DATE_FIELD_RE)
-        website = _extract_optional(body, _WEBSITE_FIELD_RE)
-        email = _extract_optional(body, _EMAIL_FIELD_RE)
-        phone = _extract_optional(body, _PHONE_FIELD_RE)
-
+        name = _string_or_none(row.get("NamaEmiten")) or ticker
         raw_metadata = {
             "issuer_name": name,
             "profile_url": f"https://www.idx.co.id/en/listed-companies/company-profiles/{ticker}",
-            "listing_date": listing_date,
-            "website": website,
-            "email": email,
-            "phone": phone,
+            "listing_date": _string_or_none(row.get("TanggalPencatatan")),
+            "website": _string_or_none(row.get("Website")),
+            "email": _string_or_none(row.get("Email")),
+            "phone": _string_or_none(row.get("Telepon")),
+            "fax": _string_or_none(row.get("Fax")),
+            "address": _string_or_none(row.get("Alamat")),
+            "share_registrar": _string_or_none(row.get("BAE")),
+            "industry": _string_or_none(row.get("Industri")),
+            "sub_industry": _string_or_none(row.get("SubIndustri")),
+            "sector": _string_or_none(row.get("Sektor")),
+            "sub_sector": _string_or_none(row.get("SubSektor")),
+            "business_activity": _string_or_none(row.get("KegiatanUsahaUtama")),
+            "npwp": _string_or_none(row.get("NPWP")),
+            "npkp": _string_or_none(row.get("NPKP")),
+            "listing_board": _string_or_none(row.get("PapanPencatatan")),
+            "logo_url": _absolute_idx_url(_string_or_none(row.get("Logo"))),
+            "listed_instruments": _listed_instruments(row),
+            "status_code": row.get("Status"),
         }
+
         candidates.append(
             DocumentCandidate(
                 source_name="idx_company_universe",
@@ -80,7 +118,7 @@ def parse_company_profiles_html(html_text: str) -> list[DocumentCandidate]:
                 source_record_id=ticker,
                 title=name,
                 ticker=ticker,
-                raw_metadata={k: v for k, v in raw_metadata.items() if v},
+                raw_metadata={k: v for k, v in raw_metadata.items() if v not in (None, "", [])},
             )
         )
 
@@ -185,6 +223,15 @@ def _decode_js_string(raw: str) -> str:
     return html.unescape(raw.encode("utf-8").decode("unicode_escape"))
 
 
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = _decode_js_string(value).strip()
+        return text or None
+    return str(value)
+
+
 def _clean_text(raw: str) -> str:
     text = _TAG_RE.sub(" ", raw)
     return " ".join(html.unescape(text).split())
@@ -211,8 +258,21 @@ def _parse_iso_datetime(raw: str | None) -> datetime | None:
 
 
 def _absolute_idx_url(path: str) -> str:
+    if not path:
+        return path
     if path.startswith("http://") or path.startswith("https://"):
         return path
     if not path.startswith("/"):
         path = "/" + path
     return "https://www.idx.co.id" + path
+
+
+def _listed_instruments(row: dict[str, Any]) -> list[str]:
+    field_map = {
+        "EfekEmiten_Saham": "stock",
+        "EfekEmiten_Obligasi": "bond",
+        "EfekEmiten_ETF": "etf",
+        "EfekEmiten_EBA": "asset_backed_security",
+        "EfekEmiten_SPEI": "special_purpose_entity",
+    }
+    return [label for key, label in field_map.items() if row.get(key)]
