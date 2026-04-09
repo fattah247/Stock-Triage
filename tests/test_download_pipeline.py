@@ -118,7 +118,13 @@ def test_run_downloads_uses_conditional_headers_and_handles_not_modified(tmp_con
 
     second_client = httpx.Client(transport=httpx.MockTransport(_not_modified))
     try:
-        second = run_downloads(tmp_config, source_name="idx_financial_reports", limit=10, client=second_client)
+        second = run_downloads(
+            tmp_config,
+            source_name="idx_financial_reports",
+            limit=10,
+            include_existing=True,
+            client=second_client,
+        )
     finally:
         second_client.close()
 
@@ -143,11 +149,133 @@ def test_run_downloads_uses_conditional_headers_and_handles_not_modified(tmp_con
         rconn.close()
 
 
+def test_run_downloads_skips_existing_documents_by_default(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-1",
+        ticker="BRMS",
+        title="Advertisement Submission",
+        attachment_url="https://example.test/disclosures/disc-1.pdf",
+        attachment_filename="disc-1.pdf",
+        raw_metadata={"filename": "disc-1.pdf"},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    first_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 disclosure",
+                request=request,
+            )
+        )
+    )
+    try:
+        first = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=first_client)
+    finally:
+        first_client.close()
+
+    assert first.inserted == 1
+
+    second_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(AssertionError("existing candidates should not be fetched"))
+        )
+    )
+    try:
+        second = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=second_client)
+    finally:
+        second_client.close()
+
+    assert second.selected == 0
+    assert second.fetched == 0
+    assert second.inserted == 0
+    assert second.skipped == 0
+
+
+def test_run_downloads_include_existing_reconsiders_prior_documents(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-1",
+        ticker="BRMS",
+        title="Advertisement Submission",
+        attachment_url="https://example.test/disclosures/disc-1.pdf",
+        attachment_filename="disc-1.pdf",
+        raw_metadata={"filename": "disc-1.pdf"},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    first_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 disclosure v1",
+                request=request,
+            )
+        )
+    )
+    try:
+        first = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=first_client)
+    finally:
+        first_client.close()
+
+    assert first.inserted == 1
+
+    second_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 disclosure v2",
+                request=request,
+            )
+        )
+    )
+    try:
+        second = run_downloads(
+            tmp_config,
+            source_name="idx_disclosures",
+            limit=10,
+            include_existing=True,
+            client=second_client,
+        )
+    finally:
+        second_client.close()
+
+    assert second.selected == 1
+    assert second.fetched == 1
+    assert second.inserted == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM documents
+            WHERE source_name = 'idx_disclosures' AND source_record_id = 'disc-1'
+            """
+        ).fetchone()
+        assert row["n"] == 2
+    finally:
+        rconn.close()
+
+
 def test_download_cli_uses_run_downloads(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_downloads",
-        lambda cfg, source_name=None, limit=25: type(
+        lambda cfg, source_name=None, limit=25, include_existing=False: type(
             "R",
             (),
             {

@@ -172,6 +172,7 @@ def run_downloads(
     *,
     source_name: str | None = None,
     limit: int = 25,
+    include_existing: bool = False,
     client: httpx.Client | None = None,
 ) -> DownloadRunResult:
     cfg.ensure_dirs()
@@ -183,7 +184,12 @@ def run_downloads(
         reader = connect(cfg.paths.db_path, read_only=True)
         try:
             configure_pragmas(reader, cfg)
-            candidates = _select_candidates(reader, source_name=source_name, limit=limit)
+            candidates = _select_candidates(
+                reader,
+                source_name=source_name,
+                limit=limit,
+                include_existing=include_existing,
+            )
             result = DownloadRunResult(selected=len(candidates))
 
             for candidate in candidates:
@@ -234,7 +240,13 @@ def run_downloads(
     return result
 
 
-def _select_candidates(conn: sqlite3.Connection, *, source_name: str | None, limit: int) -> list[DownloadCandidate]:
+def _select_candidates(
+    conn: sqlite3.Connection,
+    *,
+    source_name: str | None,
+    limit: int,
+    include_existing: bool,
+) -> list[DownloadCandidate]:
     sql = """
         SELECT
             candidate_id,
@@ -252,6 +264,15 @@ def _select_candidates(conn: sqlite3.Connection, *, source_name: str | None, lim
     if source_name:
         sql += " AND source_name = ?"
         params.append(source_name)
+    if not include_existing:
+        sql += """
+            AND NOT EXISTS (
+                SELECT 1
+                FROM documents d
+                WHERE d.source_name = document_candidates.source_name
+                  AND d.source_record_id = document_candidates.source_record_id
+            )
+        """
     sql += """
         ORDER BY COALESCE(upstream_published_at, discovered_at) ASC, candidate_id ASC
         LIMIT ?

@@ -100,7 +100,12 @@ def cmd_download(args: argparse.Namespace) -> int:
     setup_logging(cfg)
 
     source_name = None if args.source == "all" else args.source
-    result = run_downloads(cfg, source_name=source_name, limit=args.limit)
+    result = run_downloads(
+        cfg,
+        source_name=source_name,
+        limit=args.limit,
+        include_existing=args.include_existing,
+    )
     print(
         "download: "
         f"selected={result.selected} "
@@ -176,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=25,
         help="Maximum number of attachment candidates to process",
+    )
+    p_download.add_argument(
+        "--include-existing",
+        action="store_true",
+        help="Reconsider candidates that already have at least one downloaded document",
     )
     p_download.set_defaults(func=cmd_download)
     args = parser.parse_args(argv)
