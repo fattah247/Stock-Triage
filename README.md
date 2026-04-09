@@ -81,6 +81,12 @@ python -m stock_triage download --source idx_disclosures --include-quarantined
 
 # Parse downloaded PDFs into page-aware text chunks
 python -m stock_triage parse --source idx_financial_reports --limit 10
+
+# Inspect parse-state coverage and recent failures
+python -m stock_triage parse-status --source all --failure-limit 10
+
+# Retry only parse failures
+python -m stock_triage parse --source idx_financial_reports --retry-failed
 ```
 
 For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
@@ -120,7 +126,8 @@ Defaults live in `config/default.yaml`. Override either by:
 - **Phase 4 bootstrap.** Parse now supports native PDF text extraction,
   threshold-based OCR fallback routing, page-aware chunk persistence into
   `document_chunks`, section-label heuristics for heading blocks, and
-  document-level parse state updates via
+  document-level parse state updates plus operator-visible status/retry
+  commands via
   `python -m stock_triage parse ...`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB

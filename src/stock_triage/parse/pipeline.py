@@ -69,6 +69,33 @@ class ParseRunResult:
     chunks: int = 0
 
 
+@dataclass(frozen=True)
+class ParseStatusRow:
+    source_name: str
+    total: int
+    downloaded: int
+    parsed: int
+    failed: int
+    ocr_partial: int
+    ocr_full: int
+
+
+@dataclass(frozen=True)
+class ParseFailureRow:
+    document_id: str
+    source_name: str
+    source_record_id: str
+    process_error_code: str | None
+    parse_strategy: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ParseStatusReport:
+    rows: list[ParseStatusRow]
+    recent_failures: list[ParseFailureRow]
+
+
 class ParseError(RuntimeError):
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(detail)
@@ -82,6 +109,7 @@ def run_parse(
     source_name: str | None = None,
     limit: int = 25,
     include_parsed: bool = False,
+    retry_failed_only: bool = False,
 ) -> ParseRunResult:
     cfg.ensure_dirs()
 
@@ -96,6 +124,7 @@ def run_parse(
                 source_name=source_name,
                 limit=limit,
                 include_parsed=include_parsed,
+                retry_failed_only=retry_failed_only,
             )
             result = _replace_result(result, selected=len(documents))
             for document in documents:
@@ -123,15 +152,90 @@ def run_parse(
     return result
 
 
+def load_parse_status(
+    cfg: Config,
+    *,
+    source_name: str | None = None,
+    failure_limit: int = 10,
+) -> ParseStatusReport:
+    cfg.ensure_dirs()
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        params: list[object] = []
+        where = ""
+        if source_name:
+            where = "WHERE source_name = ?"
+            params.append(source_name)
+        rows = conn.execute(
+            f"""
+            SELECT
+                source_name,
+                COUNT(*) AS total,
+                SUM(CASE WHEN process_state = 'downloaded' THEN 1 ELSE 0 END) AS downloaded,
+                SUM(CASE WHEN process_state = 'parsed' THEN 1 ELSE 0 END) AS parsed,
+                SUM(CASE WHEN process_state = 'failed' THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN parse_strategy = 'ocr_partial' THEN 1 ELSE 0 END) AS ocr_partial,
+                SUM(CASE WHEN parse_strategy = 'ocr_full' THEN 1 ELSE 0 END) AS ocr_full
+            FROM documents
+            {where}
+            GROUP BY source_name
+            ORDER BY source_name
+            """,
+            tuple(params),
+        ).fetchall()
+        failures = conn.execute(
+            f"""
+            SELECT document_id, source_name, source_record_id, process_error_code, parse_strategy, updated_at
+            FROM documents
+            {where} {"AND" if where else "WHERE"} process_state = 'failed'
+            ORDER BY updated_at DESC, document_id ASC
+            LIMIT ?
+            """,
+            tuple(params + [failure_limit]),
+        ).fetchall()
+        return ParseStatusReport(
+            rows=[
+                ParseStatusRow(
+                    source_name=row["source_name"],
+                    total=row["total"],
+                    downloaded=row["downloaded"] or 0,
+                    parsed=row["parsed"] or 0,
+                    failed=row["failed"] or 0,
+                    ocr_partial=row["ocr_partial"] or 0,
+                    ocr_full=row["ocr_full"] or 0,
+                )
+                for row in rows
+            ],
+            recent_failures=[
+                ParseFailureRow(
+                    document_id=row["document_id"],
+                    source_name=row["source_name"],
+                    source_record_id=row["source_record_id"],
+                    process_error_code=row["process_error_code"],
+                    parse_strategy=row["parse_strategy"],
+                    updated_at=row["updated_at"],
+                )
+                for row in failures
+            ],
+        )
+    finally:
+        conn.close()
+
+
 def _select_documents(
     conn: sqlite3.Connection,
     *,
     source_name: str | None,
     limit: int,
     include_parsed: bool,
+    retry_failed_only: bool,
 ) -> list[ParseDocument]:
-    states = ["downloaded"]
-    if include_parsed:
+    if retry_failed_only:
+        states = ["failed"]
+    else:
+        states = ["downloaded"]
+    if include_parsed and not retry_failed_only:
         states.extend(["parsed", "failed"])
     placeholders = ",".join("?" for _ in states)
     sql = f"""

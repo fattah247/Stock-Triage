@@ -9,7 +9,7 @@ from datetime import date
 from .config import load_config
 from .db import WriterQueue, run_migrations
 from .download import run_downloads
-from .parse import run_parse
+from .parse import load_parse_status, run_parse
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -132,6 +132,7 @@ def cmd_parse(args: argparse.Namespace) -> int:
         source_name=source_name,
         limit=args.limit,
         include_parsed=args.include_parsed,
+        retry_failed_only=args.retry_failed,
     )
     print(
         "parse: "
@@ -142,6 +143,36 @@ def cmd_parse(args: argparse.Namespace) -> int:
         f"ocr_full={result.ocr_full} "
         f"chunks={result.chunks}"
     )
+    return 0
+
+
+def cmd_parse_status(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    report = load_parse_status(
+        cfg,
+        source_name=source_name,
+        failure_limit=args.failure_limit,
+    )
+    for row in report.rows:
+        print(
+            f"{row.source_name}: total={row.total} downloaded={row.downloaded} "
+            f"parsed={row.parsed} failed={row.failed} "
+            f"ocr_partial={row.ocr_partial} ocr_full={row.ocr_full}"
+        )
+    if report.recent_failures:
+        print("recent_failures:")
+        for failure in report.recent_failures:
+            print(
+                f"{failure.source_name} {failure.document_id} "
+                f"record={failure.source_record_id} "
+                f"error={failure.process_error_code or 'unknown'} "
+                f"strategy={failure.parse_strategy or 'unknown'} "
+                f"updated_at={failure.updated_at}"
+            )
     return 0
 
 
@@ -243,7 +274,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reconsider documents already marked parsed or failed",
     )
+    p_parse.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry only documents currently marked failed",
+    )
     p_parse.set_defaults(func=cmd_parse)
+    p_parse_status = sub.add_parser("parse-status", help="Show parse-state counts and recent failures")
+    p_parse_status.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for parsed documents",
+    )
+    p_parse_status.add_argument(
+        "--failure-limit",
+        type=int,
+        default=10,
+        help="Maximum number of recent failed documents to display",
+    )
+    p_parse_status.set_defaults(func=cmd_parse_status)
     args = parser.parse_args(argv)
     return args.func(args)
 

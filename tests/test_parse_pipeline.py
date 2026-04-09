@@ -6,7 +6,7 @@ import fitz
 
 from stock_triage.__main__ import main
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
-from stock_triage.parse import run_parse
+from stock_triage.parse import load_parse_status, run_parse
 from stock_triage.storage import FileStore
 
 
@@ -238,7 +238,7 @@ def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_parse",
-        lambda cfg, source_name=None, limit=25, include_parsed=False: type(
+        lambda cfg, source_name=None, limit=25, include_parsed=False, retry_failed_only=False: type(
             "R",
             (),
             {
@@ -259,6 +259,132 @@ def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     assert "selected=2" in out
     assert "ocr_partial=1" in out
     assert "chunks=6" in out
+
+
+def test_run_parse_retry_failed_only_targets_failed_documents(tmp_config, monkeypatch):
+    failed_id = _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="retry-failed-1",
+        pdf_bytes=_pdf_bytes_with_pages([""]),
+    )
+    parsed_id = _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="already-parsed-1",
+        pdf_bytes=_pdf_bytes_with_pages(["Revenue remains positive and stable over the reporting period."]),
+    )
+
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_available", lambda: False)
+    first = run_parse(tmp_config, source_name="idx_financial_reports", limit=10)
+    assert first.parsed == 1
+    assert first.failed == 1
+
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_available", lambda: True)
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_page_text", lambda cfg, page: "Recovered OCR text")
+    second = run_parse(tmp_config, source_name="idx_financial_reports", limit=10, retry_failed_only=True)
+    assert second.selected == 1
+    assert second.parsed == 1
+    assert second.failed == 0
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        failed_row = rconn.execute(
+            "SELECT process_state, parse_strategy FROM documents WHERE document_id = ?",
+            (failed_id,),
+        ).fetchone()
+        parsed_row = rconn.execute(
+            "SELECT process_state, parse_strategy FROM documents WHERE document_id = ?",
+            (parsed_id,),
+        ).fetchone()
+        assert failed_row["process_state"] == "parsed"
+        assert failed_row["parse_strategy"] == "ocr_full"
+        assert parsed_row["process_state"] == "parsed"
+        assert parsed_row["parse_strategy"] == "native"
+    finally:
+        rconn.close()
+
+
+def test_load_parse_status_reports_recent_failures(tmp_config, monkeypatch):
+    _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="status-fail-1",
+        pdf_bytes=_pdf_bytes_with_pages([""]),
+    )
+    _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_disclosures",
+        source_record_id="status-parsed-1",
+        pdf_bytes=_pdf_bytes_with_pages(
+            ["Disclosure text remains available for native parsing and comfortably exceeds the OCR threshold for this fixture."]
+        ),
+    )
+
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_available", lambda: False)
+    run_parse(tmp_config, source_name=None, limit=10)
+
+    report = load_parse_status(tmp_config, failure_limit=5)
+
+    assert len(report.rows) == 2
+    financial = next(row for row in report.rows if row.source_name == "idx_financial_reports")
+    disclosure = next(row for row in report.rows if row.source_name == "idx_disclosures")
+    assert financial.failed == 1
+    assert disclosure.parsed == 1
+    assert len(report.recent_failures) == 1
+    assert report.recent_failures[0].source_record_id == "status-fail-1"
+    assert report.recent_failures[0].process_error_code == "ocr_unavailable"
+
+
+def test_parse_status_cli_uses_status_loader(tmp_config, monkeypatch, capsys):
+    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr(
+        "stock_triage.__main__.load_parse_status",
+        lambda cfg, source_name=None, failure_limit=10: type(
+            "Report",
+            (),
+            {
+                "rows": [
+                    type(
+                        "Row",
+                        (),
+                        {
+                            "source_name": "idx_financial_reports",
+                            "total": 2,
+                            "downloaded": 0,
+                            "parsed": 2,
+                            "failed": 0,
+                            "ocr_partial": 1,
+                            "ocr_full": 0,
+                        },
+                    )()
+                ],
+                "recent_failures": [
+                    type(
+                        "Failure",
+                        (),
+                        {
+                            "source_name": "idx_disclosures",
+                            "document_id": "doc-fail",
+                            "source_record_id": "rec-1",
+                            "process_error_code": "ocr_unavailable",
+                            "parse_strategy": "parse_failed",
+                            "updated_at": "2026-04-09T00:00:00+00:00",
+                        },
+                    )()
+                ],
+            },
+        )(),
+    )
+
+    rc = main(["parse-status", "--source", "all", "--failure-limit", "5"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "idx_financial_reports: total=2" in out
+    assert "recent_failures:" in out
+    assert "error=ocr_unavailable" in out
 
 
 def _insert_downloaded_document(tmp_config, *, source_name: str, source_record_id: str, pdf_bytes: bytes) -> str:
