@@ -15,7 +15,8 @@ source-data and model licensing.
 **Phase 10 — derived intelligence foundation**, **Phase 11 — change
 detection and snapshot assembly**, **Phase 12 — thesis engine and alert
 upgrades**, **Phase 13 — management claim ledger**, and **Phase 14 — peer
-and sector intelligence** are implemented.
+and sector intelligence** are implemented. **Phase 15 — digests, human
+review loop, and v3 KPI surfaces** is now implemented on this branch.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -39,6 +40,7 @@ V3 preview on this branch:
 | 12 | Thesis engine and alert upgrades | done |
 | 13 | Management claim ledger | done |
 | 14 | Peer and sector intelligence | done |
+| 15 | Digests, hardening, and human review loop | done |
 
 ## Layout
 
@@ -130,6 +132,11 @@ python -m stock_triage summary-generate <document_id>
 # review items, peer sets, sector rollups, peer ranks, anomaly records,
 # and sector heatmap inputs.
 python -m stock_triage intelligence-run --limit 25
+
+# Build the daily digest and inspect the review queue / KPI surfaces.
+python -m stock_triage digest-run --scope watchlist --limit 10
+python -m stock_triage review-queue --status open --limit 20
+python -m stock_triage intelligence-kpis
 
 # Render the local dashboard plus CSV exports
 python -m stock_triage dashboard-export
@@ -244,6 +251,12 @@ Defaults live in `config/default.yaml`. Override either by:
   leverage, dilution frequency, governance-change frequency, and event density,
   persists richer `sector_rollups`, and exposes comparability warnings, peer
   anomalies, and sector heatmap inputs inside the current snapshot and brief.
+- **V3 Phase 15 review loop and digest.** The repository now persists
+  `daily_digests`, supports operator review-state transitions plus audit
+  history through `review_queue_items` and `review_audit_log`, exposes
+  `python -m stock_triage digest-run ...`, `review-queue`, `review-update`,
+  and `intelligence-kpis`, and surfaces the digest, open review queue, and
+  derived KPI snapshot in the dashboard.
 
 Example local thesis file (`data/theses.yaml`):
 

@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import json
+
+from stock_triage.alerts import run_alerts
+from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
+from stock_triage.intelligence import run_intelligence
+from stock_triage.intelligence.review import (
+    load_intelligence_kpis,
+    load_review_queue,
+    run_daily_digest,
+    update_review_status,
+)
+
+from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
+
+
+def test_phase15_digest_review_and_kpis(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    tmp_config.alerts.watchlist = ["TAMU"]
+
+    run_intelligence(tmp_config, ticker="TAMU")
+    alert_result = run_alerts(tmp_config)
+    digest_result = run_daily_digest(tmp_config, scope="watchlist", limit=10)
+
+    assert alert_result.emitted >= 1
+    assert digest_result.scope == "watchlist"
+    assert digest_result.companies == 1
+    assert digest_result.review_items >= 1
+
+    report = load_review_queue(tmp_config, status="open", limit=20)
+    assert report.rows
+    first = report.rows[0]
+    update = update_review_status(tmp_config, review_item_id=first["review_item_id"], status="resolved", note="verified")
+    assert update.previous_status == "open"
+    assert update.current_status == "resolved"
+
+    kpis = load_intelligence_kpis(tmp_config)
+    assert kpis["snapshot_count"] == 1
+    assert kpis["open_review_items"] >= 0
+    assert "critical" in kpis["overall_state_counts"]
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        digest_row = rconn.execute(
+            """
+            SELECT payload_json
+            FROM daily_digests
+            WHERE digest_id = ?
+            """,
+            (digest_result.digest_id,),
+        ).fetchone()
+        assert digest_row is not None
+        digest_payload = json.loads(digest_row["payload_json"])
+        assert digest_payload["company_cards"][0]["ticker"] == "TAMU"
+        assert digest_payload["review_focus"][0]["ticker"] == "TAMU"
+
+        updated_row = rconn.execute(
+            """
+            SELECT status
+            FROM review_queue_items
+            WHERE review_item_id = ?
+            """,
+            (first["review_item_id"],),
+        ).fetchone()
+        assert updated_row["status"] == "resolved"
+
+        audit_row = rconn.execute(
+            """
+            SELECT action, from_status, to_status, note
+            FROM review_audit_log
+            WHERE review_item_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (first["review_item_id"],),
+        ).fetchone()
+        assert audit_row["action"] == "status_update"
+        assert audit_row["from_status"] == "open"
+        assert audit_row["to_status"] == "resolved"
+        assert audit_row["note"] == "verified"
+    finally:
+        rconn.close()
+
+
+def test_phase15_migration_applies(tmp_config):
+    with WriterQueue(tmp_config) as wq:
+        applied = wq.submit(run_migrations)
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8]

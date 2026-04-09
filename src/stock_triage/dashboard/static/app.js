@@ -7,6 +7,9 @@
     findings: [],
     revisions: [],
     inbox_rows: [],
+    digest_rows: [],
+    review_rows: [],
+    intelligence_kpis: {},
     backlog_rows: [],
     canary_rows: [],
     action_history: [],
@@ -29,6 +32,7 @@
   const actionEndpoint = bootstrap.actionEndpoint || null;
   const snapshotEndpoint = bootstrap.snapshotEndpoint || null;
   const artifactEndpoint = bootstrap.artifactEndpoint || null;
+  const reviewEndpoint = "/api/review";
 
   const search = document.getElementById("issuerSearch");
   const issuerList = document.getElementById("issuerList");
@@ -38,6 +42,9 @@
   const metricList = document.getElementById("metricList");
   const findingList = document.getElementById("findingList");
   const revisionList = document.getElementById("revisionList");
+  const digestList = document.getElementById("digestList");
+  const reviewList = document.getElementById("reviewList");
+  const kpiList = document.getElementById("kpiList");
   const backlogList = document.getElementById("backlogList");
   const canaryList = document.getElementById("canaryList");
   const inboxList = document.getElementById("inboxList");
@@ -72,6 +79,7 @@
     extract: "Extract",
     rules: "Run rules",
     alerts: "Alerts",
+    digest: "Build digest",
     canary: "Canary",
     export: "Export snapshot",
     summary: "Summarize",
@@ -187,6 +195,14 @@
     const level = String(value || "").toLowerCase();
     if (["critical", "warning", "info", "ok"].includes(level)) return level;
     return fallback;
+  }
+
+  function statusTag(value) {
+    const level = String(value || "").toLowerCase();
+    if (["critical", "broken", "failed", "high"].includes(level)) return "critical";
+    if (["warning", "review_required", "weakening", "open", "snoozed", "medium"].includes(level)) return "warning";
+    if (["improving", "ok", "resolved", "stable", "intact", "low"].includes(level)) return "ok";
+    return "info";
   }
 
   function findingSeverity(item) {
@@ -328,6 +344,9 @@
       .filter((item) => (selectedTicker ? item.ticker === selectedTicker : false))
       .sort((a, b) => String(b.latest_revision_at || "").localeCompare(String(a.latest_revision_at || "")));
     const inboxRows = (data.inbox_rows || []).slice(0, 20);
+    const digestRows = data.digest_rows || [];
+    const reviewRows = data.review_rows || [];
+    const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
 
@@ -389,6 +408,83 @@
             )
             .join("")
         : `<div class="emptyState">No recent cross-issuer activity yet. Run discovery or process a few documents to populate this inbox.</div>`;
+    }
+
+    if (kpiList) {
+      const overallStates = intelligenceKpis.overall_state_counts || {};
+      const thesisStates = intelligenceKpis.thesis_state_counts || {};
+      kpiList.innerHTML = `
+        <div class="stat"><div class="summaryLabel">Snapshots</div><strong>${esc(intelligenceKpis.snapshot_count || 0)}</strong></div>
+        <div class="stat"><div class="summaryLabel">Open Reviews</div><strong>${esc(intelligenceKpis.open_review_items || 0)}</strong></div>
+        <div class="stat"><div class="summaryLabel">Peer Anomalies</div><strong>${esc(intelligenceKpis.peer_anomaly_count || 0)}</strong></div>
+        <div class="stat"><div class="summaryLabel">Stale Snapshots</div><strong>${esc(intelligenceKpis.stale_snapshots || 0)}</strong></div>
+        <div class="stat"><div class="summaryLabel">Critical Names</div><strong>${esc(overallStates.critical || 0)}</strong></div>
+        <div class="stat"><div class="summaryLabel">Broken Theses</div><strong>${esc(thesisStates.broken || 0)}</strong></div>
+      `;
+    }
+
+    if (digestList) {
+      const latestDigest = digestRows[0] || null;
+      const cards = latestDigest?.payload?.company_cards || [];
+      const sectors = latestDigest?.payload?.sector_moves || [];
+      digestList.innerHTML = latestDigest
+        ? `
+          <div class="meta">Latest digest ${renderTimestamp(latestDigest.updated_at)} · ${esc(latestDigest.scope)} scope</div>
+          <div class="findingStack">${cards
+            .slice(0, 8)
+            .map(
+              (item) => `
+                <article class="findingCard sev-${statusTag(item.overall_state)}">
+                  <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                  <div class="meta">${esc(item.decision_state || "Watch")} · review ${esc(item.review_item_count || 0)} · anomalies ${esc(item.peer_anomaly_count || 0)}</div>
+                  <div class="meta">${(item.reasons || []).map(esc).join(" · ")}</div>
+                </article>
+              `
+            )
+            .join("")}</div>
+          <div class="docGroups">${sectors
+            .slice(0, 6)
+            .map(
+              (item) => `
+                <section class="docGroup">
+                  <div class="docGroupHeader">
+                    <div>
+                      <h3>${esc(item.sector)}</h3>
+                      <div class="meta">critical ${esc(item.critical_companies || 0)} · reviews ${esc(item.open_review_items || 0)} · anomalies ${esc(item.peer_anomalies || 0)}</div>
+                    </div>
+                  </div>
+                </section>
+              `
+            )
+            .join("")}</div>
+        `
+        : `<div class="emptyState"><strong>No daily digest yet.</strong> Run Build Digest from the control panel to persist the daily v3 summary.</div>`;
+    }
+
+    if (reviewList) {
+      reviewList.innerHTML = reviewRows.length
+        ? `<div class="findingStack">${reviewRows
+            .map(
+              (item) => `
+                <article class="findingCard sev-${statusTag(item.priority)}">
+                  <div class="findingClaim">${esc(item.ticker || "-")} · ${esc(item.item_type)}</div>
+                  <div class="meta">${esc(item.priority)} priority · ${esc(item.status)} · ${esc(item.decision_state || "-")}</div>
+                  <div class="meta">${esc(item.rationale || "")}</div>
+                  <div class="heroBar">
+                    ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">artifact</a>` : ""}
+                    <button class="miniButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="resolved">resolve</button>
+                    <button class="miniButton ghostButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="snoozed">snooze</button>
+                    ${
+                      item.status !== "open"
+                        ? `<button class="miniButton ghostButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="open">reopen</button>`
+                        : ""
+                    }
+                  </div>
+                </article>
+              `
+            )
+            .join("")}</div>`
+        : `<div class="emptyState"><strong>No open review items.</strong> Revised filings, broken theses, unresolved claims, and high-signal rules will show up here.</div>`;
     }
 
     if (!selectedIssuer) {
@@ -594,6 +690,7 @@
       "extract",
       "rules",
       "alerts",
+      "digest",
     ];
     state.queueIndex = 0;
     state.queueTotal = state.queuedActions.length;
@@ -673,6 +770,25 @@
     state.activeJobId = result.job_id;
     state.activeJobStartedAt = Date.now();
     connectJobStream(action, result.stream_url, options);
+  }
+
+  async function updateReviewStatus(reviewItemId, status) {
+    const response = await fetch(reviewEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: new URLSearchParams({
+        review_item_id: reviewItemId,
+        status,
+      }).toString(),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || `Review update failed: ${response.status}`);
+    }
+    await refreshSnapshot();
+    if (actionStatus) {
+      actionStatus.textContent = `Review item ${reviewItemId} moved to ${status}.`;
+    }
   }
 
   function connectJobStream(action, streamUrl, options = {}) {
@@ -852,11 +968,20 @@
     }
 
     const target = event.target.closest("[data-inline-action]");
-    if (!target) return;
-    const documentId = target.dataset.documentId || "";
-    runAction(target.dataset.inlineAction, { document_id: documentId }).catch((error) => {
-      if (actionStatus) actionStatus.textContent = error.message;
-    });
+    if (target) {
+      const documentId = target.dataset.documentId || "";
+      runAction(target.dataset.inlineAction, { document_id: documentId }).catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+      return;
+    }
+
+    const reviewTarget = event.target.closest("[data-review-id]");
+    if (reviewTarget) {
+      updateReviewStatus(reviewTarget.dataset.reviewId || "", reviewTarget.dataset.reviewStatus || "").catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+    }
   });
 
   startPolling();

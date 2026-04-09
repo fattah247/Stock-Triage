@@ -10,6 +10,7 @@ from ..canary import load_canary_status
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..hardening import load_backlog
+from ..intelligence.review import load_intelligence_kpis, load_latest_digests, load_review_queue
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,9 @@ class DashboardSnapshot:
     findings: list[dict[str, object]]
     revisions: list[dict[str, object]]
     inbox_rows: list[dict[str, object]]
+    digest_rows: list[dict[str, object]]
+    review_rows: list[dict[str, object]]
+    intelligence_kpis: dict[str, object]
     backlog_rows: list[dict[str, object]]
     canary_rows: list[dict[str, object]]
 
@@ -45,6 +49,9 @@ def load_dashboard_snapshot(
             findings=_load_findings(conn, limit=finding_limit),
             revisions=_load_revision_history(conn, limit=50),
             inbox_rows=_load_inbox_rows(conn, limit=60),
+            digest_rows=[],
+            review_rows=[],
+            intelligence_kpis={},
             backlog_rows=[],
             canary_rows=[],
         )
@@ -53,6 +60,9 @@ def load_dashboard_snapshot(
 
     backlog = load_backlog(cfg)
     canary = load_canary_status(cfg)
+    review = load_review_queue(cfg, status="open", limit=50)
+    digests = load_latest_digests(cfg, limit=5)
+    kpis = load_intelligence_kpis(cfg)
     return DashboardSnapshot(
         issuers=snapshot.issuers,
         documents=snapshot.documents,
@@ -60,6 +70,9 @@ def load_dashboard_snapshot(
         findings=snapshot.findings,
         revisions=snapshot.revisions,
         inbox_rows=snapshot.inbox_rows,
+        digest_rows=digests,
+        review_rows=review.rows,
+        intelligence_kpis=kpis,
         backlog_rows=[row.__dict__ for row in backlog.rows],
         canary_rows=[row.__dict__ for row in canary.rows],
     )

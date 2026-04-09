@@ -63,8 +63,8 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
         try:
             for stmt in statements:
                 conn.execute(stmt)
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(timezone.utc).isoformat()),
             )
             conn.execute("COMMIT")
@@ -74,5 +74,6 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
             except sqlite3.OperationalError:
                 pass
             raise
-        newly_applied.append(version)
+        if cursor.rowcount:
+            newly_applied.append(version)
     return newly_applied

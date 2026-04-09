@@ -31,6 +31,7 @@ def test_build_cli_command_maps_dashboard_actions() -> None:
         "--limit",
         "7",
     ]
+    assert _build_cli_command("digest", {}) == ["digest-run"]
     assert _build_cli_command("summary", {"document_id": "doc-123"}) == ["summary-generate", "doc-123"]
     assert _build_cli_command("parse_one", {"document_id": "doc-123"}) == ["parse", "--document-id", "doc-123"]
     assert _build_cli_command("extract_one", {"document_id": "doc-123"}) == ["extract", "--document-id", "doc-123"]
@@ -57,11 +58,14 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Control Panel" in html
         assert "Run Daily Sweep" in html
         assert "Advanced actions" in html
+        assert "Daily Digest" in html
+        assert "Open Review Queue" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
         assert "function render()" in app_js
         assert "daily_sweep" in app_js
+        assert "updateReviewStatus" in app_js
         assert "renderTimestamp" in app_js
         assert "re-parse" in app_js
         assert "re-extract" in app_js
@@ -73,6 +77,9 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert snapshot["inbox_rows"][0]["kind"] in {"document", "rule", "summary", "event"}
         assert snapshot["backlog_rows"][0]["source_name"] == "idx_financial_reports"
         assert snapshot["backlog_rows"][0]["analyzed"] == 2
+        assert "review_rows" in snapshot
+        assert "digest_rows" in snapshot
+        assert "intelligence_kpis" in snapshot
 
         local_path = quote(str(tmp_config.paths.data_dir / "tamu-annual-report.pdf"), safe="")
         artifact = urlopen(f"{handle.url}/artifact?path={local_path}").read()
@@ -96,6 +103,39 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert snapshot_after["action_history"][0]["params"]["limit"] == "3"
         assert snapshot_after["action_history"][0]["duration_ms"] >= 0
         assert calls == [("download_financial", {"action": "download_financial", "limit": "3"})]
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
+def test_dashboard_server_updates_review_status(tmp_config) -> None:
+    from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
+    from stock_triage.intelligence import run_intelligence
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        review_item_id = snapshot["review_rows"][0]["review_item_id"]
+        request = Request(
+            f"{handle.url}/api/review",
+            data=urlencode({"review_item_id": review_item_id, "status": "resolved"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        payload = json.loads(urlopen(request).read().decode("utf-8"))
+        assert payload["review_item_id"] == review_item_id
+        assert payload["to_status"] == "resolved"
+
+        snapshot_after = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        statuses = {row["review_item_id"]: row["status"] for row in snapshot_after["review_rows"]}
+        assert review_item_id not in statuses
     finally:
         handle.server.shutdown()
         handle.server.server_close()

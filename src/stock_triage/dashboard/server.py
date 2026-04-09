@@ -22,6 +22,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from ..config import Config
+from ..intelligence.review import update_review_status
 from ..logging_setup import get_logger
 from .assets import read_static_asset
 from .pipeline import load_dashboard_snapshot, render_dashboard_html
@@ -207,6 +208,9 @@ def _handler_factory():
                     findings=snapshot["findings"],
                     revisions=snapshot["revisions"],
                     inbox_rows=snapshot["inbox_rows"],
+                    digest_rows=snapshot["digest_rows"],
+                    review_rows=snapshot["review_rows"],
+                    intelligence_kpis=snapshot["intelligence_kpis"],
                     backlog_rows=snapshot["backlog_rows"],
                     canary_rows=snapshot["canary_rows"],
                     metrics_href="/metrics.csv",
@@ -277,6 +281,9 @@ def _handler_factory():
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib interface
             parsed = urlparse(self.path)
+            if parsed.path == "/api/review":
+                self._handle_review_update()
+                return
             if parsed.path != "/api/action":
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
@@ -301,6 +308,38 @@ def _handler_factory():
                 "timestamp": job.timestamp,
             }
             self._write_json(HTTPStatus.ACCEPTED, response)
+
+        def _handle_review_update(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            params = {
+                key: values[-1]
+                for key, values in parse_qs(body.decode("utf-8")).items()
+            }
+            review_item_id = params.get("review_item_id", "").strip()
+            status = params.get("status", "").strip()
+            note = params.get("note", "").strip() or None
+            if not review_item_id or not status:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_review_item_id_or_status"})
+                return
+            try:
+                result = update_review_status(
+                    self.server.cfg,
+                    review_item_id=review_item_id,
+                    status=status,
+                    note=note,
+                )
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "review_item_id": result.review_item_id,
+                    "from_status": result.previous_status,
+                    "to_status": result.current_status,
+                    "note": result.note,
+                },
+            )
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
             get_logger("stock_triage.dashboard").info(
@@ -439,6 +478,9 @@ def _snapshot_payload(cfg: Config, action_history: list[dict[str, object]]) -> d
         "findings": snapshot.findings,
         "revisions": snapshot.revisions,
         "inbox_rows": snapshot.inbox_rows,
+        "digest_rows": snapshot.digest_rows,
+        "review_rows": snapshot.review_rows,
+        "intelligence_kpis": snapshot.intelligence_kpis,
         "backlog_rows": snapshot.backlog_rows,
         "canary_rows": snapshot.canary_rows,
         "action_history": list(action_history),
@@ -496,6 +538,7 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
         "alerts": ["alerts-run"],
         "canary": ["canary-run", "--source", "all"],
         "export": ["dashboard-export"],
+        "digest": ["digest-run"],
     }
     if action == "summary":
         if not document_id:
