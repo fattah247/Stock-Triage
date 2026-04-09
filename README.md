@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 8 — Dashboard, alerts, and canary monitoring** (done).
+**Phase 9 — Exchange-scale hardening** (in progress).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -23,7 +23,7 @@ review of source-data and model licensing.
 | 6 | Rule engine and evaluation harness | done |
 | 7 | Local LLM summary layer | done |
 | 8 | Dashboard, alerts, canary | done |
-| 9 | Exchange-scale hardening | pending |
+| 9 | Exchange-scale hardening | in progress |
 
 ## Layout
 
@@ -119,6 +119,11 @@ python -m stock_triage alerts-run
 # Run and inspect source canary checks
 python -m stock_triage canary-run
 python -m stock_triage canary-status
+
+# Run a bounded historical backfill and inspect backlog / SQLite throughput
+python -m stock_triage backfill --source financial_report --start-year 2024 --end-year 2025
+python -m stock_triage backlog-status
+python -m stock_triage benchmark-sqlite
 ```
 
 For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
@@ -182,6 +187,11 @@ Defaults live in `config/default.yaml`. Override either by:
   history, and evidence-linked findings; emits watchlist alerts into a local
   JSONL channel with persisted dedupe; and persists canary health snapshots for
   source drift and source failures instead of crashing on blocked checks.
+- **Phase 9 hardening bootstrap.** The repository now has bounded backfill
+  orchestration, per-source backlog reporting, and a SQLite writer benchmark so
+  scale decisions can be made from measured queue latency and throughput instead
+  of guesswork. The operating checklist lives in
+  `docs/phase9_operational_playbook.md`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.
