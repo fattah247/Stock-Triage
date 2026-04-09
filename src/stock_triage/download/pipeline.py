@@ -52,6 +52,16 @@ class ExistingDownload:
 
 
 @dataclass(frozen=True)
+class ResourceState:
+    source_file_id: str
+    status: str
+    document_id: str | None
+    attempt_count: int
+    failure_count: int
+    next_attempt_at: str | None
+
+
+@dataclass(frozen=True)
 class DownloadedAttachment:
     original_url: str
     retrieved_at: datetime
@@ -216,6 +226,18 @@ def run_downloads(
                 resources = _resources_for_candidate(candidate)
                 existing_downloads = _existing_downloads_for_candidate(reader, candidate)
                 for resource in resources:
+                    state = _resource_state_for_candidate(reader, candidate, resource)
+                    if state is None:
+                        initial_status = "downloaded" if resource.source_file_id in existing_downloads else "pending"
+                        wq.submit(
+                            lambda conn, c=candidate, r=resource, s=initial_status, doc=existing_downloads.get(resource.source_file_id): _upsert_download_resource(
+                                conn,
+                                candidate=c,
+                                resource=r,
+                                status=s,
+                                document_id=None if doc is None else doc.document_id,
+                            )
+                        )
                     existing = existing_downloads.get(resource.source_file_id)
                     if not include_existing and existing is not None:
                         continue
@@ -231,6 +253,16 @@ def run_downloads(
                                 conn,
                                 candidate=c,
                                 resource=r,
+                                attempt=a,
+                            )
+                        )
+                        wq.submit(
+                            lambda conn, c=candidate, r=resource, a=failure: _upsert_download_resource(
+                                conn,
+                                candidate=c,
+                                resource=r,
+                                status=a.status,
+                                document_id=None,
                                 attempt=a,
                             )
                         )
@@ -258,6 +290,15 @@ def run_downloads(
                                 document_id=existing.document_id if existing is not None else None,
                             ): _persist_download_attempt(conn, candidate=c, resource=r, attempt=a)
                         )
+                        wq.submit(
+                            lambda conn, c=candidate, r=resource, existing_doc=existing: _upsert_download_resource(
+                                conn,
+                                candidate=c,
+                                resource=r,
+                                status="downloaded",
+                                document_id=None if existing_doc is None else existing_doc.document_id,
+                            )
+                        )
                         result = _replace_result(result, not_modified=result.not_modified + 1)
                         continue
 
@@ -280,6 +321,15 @@ def run_downloads(
                             http_status=http_status,
                             document_id=persist.document_id,
                         ): _persist_download_attempt(conn, candidate=c, resource=r, attempt=a)
+                    )
+                    wq.submit(
+                        lambda conn, c=candidate, r=resource, doc_id=persist.document_id: _upsert_download_resource(
+                            conn,
+                            candidate=c,
+                            resource=r,
+                            status="downloaded",
+                            document_id=doc_id,
+                        )
                     )
                     result = _replace_result(result, fetched=result.fetched + 1)
                     if persist.inserted:
@@ -379,6 +429,31 @@ def _existing_downloads_for_candidate(conn: sqlite3.Connection, candidate: Downl
     return out
 
 
+def _resource_state_for_candidate(
+    conn: sqlite3.Connection,
+    candidate: DownloadCandidate,
+    resource: DownloadResource,
+) -> ResourceState | None:
+    row = conn.execute(
+        """
+        SELECT source_file_id, status, document_id, attempt_count, failure_count, next_attempt_at
+        FROM download_resources
+        WHERE source_name = ? AND source_record_id = ? AND source_file_id = ?
+        """,
+        (candidate.source_name, candidate.source_record_id, resource.source_file_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return ResourceState(
+        source_file_id=row["source_file_id"],
+        status=row["status"],
+        document_id=row["document_id"],
+        attempt_count=row["attempt_count"],
+        failure_count=row["failure_count"],
+        next_attempt_at=row["next_attempt_at"],
+    )
+
+
 def _persist_download(
     conn: sqlite3.Connection,
     *,
@@ -398,7 +473,7 @@ def _persist_download(
         return DownloadPersistResult(inserted=False, document_id=existing["document_id"])
 
     now = fetched.retrieved_at.isoformat()
-    version_group_id = _stable_id(f"version:{candidate.source_name}:{candidate.source_record_id}")
+    version_group_id = _version_group_id(candidate, resource)
     document_id = _stable_id(
         f"document:{candidate.source_name}:{candidate.source_record_id}:{resource.source_file_id}:{fetched.stored_file.sha256}"
     )
@@ -406,8 +481,8 @@ def _persist_download(
     conn.execute(
         """
         INSERT INTO document_versions (
-            version_group_id, source_name, source_record_id, ticker, created_at
-        ) VALUES (?, ?, ?, ?, ?)
+            version_group_id, source_name, source_record_id, ticker, created_at, source_file_id
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(version_group_id) DO NOTHING
         """,
         (
@@ -416,6 +491,7 @@ def _persist_download(
             candidate.source_record_id,
             candidate.ticker,
             now,
+            resource.source_file_id,
         ),
     )
     conn.execute(
@@ -450,6 +526,81 @@ def _persist_download(
         ),
     )
     return DownloadPersistResult(inserted=True, document_id=document_id)
+
+
+def _upsert_download_resource(
+    conn: sqlite3.Connection,
+    *,
+    candidate: DownloadCandidate,
+    resource: DownloadResource,
+    status: str,
+    document_id: str | None,
+    attempt: DownloadAttemptPersist | None = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    existing = conn.execute(
+        """
+        SELECT attempt_count, failure_count, status, document_id, first_seen_at
+        FROM download_resources
+        WHERE source_name = ? AND source_record_id = ? AND source_file_id = ?
+        """,
+        (candidate.source_name, candidate.source_record_id, resource.source_file_id),
+    ).fetchone()
+    attempt_count = 0 if existing is None else existing["attempt_count"]
+    failure_count = 0 if existing is None else existing["failure_count"]
+    if attempt is not None:
+        attempt_count += 1
+        if attempt.status == "failed":
+            failure_count += 1
+        elif status == "downloaded":
+            failure_count = 0
+    first_seen_at = now if existing is None else existing["first_seen_at"]
+    resolved_document_id = document_id or (None if existing is None else existing["document_id"])
+    conn.execute(
+        """
+        INSERT INTO download_resources (
+            resource_id, candidate_id, source_name, source_record_id, source_file_id,
+            attachment_url, attachment_filename, status, document_id, attempt_count,
+            failure_count, last_attempted_at, next_attempt_at, last_http_status,
+            last_error_code, last_error_detail, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_name, source_record_id, source_file_id) DO UPDATE SET
+            candidate_id = excluded.candidate_id,
+            attachment_url = excluded.attachment_url,
+            attachment_filename = excluded.attachment_filename,
+            status = excluded.status,
+            document_id = excluded.document_id,
+            attempt_count = excluded.attempt_count,
+            failure_count = excluded.failure_count,
+            last_attempted_at = excluded.last_attempted_at,
+            next_attempt_at = excluded.next_attempt_at,
+            last_http_status = excluded.last_http_status,
+            last_error_code = excluded.last_error_code,
+            last_error_detail = excluded.last_error_detail,
+            first_seen_at = excluded.first_seen_at,
+            last_seen_at = excluded.last_seen_at
+        """,
+        (
+            _resource_id(candidate, resource),
+            candidate.candidate_id,
+            candidate.source_name,
+            candidate.source_record_id,
+            resource.source_file_id,
+            resource.attachment_url,
+            resource.attachment_filename,
+            status,
+            resolved_document_id,
+            attempt_count,
+            failure_count,
+            None if attempt is None else attempt.finished_at.isoformat(),
+            None,
+            None if attempt is None else attempt.http_status,
+            None if attempt is None else attempt.error_code,
+            None if attempt is None else attempt.error_detail,
+            first_seen_at,
+            now,
+        ),
+    )
 
 
 def _persist_download_attempt(
@@ -526,6 +677,9 @@ def _resources_for_candidate(candidate: DownloadCandidate) -> list[DownloadResou
 def _candidate_has_pending_work(conn: sqlite3.Connection, candidate: DownloadCandidate) -> bool:
     existing_downloads = _existing_downloads_for_candidate(conn, candidate)
     for resource in _resources_for_candidate(candidate):
+        state = _resource_state_for_candidate(conn, candidate, resource)
+        if state is not None and state.status == "downloaded" and state.document_id is not None:
+            continue
         if resource.source_file_id not in existing_downloads:
             return True
     return False
@@ -570,6 +724,14 @@ def _attempt_from_exception(exc: Exception, *, started_at: datetime, finished_at
 
 def _stable_id(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _resource_id(candidate: DownloadCandidate, resource: DownloadResource) -> str:
+    return _stable_id(f"download-resource:{candidate.source_name}:{candidate.source_record_id}:{resource.source_file_id}")
+
+
+def _version_group_id(candidate: DownloadCandidate, resource: DownloadResource) -> str:
+    return f"version:{candidate.source_name}:{candidate.source_record_id}:{resource.source_file_id}"
 
 
 def _replace_result(result: DownloadRunResult, **updates: int) -> DownloadRunResult:

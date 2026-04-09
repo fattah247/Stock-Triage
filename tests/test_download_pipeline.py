@@ -64,12 +64,13 @@ def test_run_downloads_persists_documents_and_version_groups(tmp_config):
         assert row["sha256"]
 
         version = rconn.execute(
-            "SELECT source_name, source_record_id FROM document_versions WHERE version_group_id = ?",
+            "SELECT source_name, source_record_id, source_file_id FROM document_versions WHERE version_group_id = ?",
             (row["version_group_id"],),
         ).fetchone()
         assert version is not None
         assert version["source_name"] == "idx_disclosures"
         assert version["source_record_id"] == "disc-1"
+        assert version["source_file_id"] == "disc-1"
         attempt = rconn.execute(
             """
             SELECT status, document_id
@@ -336,6 +337,75 @@ def test_disclosure_candidate_remains_pending_until_attachments_downloaded(tmp_c
         second_client.close()
 
     assert second.selected == 0
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT COUNT(DISTINCT version_group_id) AS groups, COUNT(*) AS docs
+            FROM documents
+            WHERE source_name = 'idx_disclosures' AND source_record_id = 'disc-attach'
+            """
+        ).fetchone()
+        assert row["docs"] == 3
+        assert row["groups"] == 3
+    finally:
+        rconn.close()
+
+
+def test_disclosure_allows_same_bytes_for_multiple_attachment_resources(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-dup",
+        ticker="BGTG",
+        title="Disclosure With Duplicate Attachment Bytes",
+        attachment_url="https://example.test/disclosures/main.pdf",
+        attachment_filename="main.pdf",
+        raw_metadata={
+            "attachments": [
+                {"filename": "att-1.pdf", "url": "https://example.test/disclosures/att-1.pdf"},
+            ]
+        },
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 same bytes",
+                request=request,
+            )
+        )
+    )
+    try:
+        result = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=client)
+    finally:
+        client.close()
+
+    assert result.inserted == 2
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT COUNT(*) AS docs, COUNT(DISTINCT source_file_id) AS resources, COUNT(DISTINCT version_group_id) AS groups
+            FROM documents
+            WHERE source_name = 'idx_disclosures' AND source_record_id = 'disc-dup'
+            """
+        ).fetchone()
+        assert row["docs"] == 2
+        assert row["resources"] == 2
+        assert row["groups"] == 2
+    finally:
+        rconn.close()
 
 
 def test_run_downloads_persists_failed_attempts(tmp_config):
