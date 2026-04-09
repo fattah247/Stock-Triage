@@ -14,7 +14,8 @@ source-data and model licensing.
 **Phase 9 — Exchange-scale hardening** (done). On the active v3 branch,
 **Phase 10 — derived intelligence foundation**, **Phase 11 — change
 detection and snapshot assembly**, **Phase 12 — thesis engine and alert
-upgrades**, and **Phase 13 — management claim ledger** are implemented.
+upgrades**, **Phase 13 — management claim ledger**, and **Phase 14 — peer
+and sector intelligence** are implemented.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -37,6 +38,7 @@ V3 preview on this branch:
 | 11 | Change detection and snapshot assembly | done |
 | 12 | Thesis engine and alert upgrades | done |
 | 13 | Management claim ledger | done |
+| 14 | Peer and sector intelligence | done |
 
 ## Layout
 
@@ -125,7 +127,8 @@ python -m stock_triage summary-generate <document_id>
 
 # Build the v3-derived layer: revision-aware deltas, current snapshots,
 # health-state explanations, claim ledger and outcomes, thesis evaluations,
-# review items, peer sets, and sector rollups.
+# review items, peer sets, sector rollups, peer ranks, anomaly records,
+# and sector heatmap inputs.
 python -m stock_triage intelligence-run --limit 25
 
 # Render the local dashboard plus CSV exports
@@ -235,6 +238,12 @@ Defaults live in `config/default.yaml`. Override either by:
   `claim_outcomes` when later evidence exists, and exposes credibility summary
   state such as achieved rate, contradicted rate, unresolved rate, and recycled
   claim count inside the current company snapshot.
+- **V3 Phase 14 peer and sector intelligence.** `python -m stock_triage intelligence-run ...`
+  now also builds comparability-aware peer sets, ranks each company against
+  its sector or subsector on normalized fields such as revenue growth, margins,
+  leverage, dilution frequency, governance-change frequency, and event density,
+  persists richer `sector_rollups`, and exposes comparability warnings, peer
+  anomalies, and sector heatmap inputs inside the current snapshot and brief.
 
 Example local thesis file (`data/theses.yaml`):
 

@@ -103,6 +103,13 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         }
         assert payload["thesis_evaluations"][0]["status"] == "broken"
         assert payload["thesis_evaluations"][0]["details"]["matched_stop"][0]["kind"] == "rule_present"
+        assert payload["peer_comparison"]["peer_key"] == "subsector:Marine Logistics"
+        assert payload["peer_comparison"]["comparable_peer_count"] == 3
+        assert any("SAFE: currency mismatch" in warning for warning in payload["peer_comparison"]["comparability_warnings"])
+        assert payload["peer_comparison"]["metric_ranks"]["revenue_growth_pct"]["rank"] == 1
+        assert payload["peer_comparison"]["metric_ranks"]["event_density"]["anomaly"] == "negative_outlier"
+        assert payload["sector_context"]["heatmap"]["red_flag_density"] == 0.6
+        assert any(anomaly["ticker"] == "TAMU" for anomaly in payload["sector_context"]["top_anomalies"])
 
         counts = {
             table: rconn.execute(f"SELECT COUNT(*) AS cnt FROM {table}").fetchone()["cnt"]
@@ -193,7 +200,7 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "intelligence-run:" in captured
-    assert "derived_version=phase13-v1" in captured
+    assert "derived_version=phase14-v1" in captured
     assert "selected_tickers=1" in captured
     assert "thesis_evaluations=1" in captured
     assert "claims=3" in captured
@@ -555,6 +562,133 @@ def _seed_phase10_inputs(tmp_config) -> None:
                     newer,
                 ),
             )
+            peer_companies = [
+                ("SHIP", "PT Shipping Alpha Tbk", "USD", 3900000.0, 4200000.0, 150000.0, 700000.0, []),
+                ("DEEP", "PT Deep Harbor Tbk", "USD", 3950000.0, 4300000.0, 175000.0, 680000.0, ["governance_issue"]),
+                ("WAVE", "PT Wave Marine Tbk", "USD", 4500000.0, 4700000.0, 210000.0, 640000.0, []),
+                ("SAFE", "PT Safety Shipping Tbk", "IDR", 3000000.0, 3200000.0, 120000.0, 500000.0, ["capital_raise"]),
+            ]
+            for ticker, issuer_name, currency, previous_revenue, current_revenue, operating_profit, total_liabilities, event_types in peer_companies:
+                if ticker != "SAFE":
+                    conn.execute(
+                        """
+                        INSERT INTO companies (
+                            ticker, issuer_name, listing_date, active_status, sector, subsector, industry,
+                            listing_board, source_urls, raw_metadata, first_seen_at, last_seen_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ticker,
+                            issuer_name,
+                            "2019-01-01",
+                            "listed",
+                            "Transportation",
+                            "Marine Logistics",
+                            "Shipping",
+                            "main",
+                            json.dumps(["https://www.idx.co.id"]),
+                            json.dumps({}),
+                            newer,
+                            newer,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO document_versions (
+                        version_group_id, source_name, source_record_id, ticker, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (f"vg-{ticker.lower()}-1", "idx_financial_reports", f"fin-2024-{ticker.lower()}", ticker, newer),
+                )
+                for suffix, stamp in (("b", older), ("a", newer)):
+                    conn.execute(
+                        """
+                        INSERT INTO documents (
+                            document_id, source_name, source_record_id, source_file_id, source_modified_at, retrieved_at, original_url,
+                            local_path, sha256, mime_type, document_type, language_variant, process_state,
+                            parser_version, pipeline_version, ruleset_version, prompt_version, model_name,
+                            output_schema_version, ticker, version_group_id, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"doc-{ticker.lower()}-{suffix}",
+                            "idx_financial_reports",
+                            f"fin-2024-{ticker.lower()}",
+                            f"fin-2024-{ticker.lower()}-{suffix}",
+                            stamp,
+                            stamp,
+                            f"https://example.test/{ticker.lower()}.pdf",
+                            str(tmp_config.paths.data_dir / f"{ticker.lower()}-annual-report.pdf"),
+                            f"sha-{ticker.lower()}-{suffix}",
+                            "application/pdf",
+                            "annual_report",
+                            "bilingual",
+                            "analyzed",
+                            "phase4-v1",
+                            "phase5-v1",
+                            "phase6-v1",
+                            "phase7-v2",
+                            "gemma2:9b",
+                            "appendix-c-v1",
+                            ticker,
+                            f"vg-{ticker.lower()}-1",
+                            stamp,
+                            stamp,
+                        ),
+                    )
+                metric_rows = [
+                    (f"metric-{ticker.lower()}-revenue-prev", f"doc-{ticker.lower()}-b", "revenue", previous_revenue, older),
+                    (f"metric-{ticker.lower()}-revenue-current", f"doc-{ticker.lower()}-a", "revenue", current_revenue, newer),
+                    (f"metric-{ticker.lower()}-op-profit-current", f"doc-{ticker.lower()}-a", "operating_profit", operating_profit, newer),
+                    (f"metric-{ticker.lower()}-liabilities-current", f"doc-{ticker.lower()}-a", "total_liabilities", total_liabilities, newer),
+                ]
+                for metric_id, document_id, metric_name, value, stamp in metric_rows:
+                    conn.execute(
+                        """
+                        INSERT INTO metric_items (
+                            metric_id, document_id, ticker, metric_name, value_normalized, raw_value_text, currency,
+                            unit_scale, fiscal_year, fiscal_period, period_end_date, audit_status, consolidation_scope,
+                            language_variant, evidence_span_id, extracted_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            metric_id,
+                            document_id,
+                            ticker,
+                            metric_name,
+                            value,
+                            str(value),
+                            currency,
+                            "units",
+                            2024,
+                            "Annual",
+                            "2024-12-31",
+                            "audited",
+                            "consolidated",
+                            "bilingual",
+                            None,
+                            stamp,
+                        ),
+                    )
+                for idx, event_type in enumerate(event_types, start=1):
+                    conn.execute(
+                        """
+                        INSERT INTO events (
+                            event_id, document_id, ticker, event_type, matched_pattern, severity, rationale, evidence_span_id, detected_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"event-{ticker.lower()}-{idx}",
+                            f"doc-{ticker.lower()}-a",
+                            ticker,
+                            event_type,
+                            event_type,
+                            "warning",
+                            f"{ticker} emitted {event_type}.",
+                            None,
+                            newer,
+                        ),
+                    )
 
         wq.submit(_insert)
 

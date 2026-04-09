@@ -7,6 +7,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from statistics import median
 from typing import Any
 
 from ..config import Config
@@ -27,7 +28,39 @@ from .claims import (
     extract_claims_for_documents,
 )
 
-DERIVED_VERSION = "phase13-v1"
+DERIVED_VERSION = "phase14-v1"
+
+HIGHER_IS_BETTER_FIELDS = {
+    "revenue_growth_pct",
+    "operating_margin_pct",
+    "net_margin_pct",
+    "cash_flow_margin_pct",
+}
+LOWER_IS_BETTER_FIELDS = {
+    "leverage_ratio_pct",
+    "dilution_frequency",
+    "governance_change_frequency",
+    "event_density",
+}
+COMPARISON_FIELD_LABELS = {
+    "revenue_growth_pct": "Revenue Growth",
+    "operating_margin_pct": "Operating Margin",
+    "net_margin_pct": "Net Margin",
+    "cash_flow_margin_pct": "Cash-Flow Margin",
+    "leverage_ratio_pct": "Leverage",
+    "dilution_frequency": "Dilution Frequency",
+    "governance_change_frequency": "Governance Change Frequency",
+    "event_density": "Event Density",
+}
+DILUTION_EVENT_TYPES = {"capital_raise", "rights_issue", "share_issue", "warrant_issue", "private_placement"}
+GOVERNANCE_EVENT_TYPES = {
+    "board_change",
+    "director_change",
+    "commissioner_change",
+    "management_change",
+    "audit_committee_change",
+    "governance_issue",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +100,8 @@ class MetricPoint:
     fiscal_year: int | None
     fiscal_period: str | None
     period_end_date: str | None
+    audit_status: str | None
+    consolidation_scope: str | None
     evidence_span_id: str | None
 
 
@@ -171,6 +206,28 @@ class SectorRollupRecord:
 
 
 @dataclass(frozen=True)
+class ComparableCompanyState:
+    ticker: str
+    issuer_name: str
+    sector: str | None
+    subsector: str | None
+    latest_document_id: str
+    latest_as_of: str | None
+    baseline_document_id: str | None
+    baseline_kind: str
+    historical_comparable: bool
+    fiscal_year: int | None
+    fiscal_period: str | None
+    period_end_date: str | None
+    currency: str | None
+    unit_scale: str | None
+    consolidation_scope: str | None
+    metrics: dict[str, float | None]
+    warning_signal_count: int
+    critical_signal_count: int
+
+
+@dataclass(frozen=True)
 class CompanyIntelligenceBundle:
     profile: CompanyProfile
     latest_document: CompanyDocument
@@ -188,7 +245,9 @@ class CompanyIntelligenceBundle:
     brief_payload_json: str
     review_items: list[ReviewQueueItem]
     peer_set: PeerSetRecord
+    peer_view: dict[str, Any]
     sector_rollup: SectorRollupRecord
+    sector_view: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -286,6 +345,15 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     previous_rules = _load_triggered_rules(conn, baseline.document.document_id) if baseline is not None else []
     latest_analysis = _load_latest_analysis(conn, latest_document.document_id)
     previous_analysis = _load_latest_analysis(conn, baseline.document.document_id) if baseline is not None else None
+    current_company_state = _build_comparable_company_state(
+        conn,
+        profile=profile,
+        latest_document=latest_document,
+        latest_metrics=latest_metrics,
+        baseline=baseline,
+        latest_events=latest_events,
+        latest_rules=latest_rules,
+    )
     theses = load_db_theses(conn, ticker=ticker)
     deltas = _build_deltas(
         ticker=ticker,
@@ -339,6 +407,8 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         document_id=latest_document.document_id,
         claim_outcomes=claim_outcomes,
     )
+    peer_set, peer_view = _build_peer_set(conn, profile, current_company_state)
+    sector_rollup, sector_view = _build_sector_rollup(conn, profile, current_company_state)
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
@@ -353,6 +423,8 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         claim_outcomes=claim_outcomes,
         credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
+        peer_view=peer_view,
+        sector_view=sector_view,
     )
     brief_payload_json = _build_brief_payload_json(
         ticker=ticker,
@@ -363,6 +435,8 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         baseline=baseline,
         credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
+        peer_view=peer_view,
+        sector_view=sector_view,
     )
     review_items = _build_review_items(
         ticker=ticker,
@@ -373,8 +447,6 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     review_items.extend(conflict_items)
     review_items.extend(thesis_items)
     review_items.extend(claim_items)
-    peer_set = _build_peer_set(conn, profile)
-    sector_rollup = _build_sector_rollup(conn, profile)
     return CompanyIntelligenceBundle(
         profile=profile,
         latest_document=latest_document,
@@ -392,7 +464,9 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         brief_payload_json=brief_payload_json,
         review_items=review_items,
         peer_set=peer_set,
+        peer_view=peer_view,
         sector_rollup=sector_rollup,
+        sector_view=sector_view,
     )
 
 
@@ -524,6 +598,8 @@ def _load_document_metrics(conn: sqlite3.Connection, document_id: str) -> list[M
             fiscal_year,
             fiscal_period,
             period_end_date,
+            audit_status,
+            consolidation_scope,
             evidence_span_id
         FROM metric_items
         WHERE document_id = ?
@@ -543,6 +619,8 @@ def _load_document_metrics(conn: sqlite3.Connection, document_id: str) -> list[M
             fiscal_year=row["fiscal_year"],
             fiscal_period=row["fiscal_period"],
             period_end_date=row["period_end_date"],
+            audit_status=row["audit_status"],
+            consolidation_scope=row["consolidation_scope"],
             evidence_span_id=row["evidence_span_id"],
         )
         for row in rows
@@ -563,6 +641,8 @@ def _load_ticker_metrics(conn: sqlite3.Connection, ticker: str) -> list[MetricPo
             mi.fiscal_year,
             mi.fiscal_period,
             mi.period_end_date,
+            mi.audit_status,
+            mi.consolidation_scope,
             mi.evidence_span_id
         FROM metric_items mi
         JOIN documents d ON d.document_id = mi.document_id
@@ -584,6 +664,8 @@ def _load_ticker_metrics(conn: sqlite3.Connection, ticker: str) -> list[MetricPo
             fiscal_year=row["fiscal_year"],
             fiscal_period=row["fiscal_period"],
             period_end_date=row["period_end_date"],
+            audit_status=row["audit_status"],
+            consolidation_scope=row["consolidation_scope"],
             evidence_span_id=row["evidence_span_id"],
         )
         for row in rows
@@ -1005,6 +1087,8 @@ def _build_snapshot_payload_json(
     claim_outcomes: list[ClaimOutcomeRecord],
     credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
+    peer_view: dict[str, Any],
+    sector_view: dict[str, Any],
 ) -> str:
     health = _build_health_state(
         baseline=baseline,
@@ -1018,6 +1102,9 @@ def _build_snapshot_payload_json(
     delta_counts: dict[str, int] = {}
     for delta in deltas:
         delta_counts[delta.delta_kind] = delta_counts.get(delta.delta_kind, 0) + 1
+    if peer_view.get("comparability_warnings"):
+        warning_count = len(peer_view["comparability_warnings"])
+        health["reasons"].append(f"Peer comparison has {warning_count} comparability warning(s).")
     payload = {
         "ticker": profile.ticker,
         "issuer_name": profile.issuer_name,
@@ -1152,6 +1239,8 @@ def _build_snapshot_payload_json(
             }
             for item in conflicts
         ],
+        "peer_comparison": peer_view,
+        "sector_context": sector_view,
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -1166,6 +1255,8 @@ def _build_brief_payload_json(
     baseline: BaselineChoice | None,
     credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
+    peer_view: dict[str, Any],
+    sector_view: dict[str, Any],
 ) -> str:
     headline = latest_analysis.summary if latest_analysis and latest_analysis.summary else "No local summary available yet."
     payload = {
@@ -1178,6 +1269,8 @@ def _build_brief_payload_json(
         "verify_next": latest_analysis.what_to_verify[:5] if latest_analysis else [],
         "management_credibility_state": credibility_summary.credibility_state,
         "thesis_statuses": [evaluation.status for evaluation in thesis_evaluations],
+        "peer_highlights": [anomaly["summary"] for anomaly in peer_view.get("anomalies", [])[:3]],
+        "sector_heatmap": sector_view.get("heatmap", {}),
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -1619,58 +1712,418 @@ def _compare_numeric(value: float, operator: str, threshold: float) -> bool:
     return False
 
 
-def _build_peer_set(conn: sqlite3.Connection, profile: CompanyProfile) -> PeerSetRecord:
-    sector = profile.sector or "unknown"
-    peer_rows = conn.execute(
-        """
-        SELECT ticker
-        FROM companies
-        WHERE sector = ?
-          AND ticker != ?
-        ORDER BY ticker ASC
-        LIMIT 10
-        """,
-        (sector, profile.ticker),
-    ).fetchall()
-    peer_tickers = [row["ticker"] for row in peer_rows]
-    peer_key = f"sector:{sector}"
-    rationale = f"Peers selected from the same sector ({sector})."
-    return PeerSetRecord(
-        peer_set_id=_stable_id("peers", profile.ticker, peer_key, DERIVED_VERSION),
+def _build_comparable_company_state(
+    conn: sqlite3.Connection,
+    *,
+    profile: CompanyProfile,
+    latest_document: CompanyDocument | None = None,
+    latest_metrics: list[MetricPoint] | None = None,
+    baseline: BaselineChoice | None = None,
+    latest_events: list[EventSignal] | None = None,
+    latest_rules: list[TriggeredRule] | None = None,
+) -> ComparableCompanyState | None:
+    documents = _load_company_documents(conn, profile.ticker, limit=4)
+    if not documents:
+        return None
+    latest_document = latest_document or documents[0]
+    if baseline is None:
+        baseline = _select_baseline(
+            latest_document,
+            [document for document in documents if document.document_id != latest_document.document_id],
+        )
+    latest_metrics = latest_metrics or _load_document_metrics(conn, latest_document.document_id)
+    if not latest_metrics:
+        return None
+    latest_events = latest_events or _load_document_events(conn, latest_document.document_id)
+    latest_rules = latest_rules or _load_triggered_rules(conn, latest_document.document_id)
+    metric_by_name = _metric_map(latest_metrics)
+    anchor_metric = _anchor_metric(latest_metrics)
+    baseline_metrics = _load_document_metrics(conn, baseline.document.document_id) if baseline is not None else []
+    baseline_metric_by_name = _metric_map(baseline_metrics)
+    revenue_growth_pct = _safe_percent_change(
+        baseline_metric_by_name.get("revenue"),
+        metric_by_name.get("revenue"),
+    ) if baseline and baseline.comparable else None
+    recent_documents = documents[:3]
+    recent_events = [event for document in recent_documents for event in _load_document_events(conn, document.document_id)]
+    recent_rules = [rule for document in recent_documents for rule in _load_triggered_rules(conn, document.document_id)]
+    warning_signal_count = sum(1 for event in recent_events if event.severity == "warning") + sum(
+        1 for rule in recent_rules if rule.severity == "warning"
+    )
+    critical_signal_count = sum(1 for event in recent_events if event.severity == "critical") + sum(
+        1 for rule in recent_rules if rule.severity == "critical"
+    )
+    revenue = metric_by_name.get("revenue")
+    operating_profit = metric_by_name.get("operating_profit")
+    net_income = metric_by_name.get("net_income")
+    operating_cash_flow = metric_by_name.get("operating_cash_flow")
+    total_liabilities = metric_by_name.get("total_liabilities")
+    total_assets = metric_by_name.get("total_assets")
+    total_equity = metric_by_name.get("total_equity")
+    total_debt = metric_by_name.get("total_debt")
+    leverage_ratio_pct = None
+    if total_liabilities is not None and total_assets not in {None, 0}:
+        leverage_ratio_pct = (total_liabilities / total_assets) * 100.0
+    elif total_debt is not None and total_equity not in {None, 0}:
+        leverage_ratio_pct = (total_debt / total_equity) * 100.0
+    elif total_liabilities is not None and revenue not in {None, 0}:
+        leverage_ratio_pct = (total_liabilities / revenue) * 100.0
+    return ComparableCompanyState(
         ticker=profile.ticker,
-        peer_key=peer_key,
-        peer_tickers_json=json.dumps(peer_tickers, sort_keys=True),
-        rationale=rationale,
+        issuer_name=profile.issuer_name,
+        sector=profile.sector,
+        subsector=profile.subsector,
+        latest_document_id=latest_document.document_id,
+        latest_as_of=latest_document.source_modified_at or latest_document.updated_at,
+        baseline_document_id=baseline.document.document_id if baseline is not None else None,
+        baseline_kind=baseline.kind if baseline is not None else "none",
+        historical_comparable=bool(baseline and baseline.comparable),
+        fiscal_year=anchor_metric.fiscal_year if anchor_metric is not None else None,
+        fiscal_period=anchor_metric.fiscal_period if anchor_metric is not None else None,
+        period_end_date=anchor_metric.period_end_date if anchor_metric is not None else None,
+        currency=anchor_metric.currency if anchor_metric is not None else None,
+        unit_scale=anchor_metric.unit_scale if anchor_metric is not None else None,
+        consolidation_scope=anchor_metric.consolidation_scope if anchor_metric is not None else None,
+        metrics={
+            "revenue_growth_pct": revenue_growth_pct,
+            "operating_margin_pct": _prefer_metric_or_ratio(metric_by_name, "operating_margin", operating_profit, revenue),
+            "net_margin_pct": _prefer_metric_or_ratio(metric_by_name, "net_margin", net_income, revenue),
+            "cash_flow_margin_pct": _prefer_metric_or_ratio(metric_by_name, "cash_flow_margin", operating_cash_flow, revenue),
+            "leverage_ratio_pct": leverage_ratio_pct,
+            "dilution_frequency": float(sum(1 for event in recent_events if event.event_type in DILUTION_EVENT_TYPES)),
+            "governance_change_frequency": float(sum(1 for event in recent_events if event.event_type in GOVERNANCE_EVENT_TYPES)),
+            "event_density": round(len(recent_events) / max(len(recent_documents), 1), 4),
+        },
+        warning_signal_count=warning_signal_count,
+        critical_signal_count=critical_signal_count,
     )
 
 
-def _build_sector_rollup(conn: sqlite3.Connection, profile: CompanyProfile) -> SectorRollupRecord:
-    sector = profile.sector or "unknown"
-    subsector = profile.subsector
-    row = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS company_count,
-            COUNT(DISTINCT CASE WHEN d.process_state = 'analyzed' THEN c.ticker END) AS analyzed_tickers
-        FROM companies c
-        LEFT JOIN documents d ON d.ticker = c.ticker
-        WHERE c.sector = ?
-        """,
-        (sector,),
-    ).fetchone()
-    payload = {
-        "sector": sector,
-        "subsector": subsector,
-        "company_count": row["company_count"] or 0,
-        "analyzed_tickers": row["analyzed_tickers"] or 0,
+def _build_peer_set(
+    conn: sqlite3.Connection,
+    profile: CompanyProfile,
+    current_state: ComparableCompanyState,
+) -> tuple[PeerSetRecord, dict[str, Any]]:
+    candidate_profiles = _load_sector_profiles(conn, sector=profile.sector, exclude_ticker=profile.ticker)
+    candidate_states: list[tuple[ComparableCompanyState, bool]] = []
+    for candidate in candidate_profiles:
+        state = _build_comparable_company_state(conn, profile=candidate)
+        if state is None:
+            continue
+        candidate_states.append((state, bool(profile.subsector and candidate.subsector == profile.subsector)))
+
+    same_subsector_states = [state for state, same_subsector in candidate_states if same_subsector]
+    if profile.subsector and len(same_subsector_states) >= 3:
+        selected_states = same_subsector_states
+        peer_key = f"subsector:{profile.subsector}"
+        rationale = f"Peers selected from the same subsector ({profile.subsector}) because enough comparable issuers exist."
+    else:
+        selected_states = [state for state, _ in candidate_states]
+        peer_key = f"sector:{profile.sector or 'unknown'}"
+        rationale = f"Peers selected from the same sector ({profile.sector or 'unknown'}) due to limited subsector coverage."
+
+    rows: list[dict[str, Any]] = []
+    comparable_states: list[ComparableCompanyState] = []
+    comparability_warnings: list[str] = []
+    for state in selected_states[:12]:
+        warnings = _peer_comparability_warnings(current_state, state)
+        rows.append(
+            {
+                "ticker": state.ticker,
+                "issuer_name": state.issuer_name,
+                "latest_as_of": state.latest_as_of,
+                "baseline_kind": state.baseline_kind,
+                "historical_comparable": state.historical_comparable,
+                "metrics": state.metrics,
+                "warning_signal_count": state.warning_signal_count,
+                "critical_signal_count": state.critical_signal_count,
+                "comparability_warnings": warnings,
+            }
+        )
+        if warnings:
+            comparability_warnings.append(f"{state.ticker}: {'; '.join(warnings)}")
+            continue
+        comparable_states.append(state)
+
+    metric_ranks, anomalies = _build_comparison_views(current_state, comparable_states)
+    peer_view = {
+        "peer_key": peer_key,
+        "selection_rationale": rationale,
+        "peer_count": len(rows),
+        "comparable_peer_count": len(comparable_states),
+        "comparability_warnings": comparability_warnings,
+        "metric_ranks": metric_ranks,
+        "anomalies": anomalies,
+        "peer_rows": rows,
     }
-    return SectorRollupRecord(
-        sector_rollup_id=_stable_id("sector", sector, subsector or "", "coverage", DERIVED_VERSION),
-        sector=sector,
-        subsector=subsector,
-        rollup_key="coverage",
-        payload_json=json.dumps(payload, sort_keys=True),
+    peer_tickers = [state.ticker for state in comparable_states]
+    return (
+        PeerSetRecord(
+            peer_set_id=_stable_id("peers", profile.ticker, peer_key, DERIVED_VERSION),
+            ticker=profile.ticker,
+            peer_key=peer_key,
+            peer_tickers_json=json.dumps(peer_tickers, sort_keys=True),
+            rationale=rationale,
+        ),
+        peer_view,
     )
+
+
+def _build_sector_rollup(
+    conn: sqlite3.Connection,
+    profile: CompanyProfile,
+    current_state: ComparableCompanyState,
+) -> tuple[SectorRollupRecord, dict[str, Any]]:
+    sector_profiles = _load_sector_profiles(conn, sector=profile.sector)
+    states = [state for candidate in sector_profiles if (state := _build_comparable_company_state(conn, profile=candidate)) is not None]
+    metric_summaries = {
+        field_name: _summarize_metric_distribution(states, field_name)
+        for field_name in COMPARISON_FIELD_LABELS
+    }
+    sector_ranks, _ = _build_comparison_views(
+        current_state,
+        [state for state in states if state.ticker != current_state.ticker and not _peer_comparability_warnings(current_state, state)],
+    )
+    red_flag_companies = sum(1 for state in states if state.warning_signal_count or state.critical_signal_count)
+    heatmap = {
+        "disclosure_intensity": round(median([state.metrics["event_density"] for state in states if state.metrics["event_density"] is not None]) if states else 0.0, 4),
+        "red_flag_density": round(red_flag_companies / max(len(states), 1), 4),
+        "governance_change_density": round(median([state.metrics["governance_change_frequency"] for state in states]) if states else 0.0, 4),
+        "dilution_frequency": round(median([state.metrics["dilution_frequency"] for state in states]) if states else 0.0, 4),
+    }
+    payload = {
+        "sector": profile.sector or "unknown",
+        "subsector": profile.subsector,
+        "company_count": len(sector_profiles),
+        "analyzed_tickers": len(states),
+        "metric_summaries": metric_summaries,
+        "heatmap": heatmap,
+        "subject_ranks": sector_ranks,
+        "top_anomalies": _collect_sector_anomalies(states)[:10],
+    }
+    return (
+        SectorRollupRecord(
+            sector_rollup_id=_stable_id("sector", profile.sector or "unknown", profile.subsector or "", "peer_intelligence", DERIVED_VERSION),
+            sector=profile.sector or "unknown",
+            subsector=profile.subsector,
+            rollup_key="peer_intelligence",
+            payload_json=json.dumps(payload, sort_keys=True),
+        ),
+        payload,
+    )
+
+
+def _load_sector_profiles(
+    conn: sqlite3.Connection,
+    *,
+    sector: str | None,
+    exclude_ticker: str | None = None,
+) -> list[CompanyProfile]:
+    params: list[object]
+    if sector is None:
+        where = "WHERE sector IS NULL"
+        params = []
+    else:
+        where = "WHERE sector = ?"
+        params = [sector]
+    if exclude_ticker is not None:
+        where += " AND ticker != ?"
+        params.append(exclude_ticker)
+    rows = conn.execute(
+        f"""
+        SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status
+        FROM companies
+        {where}
+        ORDER BY CASE WHEN active_status = 'listed' THEN 0 ELSE 1 END, ticker ASC
+        """,
+        tuple(params),
+    ).fetchall()
+    return [
+        CompanyProfile(
+            ticker=row["ticker"],
+            issuer_name=row["issuer_name"],
+            sector=row["sector"],
+            subsector=row["subsector"],
+            industry=row["industry"],
+            listing_board=row["listing_board"],
+            active_status=row["active_status"],
+        )
+        for row in rows
+    ]
+
+
+def _metric_map(metrics: list[MetricPoint]) -> dict[str, float | None]:
+    result: dict[str, float | None] = {}
+    for metric in metrics:
+        result.setdefault(metric.metric_name, metric.value_normalized)
+    return result
+
+
+def _anchor_metric(metrics: list[MetricPoint]) -> MetricPoint | None:
+    for preferred in ("revenue", "operating_profit", "net_income"):
+        for metric in metrics:
+            if metric.metric_name == preferred:
+                return metric
+    return metrics[0] if metrics else None
+
+
+def _prefer_metric_or_ratio(
+    metrics_by_name: dict[str, float | None],
+    metric_name: str,
+    numerator: float | None,
+    denominator: float | None,
+) -> float | None:
+    direct = metrics_by_name.get(metric_name)
+    if direct is not None:
+        return direct
+    if numerator is None or denominator in {None, 0}:
+        return None
+    return (numerator / denominator) * 100.0
+
+
+def _safe_percent_change(previous_value: float | None, current_value: float | None) -> float | None:
+    if previous_value in {None, 0} or current_value is None:
+        return None
+    return ((current_value - previous_value) / abs(previous_value)) * 100.0
+
+
+def _peer_comparability_warnings(subject: ComparableCompanyState, candidate: ComparableCompanyState) -> list[str]:
+    warnings: list[str] = []
+    if subject.fiscal_year is not None and candidate.fiscal_year is not None and subject.fiscal_year != candidate.fiscal_year:
+        warnings.append("fiscal year mismatch")
+    if subject.fiscal_period and candidate.fiscal_period and subject.fiscal_period != candidate.fiscal_period:
+        warnings.append("fiscal period mismatch")
+    if subject.currency and candidate.currency and subject.currency != candidate.currency:
+        warnings.append("currency mismatch")
+    if subject.unit_scale and candidate.unit_scale and subject.unit_scale != candidate.unit_scale:
+        warnings.append("unit scale mismatch")
+    if subject.consolidation_scope and candidate.consolidation_scope and subject.consolidation_scope != candidate.consolidation_scope:
+        warnings.append("consolidation scope mismatch")
+    return warnings
+
+
+def _build_comparison_views(
+    subject: ComparableCompanyState,
+    peer_states: list[ComparableCompanyState],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    metric_ranks: dict[str, Any] = {}
+    anomalies: list[dict[str, Any]] = []
+    for field_name in COMPARISON_FIELD_LABELS:
+        rank = _rank_metric_against_group(subject, peer_states, field_name)
+        if rank is None:
+            continue
+        metric_ranks[field_name] = rank
+        if rank["anomaly"] is not None:
+            anomalies.append(
+                {
+                    "metric_name": field_name,
+                    "label": COMPARISON_FIELD_LABELS[field_name],
+                    "anomaly": rank["anomaly"],
+                    "severity": rank["severity"],
+                    "summary": f"{subject.ticker} is a {rank['anomaly'].replace('_', ' ')} on {COMPARISON_FIELD_LABELS[field_name].lower()} versus peers.",
+                    "subject_value": rank["subject_value"],
+                    "peer_median": rank["peer_median"],
+                    "rank": rank["rank"],
+                    "sample_size": rank["sample_size"],
+                }
+            )
+    anomalies.sort(key=lambda item: (0 if item["severity"] == "critical" else 1, item["metric_name"]))
+    return metric_ranks, anomalies
+
+
+def _rank_metric_against_group(
+    subject: ComparableCompanyState,
+    peer_states: list[ComparableCompanyState],
+    field_name: str,
+) -> dict[str, Any] | None:
+    subject_value = subject.metrics.get(field_name)
+    if subject_value is None:
+        return None
+    values: list[tuple[str, float]] = [(subject.ticker, subject_value)]
+    for state in peer_states:
+        value = state.metrics.get(field_name)
+        if value is not None:
+            values.append((state.ticker, value))
+    if len(values) < 2:
+        return None
+    higher_is_better = field_name in HIGHER_IS_BETTER_FIELDS
+    ordered = sorted(values, key=lambda item: item[1], reverse=higher_is_better)
+    rank = next(index for index, item in enumerate(ordered, start=1) if item[0] == subject.ticker)
+    peer_values = [value for ticker, value in values if ticker != subject.ticker]
+    peer_median = float(median(peer_values)) if peer_values else subject_value
+    directional_gap = (subject_value - peer_median) if higher_is_better else (peer_median - subject_value)
+    if peer_median == 0:
+        if directional_gap > 0:
+            relative_gap_pct = 100.0
+        elif directional_gap < 0:
+            relative_gap_pct = -100.0
+        else:
+            relative_gap_pct = 0.0
+    else:
+        relative_gap_pct = (directional_gap / abs(peer_median)) * 100.0
+    anomaly = None
+    severity = None
+    if len(values) >= 4:
+        if rank == 1 and relative_gap_pct >= 25:
+            anomaly = "positive_outlier"
+        elif rank == len(values) and relative_gap_pct <= -25:
+            anomaly = "negative_outlier"
+        if anomaly is not None:
+            severity = "critical" if abs(relative_gap_pct) >= 50 else "warning"
+    return {
+        "label": COMPARISON_FIELD_LABELS[field_name],
+        "direction": "higher_better" if higher_is_better else "lower_better",
+        "subject_value": subject_value,
+        "peer_median": peer_median,
+        "rank": rank,
+        "sample_size": len(values),
+        "relative_gap_pct": relative_gap_pct,
+        "anomaly": anomaly,
+        "severity": severity,
+    }
+
+
+def _summarize_metric_distribution(
+    states: list[ComparableCompanyState],
+    field_name: str,
+) -> dict[str, Any]:
+    values = [(state.ticker, state.metrics.get(field_name)) for state in states if state.metrics.get(field_name) is not None]
+    if not values:
+        return {
+            "label": COMPARISON_FIELD_LABELS[field_name],
+            "sample_size": 0,
+            "median": None,
+            "leaders": [],
+            "laggards": [],
+        }
+    higher_is_better = field_name in HIGHER_IS_BETTER_FIELDS
+    ordered = sorted(values, key=lambda item: item[1], reverse=higher_is_better)
+    laggards = list(reversed(ordered)) if higher_is_better else ordered
+    numeric_values = [value for _, value in values]
+    return {
+        "label": COMPARISON_FIELD_LABELS[field_name],
+        "sample_size": len(values),
+        "median": float(median(numeric_values)),
+        "leaders": [{"ticker": ticker, "value": value} for ticker, value in ordered[:3]],
+        "laggards": [{"ticker": ticker, "value": value} for ticker, value in laggards[:3]],
+    }
+
+
+def _collect_sector_anomalies(states: list[ComparableCompanyState]) -> list[dict[str, Any]]:
+    anomalies: list[dict[str, Any]] = []
+    for state in states:
+        peers = [peer for peer in states if peer.ticker != state.ticker and not _peer_comparability_warnings(state, peer)]
+        _, peer_anomalies = _build_comparison_views(state, peers)
+        for anomaly in peer_anomalies:
+            anomalies.append(
+                {
+                    **anomaly,
+                    "ticker": state.ticker,
+                    "issuer_name": state.issuer_name,
+                }
+            )
+    anomalies.sort(key=lambda item: (0 if item["severity"] == "critical" else 1, item["ticker"], item["metric_name"]))
+    return anomalies
 
 
 def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle) -> dict[str, int]:
