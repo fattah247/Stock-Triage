@@ -77,11 +77,11 @@ class OCRConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    model_name: str = ""
+    model_name: str = "gemma2:9b"
     base_url: str = "http://localhost:11434/api"
     context_budget_tokens: int = 8000
     temperature: float = 0.0
-    timeout_s: int = 120
+    timeout_s: int = 600
 
 
 class DownloadConfig(BaseModel):

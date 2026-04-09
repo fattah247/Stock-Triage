@@ -14,7 +14,7 @@ from .download import run_downloads
 from .extract import load_extract_status, run_extract
 from .parse import load_parse_status, run_parse
 from .rules import load_rule_status, run_rules
-from .summary import build_summary_context, generate_summary, validate_summary_file
+from .summary import PROMPT_VERSION, build_summary_context, generate_summary, validate_summary_file
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -534,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     p_summary_validate.add_argument("--model-name", required=True, help="Local model name used to produce the output")
     p_summary_validate.add_argument(
         "--prompt-version",
-        default="phase7-v1",
+        default=PROMPT_VERSION,
         help="Prompt version identifier for the validated output",
     )
     p_summary_validate.set_defaults(func=cmd_summary_validate)
@@ -542,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     p_summary_generate.add_argument("document_id", help="Document id to summarize")
     p_summary_generate.add_argument(
         "--prompt-version",
-        default="phase7-v1",
+        default=PROMPT_VERSION,
         help="Prompt version identifier for the generated output",
     )
     p_summary_generate.set_defaults(func=cmd_summary_generate)

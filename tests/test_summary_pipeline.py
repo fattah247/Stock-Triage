@@ -60,7 +60,7 @@ def test_validate_summary_file_persists_analysis_run(tmp_config, tmp_path):
             (document_id,),
         ).fetchone()
         assert run["model_name"] == "local-test-model"
-        assert run["prompt_version"] == "phase7-v1"
+        assert run["prompt_version"] == "phase7-v2"
         assert run["output_schema_version"] == "appendix-c-v1"
         assert run["schema_valid"] == 1
         assert run["evidence_link_valid"] == 1
@@ -142,23 +142,13 @@ def test_generate_summary_calls_local_model_and_persists_result(tmp_config, monk
                     "content": json.dumps(
                         {
                             "document_id": document_id,
-                            "model_name": "ollama-test",
                             "summary": "Revenue fell.",
                             "key_changes": [
-                                {"claim": "Revenue weakened materially.", "severity": "high", "evidence_links": [span_id]}
+                                {"claim": "Revenue weakened materially.", "severity": "high", "evidence_links": ["E1"]}
                             ],
                             "risks": [],
                             "events": [],
                             "what_to_verify": [],
-                            "evidence_links": [
-                                {
-                                    "id": span_id,
-                                    "document_id": document_id,
-                                    "chunk_id": "chunk-1",
-                                    "page_start": 18,
-                                    "page_end": 18,
-                                }
-                            ],
                         }
                     )
                 }
@@ -172,12 +162,30 @@ def test_generate_summary_calls_local_model_and_persists_result(tmp_config, monk
     assert result.evidence_link_valid is True
     assert result.errors == []
 
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        run = rconn.execute(
+            """
+            SELECT output_json
+            FROM analysis_runs
+            WHERE document_id = ?
+            """,
+            (document_id,),
+        ).fetchone()
+        payload = json.loads(run["output_json"])
+        assert payload["model_name"] == "ollama-test"
+        assert payload["key_changes"][0]["evidence_links"] == [span_id]
+        assert payload["evidence_links"][0]["id"] == span_id
+    finally:
+        rconn.close()
+
 
 def test_summary_generate_cli_uses_generate_summary(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.generate_summary",
-        lambda cfg, document_id, prompt_version="phase7-v1": type(
+        lambda cfg, document_id, prompt_version="phase7-v2": type(
             "R",
             (),
             {

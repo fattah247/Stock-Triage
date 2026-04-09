@@ -31,6 +31,31 @@ class EventItem(BaseModel):
     evidence_links: list[str] = Field(min_length=1)
 
 
+class DraftKeyChange(BaseModel):
+    claim: str
+    severity: str
+    evidence_links: list[str] = Field(min_length=1)
+
+
+class DraftRiskItem(BaseModel):
+    claim: str
+    evidence_links: list[str] = Field(min_length=1)
+
+
+class DraftEventItem(BaseModel):
+    event_type: str
+    evidence_links: list[str] = Field(min_length=1)
+
+
+class SummaryDraftOutput(BaseModel):
+    document_id: str
+    summary: str
+    key_changes: list[DraftKeyChange]
+    risks: list[DraftRiskItem]
+    events: list[DraftEventItem]
+    what_to_verify: list[str]
+
+
 class SummaryOutput(BaseModel):
     document_id: str
     model_name: str

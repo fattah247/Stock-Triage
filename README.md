@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 7 — Local LLM summary layer** (in progress).
+**Phase 7 — Local LLM summary layer** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -21,7 +21,7 @@ review of source-data and model licensing.
 | 4 | Parsing, OCR, chunking | done |
 | 5 | Normalization, extraction, events | done |
 | 6 | Rule engine and evaluation harness | done |
-| 7 | Local LLM summary layer | in progress |
+| 7 | Local LLM summary layer | done |
 | 8 | Dashboard, alerts, canary | pending |
 | 9 | Exchange-scale hardening | pending |
 
@@ -106,8 +106,8 @@ python -m stock_triage summary-context <document_id>
 # Validate and persist a local-model JSON output against Appendix C
 python -m stock_triage summary-validate <document_id> --input-file /tmp/output.json --model-name local-model
 
-# If a local Ollama-compatible runtime is running and llm.model_name is set,
-# generate and validate the summary in one step
+# If a local Ollama-compatible runtime is running, generate and validate the
+# summary in one step. The default local model is gemma2:9b.
 python -m stock_triage summary-generate <document_id>
 ```
 
@@ -161,12 +161,12 @@ Defaults live in `config/default.yaml`. Override either by:
   update documents into the `analyzed` state, and expose coverage plus recent
   trigger reporting via `python -m stock_triage rules-status ...`. Current
   baseline audit notes live in `docs/phase6_rule_audit.md`.
-- **Phase 7 summary bootstrap.** The repository now has an Appendix C output
-  schema, curated summary-context assembly from metrics/rules/evidence, and a
-  validation gate that persists checked outputs into `analysis_runs`. It also
-  includes an Ollama-compatible local generation path through
-  `python -m stock_triage summary-generate ...`, but a running local model
-  service and configured `llm.model_name` are still required.
+- **Phase 7 summary layer.** The repository now has an Appendix C output
+  schema, curated summary-context assembly from metrics/rules/evidence, a
+  validation gate that persists checked outputs into `analysis_runs`, and a
+  live Ollama-backed local generation path that defaults to `gemma2:9b`. The
+  generation flow uses deterministic evidence-alias expansion before final
+  validation so the stored output retains valid DB-backed evidence links.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

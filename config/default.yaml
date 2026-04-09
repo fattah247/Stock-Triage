@@ -44,9 +44,9 @@ ocr:
   languages: "eng+ind"
 
 llm:
-  # Phase 7 — local model. Left empty until model is selected.
-  model_name: ""
+  # Phase 7 — local model. Default to the installed Gemma runtime.
+  model_name: "gemma2:9b"
   base_url: "http://localhost:11434/api"
   context_budget_tokens: 8000
   temperature: 0.0
-  timeout_s: 120
+  timeout_s: 600

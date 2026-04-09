@@ -14,9 +14,9 @@ from pydantic import ValidationError
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
-from .schema import OUTPUT_SCHEMA_VERSION, SummaryOutput
+from .schema import OUTPUT_SCHEMA_VERSION, SummaryDraftOutput, SummaryOutput
 
-PROMPT_VERSION = "phase7-v1"
+PROMPT_VERSION = "phase7-v2"
 
 
 @dataclass(frozen=True)
@@ -256,21 +256,23 @@ def generate_summary(
         raise ValueError("llm.model_name is required for summary generation")
 
     context = build_summary_context(cfg, document_id=document_id)
+    alias_catalog = _build_alias_catalog(context)
     payload = {
         "model": cfg.llm.model_name,
         "stream": False,
-        "format": SummaryOutput.model_json_schema(),
+        "format": SummaryDraftOutput.model_json_schema(),
         "messages": [
             {
                 "role": "system",
                 "content": (
                     "You are a conservative local analyst. Return only valid JSON that matches the schema. "
-                    "Every key change, risk, and event must cite evidence_links by id."
+                    "Every key change, risk, and event must cite evidence_links using only the provided aliases "
+                    "like E1, E2, and E3. Never invent aliases, raw span ids, page numbers, or chunk ids."
                 ),
             },
             {
                 "role": "user",
-                "content": _build_summary_prompt(context),
+                "content": _build_summary_prompt(context, alias_catalog),
             },
         ],
         "options": {
@@ -285,10 +287,16 @@ def generate_summary(
     response.raise_for_status()
     body = response.json()
     raw_response = body["message"]["content"]
+    normalized_payload = _normalize_summary_payload(
+        raw_response=raw_response,
+        context=context,
+        alias_catalog=alias_catalog,
+        model_name=cfg.llm.model_name,
+    )
     result = validate_summary_payload(
         cfg,
         document_id=document_id,
-        payload=raw_response,
+        payload=normalized_payload,
         model_name=cfg.llm.model_name,
         prompt_version=prompt_version,
     )
@@ -341,9 +349,8 @@ def _persist_analysis_run(
         """,
         (model_name, prompt_version, OUTPUT_SCHEMA_VERSION, now, document_id),
     )
-
-
-def _build_summary_prompt(context: SummaryContext) -> str:
+def _build_summary_prompt(context: SummaryContext, alias_catalog: list[dict[str, object]]) -> str:
+    alias_by_span_id = {item["span_id"]: item["alias"] for item in alias_catalog}
     return json.dumps(
         {
             "document_id": context.document_id,
@@ -351,18 +358,112 @@ def _build_summary_prompt(context: SummaryContext) -> str:
             "source_record_id": context.source_record_id,
             "ticker": context.ticker,
             "rule_flags": context.rule_flags,
-            "metrics": context.metrics,
-            "events": context.events,
-            "evidence_links": context.evidence_links,
+            "metrics": [
+                {
+                    **metric,
+                    "evidence_alias": alias_by_span_id.get(metric["evidence_span_id"]),
+                }
+                for metric in context.metrics
+            ],
+            "events": [
+                {
+                    **event,
+                    "evidence_alias": alias_by_span_id.get(event["evidence_span_id"]),
+                }
+                for event in context.events
+            ],
+            "evidence_catalog": [
+                {
+                    "alias": item["alias"],
+                    "page_start": item["page_start"],
+                    "page_end": item["page_end"],
+                    "excerpt_text": item["excerpt_text"],
+                }
+                for item in alias_catalog
+            ],
             "instructions": {
                 "summary": "short narrative grounded in the supplied facts only",
                 "key_changes": "list the most important deterministic changes",
                 "risks": "list the principal risks supported by evidence",
                 "what_to_verify": "list follow-up checks for the operator",
+                "evidence_links": "for each key change, risk, and event, cite aliases from evidence_catalog only",
             },
         },
         sort_keys=True,
     )
+
+
+def _build_alias_catalog(context: SummaryContext) -> list[dict[str, object]]:
+    return [
+        {
+            "alias": f"E{idx}",
+            "span_id": item["id"],
+            "document_id": item["document_id"],
+            "chunk_id": item["chunk_id"],
+            "page_start": item["page_start"],
+            "page_end": item["page_end"],
+            "excerpt_text": item["excerpt_text"],
+        }
+        for idx, item in enumerate(context.evidence_links, start=1)
+    ]
+
+
+def _normalize_summary_payload(
+    *,
+    raw_response: str,
+    context: SummaryContext,
+    alias_catalog: list[dict[str, object]],
+    model_name: str,
+) -> str:
+    draft = SummaryDraftOutput.model_validate_json(raw_response)
+    resolved_by_token = {
+        item["alias"]: item
+        for item in alias_catalog
+    }
+    resolved_by_token.update(
+        {
+            item["span_id"]: item
+            for item in alias_catalog
+        }
+    )
+    referenced_items: dict[str, dict[str, object]] = {}
+
+    def _resolve_tokens(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        resolved_items: list[dict[str, object]] = []
+        for item in items:
+            tokens = [token.strip() for token in item["evidence_links"]]
+            span_ids: list[str] = []
+            for token in tokens:
+                resolved = resolved_by_token.get(token)
+                if resolved is None:
+                    span_ids.append(token)
+                    continue
+                span_ids.append(resolved["span_id"])
+                referenced_items[resolved["span_id"]] = resolved
+            resolved_items.append({**item, "evidence_links": span_ids})
+        return resolved_items
+
+    payload = {
+        "document_id": context.document_id,
+        "model_name": model_name,
+        "summary": draft.summary,
+        "key_changes": _resolve_tokens([item.model_dump() for item in draft.key_changes]),
+        "risks": _resolve_tokens([item.model_dump() for item in draft.risks]),
+        "events": _resolve_tokens([item.model_dump() for item in draft.events]),
+        "what_to_verify": draft.what_to_verify,
+        "evidence_links": [
+            {
+                "id": item["span_id"],
+                "document_id": item["document_id"],
+                "chunk_id": item["chunk_id"],
+                "page_start": item["page_start"],
+                "page_end": item["page_end"],
+            }
+            for item in alias_catalog
+            if item["span_id"] in referenced_items
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
 
 def _stable_id(value: str) -> str:
