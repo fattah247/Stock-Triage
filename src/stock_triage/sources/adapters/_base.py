@@ -26,6 +26,12 @@ class _IDXStubAdapter:
     def artifact_path(self, filename: str = "page.html") -> Path:
         return self.artifacts_root / self.artifact_source_id / filename
 
+    def default_window(self) -> DiscoveryWindow:
+        return DiscoveryWindow()
+
+    def resume_window(self, watermark: DiscoveryWindow) -> DiscoveryWindow:
+        return watermark
+
     def discover(self, window: DiscoveryWindow) -> Iterable[DocumentCandidate]:
         raise NotImplementedError(
             f"{type(self).__name__}.discover() must be implemented by the concrete adapter. "

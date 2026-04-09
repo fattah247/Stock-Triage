@@ -8,7 +8,12 @@ from datetime import date
 
 from .config import load_config
 from .db import WriterQueue, run_migrations
-from .discovery import persist_companies, persist_document_candidates, persist_watermark
+from .discovery import (
+    load_watermark,
+    persist_companies,
+    persist_document_candidates,
+    persist_watermark,
+)
 from .logging_setup import get_logger, setup_logging
 from .sources import DiscoveryWindow
 from .sources.adapters import (
@@ -36,13 +41,18 @@ def cmd_discover(args: argparse.Namespace) -> int:
     setup_logging(cfg)
     log = get_logger("stock_triage.discover")
 
-    window = _window_from_args(args)
+    requested_window = _window_from_args(args)
     targets = _adapters_for_source(args.source)
     summaries: list[tuple[str, str]] = []
 
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
         for adapter in targets:
+            window = _effective_window(
+                adapter=adapter,
+                requested_window=requested_window,
+                persisted_window=wq.submit(lambda conn, name=adapter.name: load_watermark(conn, name)),
+            )
             candidates = list(adapter.discover(window))
             if adapter.source_class.value == "company_universe":
                 result = wq.submit(lambda conn, c=candidates: persist_companies(conn, c))
@@ -90,7 +100,9 @@ def _adapters_for_source(source: str):
     return [mapping[source]()]
 
 
-def _window_from_args(args: argparse.Namespace) -> DiscoveryWindow:
+def _window_from_args(args: argparse.Namespace) -> DiscoveryWindow | None:
+    if args.year is None and not args.start and not args.end and not args.cursor:
+        return None
     if args.year is not None:
         return DiscoveryWindow(
             start=date(args.year, 1, 1),
@@ -102,6 +114,14 @@ def _window_from_args(args: argparse.Namespace) -> DiscoveryWindow:
         end=date.fromisoformat(args.end) if args.end else None,
         cursor=args.cursor,
     )
+
+
+def _effective_window(*, adapter, requested_window: DiscoveryWindow | None, persisted_window: DiscoveryWindow | None) -> DiscoveryWindow:
+    if requested_window is not None:
+        return requested_window
+    if persisted_window is not None:
+        return adapter.resume_window(persisted_window)
+    return adapter.default_window()
 
 
 def main(argv: list[str] | None = None) -> int:
