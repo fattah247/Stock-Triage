@@ -9,6 +9,7 @@ from datetime import date
 from .config import load_config
 from .db import WriterQueue, run_migrations
 from .download import run_downloads
+from .parse import run_parse
 from .discovery import (
     load_watermark,
     persist_companies,
@@ -120,6 +121,30 @@ def cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_parse(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    result = run_parse(
+        cfg,
+        source_name=source_name,
+        limit=args.limit,
+        include_parsed=args.include_parsed,
+    )
+    print(
+        "parse: "
+        f"selected={result.selected} "
+        f"parsed={result.parsed} "
+        f"failed={result.failed} "
+        f"ocr_partial={result.ocr_partial} "
+        f"ocr_full={result.ocr_full} "
+        f"chunks={result.chunks}"
+    )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -200,6 +225,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Reconsider resources previously quarantined for corrupt payloads",
     )
     p_download.set_defaults(func=cmd_download)
+    p_parse = sub.add_parser("parse", help="Parse downloaded PDFs into page-aware text chunks")
+    p_parse.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for downloaded documents",
+    )
+    p_parse.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of downloaded documents to parse",
+    )
+    p_parse.add_argument(
+        "--include-parsed",
+        action="store_true",
+        help="Reconsider documents already marked parsed or failed",
+    )
+    p_parse.set_defaults(func=cmd_parse)
     args = parser.parse_args(argv)
     return args.func(args)
 

@@ -10,7 +10,7 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 3 — Download, versioning, and file store** (done).
+**Phase 4 — Parsing, OCR, and chunking** (in progress).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -18,7 +18,7 @@ review of source-data and model licensing.
 | 1 | Source reconnaissance and proof of access | done |
 | 2 | Universe and discovery layer | done |
 | 3 | Download, versioning, file store | done |
-| 4 | Parsing, OCR, chunking | pending |
+| 4 | Parsing, OCR, chunking | in progress |
 | 5 | Normalization, extraction, events | pending |
 | 6 | Rule engine and evaluation harness | pending |
 | 7 | Local LLM summary layer | pending |
@@ -78,7 +78,12 @@ python -m stock_triage download --source idx_financial_reports --limit 10
 # Force an immediate retry of failed resources or reconsider quarantined payloads
 python -m stock_triage download --source idx_disclosures --retry-failed
 python -m stock_triage download --source idx_disclosures --include-quarantined
+
+# Parse downloaded PDFs into page-aware text chunks
+python -m stock_triage parse --source idx_financial_reports --limit 10
 ```
+
+For OCR fallback on scanned PDFs, install a local `tesseract` binary on the host.
 
 ## Configuration
 
@@ -107,6 +112,10 @@ Defaults live in `config/default.yaml`. Override either by:
   automatically, `--retry-failed` forces immediate retries, and corrupt
   payloads are quarantined under `data/quarantine/` until explicitly
   reconsidered with `--include-quarantined`.
+- **Phase 4 bootstrap.** Parse now supports native PDF text extraction,
+  threshold-based OCR fallback routing, page-aware chunk persistence into
+  `document_chunks`, and document-level parse state updates via
+  `python -m stock_triage parse ...`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.
