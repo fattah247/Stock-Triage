@@ -8,8 +8,10 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..canary import load_canary_status
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..hardening import load_backlog
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,56 @@ class DashboardExportResult:
     issuer_count: int
     document_count: int
     finding_count: int
+
+
+@dataclass(frozen=True)
+class DashboardSnapshot:
+    issuers: list[dict[str, object]]
+    documents: list[dict[str, object]]
+    metrics: list[dict[str, object]]
+    findings: list[dict[str, object]]
+    revisions: list[dict[str, object]]
+    backlog_rows: list[dict[str, object]]
+    canary_rows: list[dict[str, object]]
+
+
+def load_dashboard_snapshot(
+    cfg: Config,
+    *,
+    document_limit: int = 50,
+    finding_limit: int = 50,
+) -> DashboardSnapshot:
+    cfg.ensure_dirs()
+
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        snapshot = DashboardSnapshot(
+            issuers=_load_issuers(conn),
+            documents=_load_latest_documents(conn, limit=document_limit),
+            metrics=_load_metric_snapshot(conn),
+            findings=_load_findings(conn, limit=finding_limit),
+            revisions=_load_revision_history(conn, limit=50),
+            backlog_rows=[],
+            canary_rows=[],
+        )
+    finally:
+        conn.close()
+
+    backlog = load_backlog(cfg)
+    canary = load_canary_status(cfg)
+    return DashboardSnapshot(
+        issuers=snapshot.issuers,
+        documents=snapshot.documents,
+        metrics=snapshot.metrics,
+        findings=snapshot.findings,
+        revisions=snapshot.revisions,
+        backlog_rows=[row.__dict__ for row in backlog.rows],
+        canary_rows=[row.__dict__ for row in canary.rows],
+    )
 
 
 def export_dashboard(
@@ -33,36 +85,30 @@ def export_dashboard(
     target_dir = output_dir or cfg.dashboard.output_dir
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    with WriterQueue(cfg) as wq:
-        wq.submit(run_migrations)
-
-    conn = connect(cfg.paths.db_path, read_only=True)
-    try:
-        configure_pragmas(conn, cfg)
-        issuers = _load_issuers(conn)
-        documents = _load_latest_documents(conn, limit=document_limit)
-        metrics = _load_metric_snapshot(conn)
-        findings = _load_findings(conn, limit=finding_limit)
-        revisions = _load_revision_history(conn, limit=50)
-    finally:
-        conn.close()
+    snapshot = load_dashboard_snapshot(
+        cfg,
+        document_limit=document_limit,
+        finding_limit=finding_limit,
+    )
 
     metrics_csv_path = target_dir / "metrics.csv"
     findings_csv_path = target_dir / "findings.csv"
     html_path = target_dir / "index.html"
 
-    _write_metrics_csv(metrics_csv_path, metrics)
-    _write_findings_csv(findings_csv_path, findings)
+    _write_metrics_csv(metrics_csv_path, snapshot.metrics)
+    _write_findings_csv(findings_csv_path, snapshot.findings)
     html_path.write_text(
-        _render_html(
+        render_dashboard_html(
             title=cfg.dashboard.title,
-            issuers=issuers,
-            documents=documents,
-            metrics=metrics,
-            findings=findings,
-            revisions=revisions,
-            metrics_csv_path=metrics_csv_path.name,
-            findings_csv_path=findings_csv_path.name,
+            issuers=snapshot.issuers,
+            documents=snapshot.documents,
+            metrics=snapshot.metrics,
+            findings=snapshot.findings,
+            revisions=snapshot.revisions,
+            backlog_rows=snapshot.backlog_rows,
+            canary_rows=snapshot.canary_rows,
+            metrics_href=metrics_csv_path.name,
+            findings_href=findings_csv_path.name,
         ),
         encoding="utf-8",
     )
@@ -71,9 +117,9 @@ def export_dashboard(
         html_path=html_path,
         metrics_csv_path=metrics_csv_path,
         findings_csv_path=findings_csv_path,
-        issuer_count=len(issuers),
-        document_count=len(documents),
-        finding_count=len(findings),
+        issuer_count=len(snapshot.issuers),
+        document_count=len(snapshot.documents),
+        finding_count=len(snapshot.findings),
     )
 
 
@@ -303,7 +349,7 @@ def _write_findings_csv(path: Path, findings: list[dict[str, object]]) -> None:
         writer.writerows(findings)
 
 
-def _render_html(
+def render_dashboard_html(
     *,
     title: str,
     issuers: list[dict[str, object]],
@@ -311,9 +357,16 @@ def _render_html(
     metrics: list[dict[str, object]],
     findings: list[dict[str, object]],
     revisions: list[dict[str, object]],
-    metrics_csv_path: str,
-    findings_csv_path: str,
+    backlog_rows: list[dict[str, object]],
+    canary_rows: list[dict[str, object]],
+    metrics_href: str,
+    findings_href: str,
+    action_endpoint: str | None = None,
+    snapshot_endpoint: str | None = None,
+    artifact_endpoint: str | None = None,
+    action_history: list[dict[str, object]] | None = None,
 ) -> str:
+    history = action_history or []
     payload = json.dumps(
         {
             "issuers": issuers,
@@ -321,9 +374,47 @@ def _render_html(
             "metrics": metrics,
             "findings": findings,
             "revisions": revisions,
+            "backlog_rows": backlog_rows,
+            "canary_rows": canary_rows,
+            "action_history": history,
         },
         ensure_ascii=True,
     )
+    action_panel = ""
+    if action_endpoint and snapshot_endpoint:
+        action_panel = """
+    <section class="grid">
+      <article class="panel">
+        <h2>Control Panel</h2>
+        <div class="meta">Run the common pipeline stages here instead of typing commands.</div>
+        <div class="control-grid">
+          <button class="actionButton" data-action="discover_company">Discover Companies</button>
+          <button class="actionButton" data-action="discover_disclosure">Discover Disclosures</button>
+          <button class="actionButton" data-action="discover_financial">Discover Financials</button>
+          <button class="actionButton" data-action="download_financial">Download Financials</button>
+          <button class="actionButton" data-action="download_disclosure">Download Disclosures</button>
+          <button class="actionButton" data-action="parse">Parse</button>
+          <button class="actionButton" data-action="extract">Extract</button>
+          <button class="actionButton" data-action="rules">Run Rules</button>
+          <button class="actionButton" data-action="alerts">Alerts</button>
+          <button class="actionButton" data-action="canary">Canary</button>
+          <button class="actionButton" data-action="export">Export Snapshot</button>
+          <button class="actionButton" data-action="summary">Summary (Doc ID)</button>
+        </div>
+        <div class="toolbar controls">
+          <label>Year <input id="financialYear" type="number" min="2000" step="1"></label>
+          <label>Limit <input id="stageLimit" type="number" min="1" step="1" value="5"></label>
+          <label>Document ID <input id="summaryDocumentId" placeholder="Paste a document id or click summarize on a row"></label>
+          <button id="refreshButton" class="ghostButton" type="button">Refresh Data</button>
+        </div>
+      </article>
+      <article class="panel">
+        <h2>Action Output</h2>
+        <div id="actionStatus" class="meta">Ready.</div>
+        <pre id="actionOutput" class="terminal">Select an action to run it from the dashboard.</pre>
+        <div id="actionHistory"></div>
+      </article>
+    </section>"""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -356,6 +447,15 @@ def _render_html(
     .meta {{ color: var(--muted); font-size: 13px; }}
     a {{ color: var(--accent); }}
     .severity {{ color: var(--warn); }}
+    .control-grid {{ display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-top: 14px; }}
+    .controls label {{ display: flex; flex-direction: column; gap: 6px; color: var(--muted); }}
+    button {{ border: 1px solid var(--line); border-radius: 999px; background: var(--ink); color: #fffaf2; padding: 10px 14px; font: inherit; cursor: pointer; }}
+    button:hover {{ opacity: .92; }}
+    .ghostButton {{ background: transparent; color: var(--accent); }}
+    .miniButton {{ padding: 6px 10px; font-size: 12px; background: var(--accent); color: white; }}
+    .terminal {{ background: #201d19; color: #f7efd8; border-radius: 14px; padding: 14px; min-height: 180px; overflow: auto; white-space: pre-wrap; }}
+    .historyItem {{ border-top: 1px solid var(--line); padding: 10px 0; }}
+    .historyItem:first-child {{ border-top: 0; }}
     @media (max-width: 720px) {{ body {{ font-size: 15px; }} table {{ display:block; overflow:auto; }} }}
   </style>
 </head>
@@ -366,8 +466,8 @@ def _render_html(
       <span>Issuers: {len(issuers)}</span>
       <span>Documents: {len(documents)}</span>
       <span>Findings: {len(findings)}</span>
-      <a href="{metrics_csv_path}">metrics.csv</a>
-      <a href="{findings_csv_path}">findings.csv</a>
+      <a href="{metrics_href}">metrics.csv</a>
+      <a href="{findings_href}">findings.csv</a>
     </div>
   </header>
   <main class="shell">
@@ -376,6 +476,7 @@ def _render_html(
         <input id="issuerSearch" placeholder="Search ticker, issuer, source record">
       </div>
     </section>
+{action_panel}
     <section class="grid">
       <article class="panel"><h2>Issuer Search</h2><div id="issuerList"></div></article>
       <article class="panel"><h2>Latest Documents</h2><div id="documentList"></div></article>
@@ -384,37 +485,135 @@ def _render_html(
       <article class="panel"><h2>Metric Snapshot</h2><div id="metricList"></div></article>
       <article class="panel"><h2>Revision History</h2><div id="revisionList"></div></article>
     </section>
+    <section class="grid">
+      <article class="panel"><h2>Backlog</h2><div id="backlogList"></div></article>
+      <article class="panel"><h2>Canary</h2><div id="canaryList"></div></article>
+    </section>
     <section class="panel"><h2>Evidence-Linked Findings</h2><div id="findingList"></div></section>
   </main>
   <script>
-    const data = {payload};
+    let data = {payload};
+    const actionEndpoint = {json.dumps(action_endpoint)};
+    const snapshotEndpoint = {json.dumps(snapshot_endpoint)};
+    const artifactEndpoint = {json.dumps(artifact_endpoint)};
     const search = document.getElementById('issuerSearch');
     const issuerList = document.getElementById('issuerList');
     const documentList = document.getElementById('documentList');
     const metricList = document.getElementById('metricList');
     const findingList = document.getElementById('findingList');
     const revisionList = document.getElementById('revisionList');
+    const backlogList = document.getElementById('backlogList');
+    const canaryList = document.getElementById('canaryList');
+    const actionStatus = document.getElementById('actionStatus');
+    const actionOutput = document.getElementById('actionOutput');
+    const actionHistory = document.getElementById('actionHistory');
+    const yearInput = document.getElementById('financialYear');
+    const limitInput = document.getElementById('stageLimit');
+    const summaryDocumentIdInput = document.getElementById('summaryDocumentId');
+    const refreshButton = document.getElementById('refreshButton');
 
     function esc(value) {{
       return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }}
 
+    function localHref(path) {{
+      if (!path) return '';
+      if (!artifactEndpoint) return esc(path);
+      return `${{artifactEndpoint}}?path=${{encodeURIComponent(path)}}`;
+    }}
+
+    function renderHistory() {{
+      if (!actionHistory) return;
+      const rows = (data.action_history || []).slice(0, 10);
+      actionHistory.innerHTML = rows.length
+        ? rows.map(item => `<div class="historyItem"><div><strong>${{esc(item.action)}}</strong> <span class="meta">${{esc(item.timestamp)}}</span></div><div class="meta">${{esc((item.command || []).join(' '))}}</div><div class="meta">exit=${{esc(item.returncode)}}</div></div>`).join('')
+        : `<div class="meta">No action has been run from this dashboard yet.</div>`;
+    }}
+
     function render() {{
+      if (yearInput && !yearInput.value) {{
+        yearInput.value = String(new Date().getFullYear());
+      }}
       const q = search.value.trim().toLowerCase();
       const issuers = data.issuers.filter(item => !q || [item.ticker, item.issuer_name, item.sector, item.subsector].join(' ').toLowerCase().includes(q));
       const docs = data.documents.filter(item => !q || [item.ticker, item.source_record_id, item.source_name].join(' ').toLowerCase().includes(q));
       const metrics = data.metrics.filter(item => !q || [item.ticker, item.metric_name].join(' ').toLowerCase().includes(q));
       const findings = data.findings.filter(item => !q || [item.ticker, item.claim, item.name, item.finding_type].join(' ').toLowerCase().includes(q));
       const revisions = data.revisions.filter(item => !q || [item.ticker, item.source_record_id, item.source_name].join(' ').toLowerCase().includes(q));
+      const backlogRows = data.backlog_rows.filter(item => !q || [item.source_name].join(' ').toLowerCase().includes(q));
+      const canaryRows = data.canary_rows.filter(item => !q || [item.source_name, item.status].join(' ').toLowerCase().includes(q));
 
       issuerList.innerHTML = `<table><thead><tr><th>Ticker</th><th>Issuer</th><th>Sector</th><th>Docs</th><th>Latest</th></tr></thead><tbody>${{issuers.slice(0, 50).map(item => `<tr><td>${{esc(item.ticker)}}</td><td>${{esc(item.issuer_name)}}</td><td>${{esc(item.sector)}} / ${{esc(item.subsector)}}</td><td>${{esc(item.document_count)}}</td><td>${{esc(item.latest_document_at || '')}}</td></tr>`).join('')}}</tbody></table>`;
-      documentList.innerHTML = `<table><thead><tr><th>Ticker</th><th>Source</th><th>State</th><th>Rules</th><th>Attachment</th></tr></thead><tbody>${{docs.slice(0, 50).map(item => `<tr><td>${{esc(item.ticker || '')}}</td><td>${{esc(item.source_name)}}<div class="meta">${{esc(item.source_record_id)}}</div></td><td>${{esc(item.process_state)}}</td><td>${{esc(item.triggered_rules)}}</td><td><a href="${{esc(item.local_path)}}">local</a>${{item.original_url ? ` / <a href="${{esc(item.original_url)}}">origin</a>` : ''}}</td></tr>`).join('')}}</tbody></table>`;
+      documentList.innerHTML = `<table><thead><tr><th>Ticker</th><th>Source</th><th>State</th><th>Rules</th><th>Attachment</th></tr></thead><tbody>${{docs.slice(0, 50).map(item => `<tr><td>${{esc(item.ticker || '')}}</td><td>${{esc(item.source_name)}}<div class="meta">${{esc(item.source_record_id)}}</div><div class="meta">${{esc(item.document_id || '')}}</div></td><td>${{esc(item.process_state)}}</td><td>${{esc(item.triggered_rules)}}</td><td>${{item.local_path ? `<a href="${{localHref(item.local_path)}}">local</a>` : ''}}${{item.original_url ? ` / <a href="${{esc(item.original_url)}}">origin</a>` : ''}}${{actionEndpoint && item.document_id ? ` <button class="miniButton" type="button" data-document-id="${{esc(item.document_id)}}" data-inline-action="summary">summarize</button>` : ''}}</td></tr>`).join('')}}</tbody></table>`;
       metricList.innerHTML = `<table><thead><tr><th>Ticker</th><th>Metric</th><th>Value</th><th>Period</th></tr></thead><tbody>${{metrics.slice(0, 80).map(item => `<tr><td>${{esc(item.ticker)}}</td><td>${{esc(item.metric_name)}}</td><td>${{esc(item.value_normalized)}} ${{esc(item.currency || '')}}</td><td>${{esc(item.fiscal_year || '')}} ${{esc(item.fiscal_period || '')}}</td></tr>`).join('')}}</tbody></table>`;
       revisionList.innerHTML = `<table><thead><tr><th>Ticker</th><th>Source Record</th><th>Revisions</th><th>Latest</th></tr></thead><tbody>${{revisions.slice(0, 50).map(item => `<tr><td>${{esc(item.ticker || '')}}</td><td>${{esc(item.source_record_id)}}</td><td>${{esc(item.revision_count)}}</td><td>${{esc(item.latest_revision_at)}}</td></tr>`).join('')}}</tbody></table>`;
-      findingList.innerHTML = findings.slice(0, 80).map(item => `<div class="finding"><div><strong>${{esc(item.ticker || '')}}</strong> <span class="severity">${{esc(item.finding_type)}}:${{esc(item.name)}}</span></div><div>${{esc(item.claim)}}</div><div class="meta">${{esc(item.summary)}}</div><div class="meta">${{esc(item.evidence)}}</div><div class="meta"><a href="${{esc(item.local_path)}}">attachment</a>${{item.original_url ? ` / <a href="${{esc(item.original_url)}}">origin</a>` : ''}}</div></div>`).join('');
+      backlogList.innerHTML = `<table><thead><tr><th>Source</th><th>Discovered</th><th>Downloaded</th><th>Parsed</th><th>Extracted</th><th>Analyzed</th><th>Failed</th></tr></thead><tbody>${{backlogRows.map(item => `<tr><td>${{esc(item.source_name)}}</td><td>${{esc(item.discovered)}}</td><td>${{esc(item.downloaded)}}</td><td>${{esc(item.parsed)}}</td><td>${{esc(item.extracted)}}</td><td>${{esc(item.analyzed)}}</td><td>${{esc(item.failed)}}</td></tr>`).join('')}}</tbody></table>`;
+      canaryList.innerHTML = `<table><thead><tr><th>Source</th><th>Status</th><th>Accessible</th><th>Drifted</th><th>Finished</th></tr></thead><tbody>${{canaryRows.map(item => `<tr><td>${{esc(item.source_name)}}</td><td>${{esc(item.status)}}</td><td>${{esc(item.accessible)}}</td><td>${{esc(item.drifted)}}</td><td>${{esc(item.finished_at)}}</td></tr>`).join('')}}</tbody></table>`;
+      findingList.innerHTML = findings.slice(0, 80).map(item => `<div class="finding"><div><strong>${{esc(item.ticker || '')}}</strong> <span class="severity">${{esc(item.finding_type)}}:${{esc(item.name)}}</span></div><div>${{esc(item.claim)}}</div><div class="meta">${{esc(item.summary)}}</div><div class="meta">${{esc(item.evidence)}}</div><div class="meta">${{item.local_path ? `<a href="${{localHref(item.local_path)}}">attachment</a>` : ''}}${{item.original_url ? ` / <a href="${{esc(item.original_url)}}">origin</a>` : ''}}</div></div>`).join('');
+      renderHistory();
+    }}
+
+    async function refreshSnapshot() {{
+      if (!snapshotEndpoint) return;
+      const response = await fetch(snapshotEndpoint);
+      if (!response.ok) {{
+        throw new Error(`Snapshot refresh failed: ${{response.status}}`);
+      }}
+      data = await response.json();
+      render();
+    }}
+
+    async function runAction(action, overrides = {{}}) {{
+      if (!actionEndpoint) return;
+      const params = new URLSearchParams();
+      params.set('action', action);
+      params.set('year', yearInput?.value || '');
+      params.set('limit', limitInput?.value || '');
+      params.set('document_id', summaryDocumentIdInput?.value || '');
+      Object.entries(overrides).forEach(([key, value]) => params.set(key, String(value ?? '')));
+
+      actionStatus.textContent = `Running ${{action}}...`;
+      actionOutput.textContent = '';
+      const response = await fetch(actionEndpoint, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }},
+        body: params.toString(),
+      }});
+      const result = await response.json();
+      actionOutput.textContent = `${{(result.command || []).join(' ')}}\n\nstdout:\n${{result.stdout || ''}}\n\nstderr:\n${{result.stderr || ''}}`;
+      actionStatus.textContent = result.ok ? `${{action}} finished.` : `${{action}} failed (exit ${{result.returncode}}).`;
+      if (response.ok && result.snapshot) {{
+        data = result.snapshot;
+        render();
+      }} else if (response.ok) {{
+        await refreshSnapshot();
+      }}
     }}
 
     search.addEventListener('input', render);
+    if (refreshButton) {{
+      refreshButton.addEventListener('click', () => refreshSnapshot().catch(error => {{
+        actionStatus.textContent = error.message;
+      }}));
+    }}
+    document.querySelectorAll('.actionButton').forEach(button => {{
+      button.addEventListener('click', () => {{
+        runAction(button.dataset.action).catch(error => {{
+          actionStatus.textContent = error.message;
+        }});
+      }});
+    }});
+    document.addEventListener('click', event => {{
+      const target = event.target.closest('[data-inline-action]');
+      if (!target) return;
+      const documentId = target.dataset.documentId || '';
+      if (summaryDocumentIdInput) {{
+        summaryDocumentIdInput.value = documentId;
+      }}
+      runAction(target.dataset.inlineAction, {{ document_id: documentId }}).catch(error => {{
+        actionStatus.textContent = error.message;
+      }});
+    }});
     render();
   </script>
 </body>

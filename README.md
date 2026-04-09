@@ -113,6 +113,9 @@ python -m stock_triage summary-generate <document_id>
 # Render the local dashboard plus CSV exports
 python -m stock_triage dashboard-export
 
+# Serve the local operator dashboard so you can click actions instead of typing each command
+python -m stock_triage dashboard-serve --open-browser
+
 # Evaluate watchlist alerts from local config
 python -m stock_triage alerts-run
 
@@ -183,10 +186,13 @@ Defaults live in `config/default.yaml`. Override either by:
   generation flow uses deterministic evidence-alias expansion before final
   validation so the stored output retains valid DB-backed evidence links.
 - **Phase 8 daily operations.** The repository now exports a local HTML
-  dashboard with issuer search, latest documents, metric snapshots, revision
-  history, and evidence-linked findings; emits watchlist alerts into a local
-  JSONL channel with persisted dedupe; and persists canary health snapshots for
-  source drift and source failures instead of crashing on blocked checks.
+  dashboard and a live local dashboard server. The live view adds action
+  buttons for discovery, download, parse, extract, rules, alerts, canary, and
+  summary generation; local attachment viewing; issuer search; latest
+  documents; metric snapshots; revision history; evidence-linked findings;
+  watchlist alerts into a local JSONL channel with persisted dedupe; and
+  persisted canary health snapshots for source drift and source failures
+  instead of crashing on blocked checks.
 - **Phase 9 hardening bootstrap.** The repository now has bounded backfill
   orchestration, per-source backlog reporting, and a SQLite writer benchmark so
   scale decisions can be made from measured queue latency and throughput instead

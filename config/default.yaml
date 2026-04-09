@@ -54,6 +54,8 @@ llm:
 dashboard:
   output_dir: "data/dashboard"
   title: "Stock Triage Dashboard"
+  host: "127.0.0.1"
+  port: 8765
 
 alerts:
   watchlist: []

@@ -92,6 +92,8 @@ class DownloadConfig(BaseModel):
 class DashboardConfig(BaseModel):
     output_dir: Path = REPO_ROOT / "data" / "dashboard"
     title: str = "Stock Triage Dashboard"
+    host: str = "127.0.0.1"
+    port: int = 8765
 
     @field_validator("output_dir", mode="before")
     @classmethod
