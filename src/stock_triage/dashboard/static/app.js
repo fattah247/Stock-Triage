@@ -18,6 +18,10 @@
     activeJobStartedAt: null,
     pollingHandle: null,
     eventSource: null,
+    queuedActions: [],
+    queueName: null,
+    queueIndex: 0,
+    queueTotal: 0,
   };
 
   const actionEndpoint = bootstrap.actionEndpoint || null;
@@ -49,6 +53,25 @@
   const lastActivity = document.getElementById("lastActivity");
   const actionButtons = Array.from(document.querySelectorAll(".actionButton"));
 
+  const actionLabels = {
+    daily_sweep: "Daily sweep",
+    discover_company: "Discover companies",
+    discover_disclosure: "Discover disclosures",
+    discover_financial: "Discover financials",
+    download_financial: "Download financials",
+    download_disclosure: "Download disclosures",
+    parse: "Parse",
+    extract: "Extract",
+    rules: "Run rules",
+    alerts: "Alerts",
+    canary: "Canary",
+    export: "Export snapshot",
+    summary: "Summarize",
+    parse_one: "Re-parse document",
+    extract_one: "Re-extract document",
+    rules_one: "Run rules for document",
+  };
+
   if (opsShell && actionEndpoint && snapshotEndpoint) {
     opsShell.hidden = false;
   }
@@ -64,6 +87,24 @@
     if (!path) return "";
     if (!artifactEndpoint) return esc(path);
     return `${artifactEndpoint}?path=${encodeURIComponent(path)}`;
+  }
+
+  function actionLabel(action) {
+    return actionLabels[action] || String(action || "").replaceAll("_", " ");
+  }
+
+  function normalizeSeverity(value, fallback = "info") {
+    const level = String(value || "").toLowerCase();
+    if (["critical", "warning", "info", "ok"].includes(level)) return level;
+    return fallback;
+  }
+
+  function findingSeverity(item) {
+    const level = normalizeSeverity(item?.name, "");
+    if (level) return level;
+    if (item?.finding_type === "risk") return "warning";
+    if (item?.finding_type === "event") return "info";
+    return "warning";
   }
 
   function ensureSelection(visibleIssuers) {
@@ -93,8 +134,9 @@
     if (canaryStatus) {
       const failed = (data.canary_rows || []).filter((item) => item.status === "failed").length;
       const drifted = (data.canary_rows || []).filter((item) => item.drifted).length;
+      const level = failed ? "critical" : drifted ? "warning" : "ok";
       canaryStatus.textContent = failed ? `${failed} failed` : drifted ? `${drifted} drifted` : "ok";
-      canaryStatus.className = failed ? "sev-critical" : drifted ? "sev-warning" : "sev-ok";
+      canaryStatus.className = `statusPill sev-${level}`;
     }
     if (lastActivity) {
       const firstInbox = (data.inbox_rows || [])[0];
@@ -238,12 +280,12 @@
 
     if (!selectedIssuer) {
       companyOverview.innerHTML =
-        `<div class="emptyState">Select a company from the left rail or use the inbox above to focus the workspace on an issuer with recent activity.</div>`;
+        `<div class="emptyState"><strong>Select a company.</strong> Use the left rail or click "focus issuer" from the inbox to move the workspace onto one company.</div>`;
       companyStats.innerHTML = "";
-      documentList.innerHTML = `<div class="emptyState">No documents to show.</div>`;
-      metricList.innerHTML = `<div class="emptyState">No metrics to show.</div>`;
-      revisionList.innerHTML = `<div class="emptyState">No revisions to show.</div>`;
-      findingList.innerHTML = `<div class="emptyState">No findings to show.</div>`;
+      documentList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Pick one issuer to review grouped filings here.</div>`;
+      metricList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Metrics will appear once the workspace is focused on an issuer.</div>`;
+      revisionList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Revision history is shown per issuer.</div>`;
+      findingList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Findings and summaries are scoped to the active issuer.</div>`;
     } else {
       const analyzedCount = docs.filter((item) => item.process_state === "analyzed").length;
       const failedCount = docs.filter((item) => item.process_state === "failed").length;
@@ -344,7 +386,7 @@
               `
             )
             .join("")}</div>`
-        : `<div class="emptyState">No persisted documents yet for this company.</div>`;
+        : `<div class="emptyState"><strong>No persisted documents yet.</strong> Run discovery and download for this issuer, then the grouped filings will appear here.</div>`;
       metricList.innerHTML = metrics.length
         ? `<table class="metricTable"><thead><tr><th>Metric</th><th>Value</th><th>Period</th></tr></thead><tbody>${metrics
             .slice(0, 80)
@@ -355,7 +397,7 @@
                 )}</td><td>${esc(item.fiscal_year || "")} ${esc(item.fiscal_period || "")}</td></tr>`
             )
             .join("")}</tbody></table>`
-        : `<div class="emptyState">No normalized metrics yet for this company.</div>`;
+        : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Run parse and extract to populate the fact layer for this issuer.</div>`;
       revisionList.innerHTML = revisions.length
         ? `<table class="metricTable"><thead><tr><th>Source Record</th><th>Revisions</th><th>Latest</th></tr></thead><tbody>${revisions
             .map(
@@ -365,14 +407,14 @@
                 )}</td></tr>`
             )
             .join("")}</tbody></table>`
-        : `<div class="emptyState">No revision groups yet for this company.</div>`;
+        : `<div class="emptyState"><strong>No revision groups yet.</strong> Version history appears once multiple files or revisions exist for the issuer.</div>`;
       findingList.innerHTML = findings.length
         ? `<div class="findingStack">${findings
             .slice(0, 80)
             .map(
               (item) => `
-                <article class="findingCard">
-                  <div><span class="severity">${esc(item.finding_type)}:${esc(item.name)}</span></div>
+                <article class="findingCard sev-${findingSeverity(item)}">
+                  <div><span class="severity sev-${findingSeverity(item)}">${esc(item.finding_type)}:${esc(item.name)}</span></div>
                   <div class="findingClaim">${esc(item.claim)}</div>
                   <div class="meta">${esc(item.summary)}</div>
                   <div class="meta">${esc(item.evidence)}</div>
@@ -384,25 +426,29 @@
               `
             )
             .join("")}</div>`
-        : `<div class="emptyState">No findings have been persisted yet for this company.</div>`;
+        : `<div class="emptyState"><strong>No findings yet.</strong> Run rules or summary generation after parsing and extraction to surface issuer-level signals here.</div>`;
     }
 
-    backlogList.innerHTML = `<table class="systemTable"><thead><tr><th>Source</th><th>Discovered</th><th>Downloaded</th><th>Parsed</th><th>Extracted</th><th>Analyzed</th><th>Failed</th></tr></thead><tbody>${backlogRows
-      .map(
-        (item) =>
-          `<tr><td>${esc(item.source_name)}</td><td>${esc(item.discovered)}</td><td>${esc(item.downloaded)}</td><td>${esc(
-            item.parsed
-          )}</td><td>${esc(item.extracted)}</td><td>${esc(item.analyzed)}</td><td>${esc(item.failed)}</td></tr>`
-      )
-      .join("")}</tbody></table>`;
-    canaryList.innerHTML = `<table class="systemTable"><thead><tr><th>Source</th><th>Status</th><th>Accessible</th><th>Drifted</th><th>Finished</th></tr></thead><tbody>${canaryRows
-      .map(
-        (item) =>
-          `<tr><td>${esc(item.source_name)}</td><td>${esc(item.status)}</td><td>${esc(item.accessible)}</td><td>${esc(
-            item.drifted
-          )}</td><td>${esc(item.finished_at)}</td></tr>`
-      )
-      .join("")}</tbody></table>`;
+    backlogList.innerHTML = backlogRows.length
+      ? `<table class="systemTable"><thead><tr><th>Source</th><th>Discovered</th><th>Downloaded</th><th>Parsed</th><th>Extracted</th><th>Analyzed</th><th>Failed</th></tr></thead><tbody>${backlogRows
+          .map(
+            (item) =>
+              `<tr><td>${esc(item.source_name)}</td><td>${esc(item.discovered)}</td><td>${esc(item.downloaded)}</td><td>${esc(
+                item.parsed
+              )}</td><td>${esc(item.extracted)}</td><td>${esc(item.analyzed)}</td><td>${esc(item.failed)}</td></tr>`
+          )
+          .join("")}</tbody></table>`
+      : `<div class="emptyState"><strong>No backlog snapshot yet.</strong> Run discovery or processing actions to build the queue summary.</div>`;
+    canaryList.innerHTML = canaryRows.length
+      ? `<table class="systemTable"><thead><tr><th>Source</th><th>Status</th><th>Accessible</th><th>Drifted</th><th>Finished</th></tr></thead><tbody>${canaryRows
+          .map((item) => {
+            const level = item.status === "failed" ? "critical" : item.drifted ? "warning" : "ok";
+            return `<tr><td>${esc(item.source_name)}</td><td><span class="statusPill sev-${level}">${esc(
+              item.status
+            )}</span></td><td>${esc(item.accessible)}</td><td>${esc(item.drifted)}</td><td>${esc(item.finished_at)}</td></tr>`;
+          })
+          .join("")}</tbody></table>`
+      : `<div class="emptyState"><strong>No canary checks yet.</strong> Run canary from the control panel when you want a fresh source-health readout.</div>`;
     renderHistory();
   }
 
@@ -416,9 +462,55 @@
     render();
   }
 
-  async function runAction(action, overrides = {}) {
+  function isSequenceActive() {
+    return Boolean(state.queueName);
+  }
+
+  function startDailySweep() {
+    if (state.activeJobId || isSequenceActive()) return;
+    state.queueName = "Daily sweep";
+    state.queuedActions = [
+      "discover_disclosure",
+      "discover_financial",
+      "download_financial",
+      "download_disclosure",
+      "parse",
+      "extract",
+      "rules",
+      "alerts",
+    ];
+    state.queueIndex = 0;
+    state.queueTotal = state.queuedActions.length;
+    if (actionOutput) {
+      actionOutput.textContent = "Starting daily sweep.\n";
+    }
+    stopPolling();
+    setActionButtonsDisabled(true);
+    runNextQueuedAction();
+  }
+
+  function runNextQueuedAction() {
+    const nextAction = state.queuedActions.shift();
+    if (!nextAction) return;
+    state.queueIndex += 1;
+    runAction(nextAction, {}, { preserveOutput: true, disableControls: false }).catch((error) => {
+      if (actionStatus) actionStatus.textContent = error.message;
+      state.queueName = null;
+      state.queueIndex = 0;
+      state.queueTotal = 0;
+      state.queuedActions = [];
+      setActionButtonsDisabled(false);
+      startPolling();
+    });
+  }
+
+  async function runAction(action, overrides = {}, options = {}) {
     if (!actionEndpoint) return;
     if (state.activeJobId) return;
+    if (action === "daily_sweep") {
+      startDailySweep();
+      return;
+    }
     const params = new URLSearchParams();
     params.set("action", action);
     params.set("year", yearInput?.value || "");
@@ -427,13 +519,22 @@
     Object.entries(overrides).forEach(([key, value]) => params.set(key, String(value ?? "")));
 
     if (actionStatus) {
-      actionStatus.textContent = `Running ${action}...`;
+      if (isSequenceActive()) {
+        actionStatus.textContent = `${state.queueName} ${state.queueIndex}/${state.queueTotal}: ${actionLabel(action)}...`;
+      } else {
+        actionStatus.textContent = `Running ${actionLabel(action)}...`;
+      }
     }
-    if (actionOutput) {
+    if (actionOutput && !options.preserveOutput) {
       actionOutput.textContent = "";
     }
-    stopPolling();
-    setActionButtonsDisabled(true);
+    if (actionOutput && options.preserveOutput) {
+      actionOutput.textContent += `\n== ${actionLabel(action)} ==\n`;
+    }
+    if (options.disableControls !== false) {
+      stopPolling();
+      setActionButtonsDisabled(true);
+    }
     const response = await fetch(actionEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
@@ -441,16 +542,18 @@
     });
     const result = await response.json();
     if (!response.ok && response.status !== 202) {
-      setActionButtonsDisabled(false);
-      startPolling();
+      if (options.disableControls !== false) {
+        setActionButtonsDisabled(false);
+        startPolling();
+      }
       throw new Error(result.error || `Action start failed: ${response.status}`);
     }
     state.activeJobId = result.job_id;
     state.activeJobStartedAt = Date.now();
-    connectJobStream(action, result.stream_url);
+    connectJobStream(action, result.stream_url, options);
   }
 
-  function connectJobStream(action, streamUrl) {
+  function connectJobStream(action, streamUrl, options = {}) {
     if (!streamUrl) {
       finishActiveJob(action, false, 1, 0, "Missing stream URL.");
       return;
@@ -464,13 +567,21 @@
     let elapsedHandle = window.setInterval(() => {
       if (!actionStatus || !state.activeJobStartedAt) return;
       const elapsed = Math.max(0, Math.floor((Date.now() - state.activeJobStartedAt) / 1000));
-      actionStatus.textContent = `Running ${action}... ${elapsed}s`;
+      if (isSequenceActive()) {
+        actionStatus.textContent = `${state.queueName} ${state.queueIndex}/${state.queueTotal}: ${actionLabel(action)}... ${elapsed}s`;
+      } else {
+        actionStatus.textContent = `Running ${actionLabel(action)}... ${elapsed}s`;
+      }
     }, 1000);
 
     source.addEventListener("started", (event) => {
       const payload = JSON.parse(event.data);
       if (actionOutput) {
-        actionOutput.textContent = `${(payload.command || []).join(" ")}\n\n`;
+        if (options.preserveOutput) {
+          actionOutput.textContent += `${(payload.command || []).join(" ")}\n\n`;
+        } else {
+          actionOutput.textContent = `${(payload.command || []).join(" ")}\n\n`;
+        }
       }
     });
 
@@ -509,21 +620,45 @@
   function finishActiveJob(action, ok, returncode, durationMs, fallbackMessage) {
     state.activeJobId = null;
     state.activeJobStartedAt = null;
-    setActionButtonsDisabled(false);
-    if (actionStatus) {
-      if (fallbackMessage) {
-        actionStatus.textContent = fallbackMessage;
-      } else {
-        actionStatus.textContent = ok
-          ? `${action} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s.`
-          : `${action} failed (exit ${returncode}).`;
-      }
-    }
+    const sequenceActive = isSequenceActive();
     refreshSnapshot()
       .catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       })
       .finally(() => {
+        if (sequenceActive) {
+          if (ok && state.queuedActions.length) {
+            runNextQueuedAction();
+            return;
+          }
+          if (actionStatus) {
+            if (fallbackMessage) {
+              actionStatus.textContent = fallbackMessage;
+            } else if (ok) {
+              actionStatus.textContent = `${state.queueName} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s for the final step.`;
+            } else {
+              actionStatus.textContent = `${state.queueName} stopped during ${actionLabel(action)} (exit ${returncode}).`;
+            }
+          }
+          state.queueName = null;
+          state.queueIndex = 0;
+          state.queueTotal = 0;
+          state.queuedActions = [];
+          setActionButtonsDisabled(false);
+          startPolling();
+          return;
+        }
+
+        setActionButtonsDisabled(false);
+        if (actionStatus) {
+          if (fallbackMessage) {
+            actionStatus.textContent = fallbackMessage;
+          } else {
+            actionStatus.textContent = ok
+              ? `${actionLabel(action)} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s.`
+              : `${actionLabel(action)} failed (exit ${returncode}).`;
+          }
+        }
         startPolling();
       });
   }

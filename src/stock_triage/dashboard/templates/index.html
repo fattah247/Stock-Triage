@@ -54,32 +54,44 @@
         </article>
 
         <article id="opsShell" class="panel panelDark opsPanel" hidden>
-        <div class="sectionEyebrow">Workflow</div>
-        <h2>Control Panel</h2>
-        <p class="lead leadLight">Run the common pipeline stages here instead of typing commands.</p>
-        <div class="controlGrid">
-          <button class="actionButton" data-action="discover_company" type="button">Discover Companies</button>
-          <button class="actionButton" data-action="discover_disclosure" type="button">Discover Disclosures</button>
-          <button class="actionButton" data-action="discover_financial" type="button">Discover Financials</button>
-          <button class="actionButton" data-action="download_financial" type="button">Download Financials</button>
-          <button class="actionButton" data-action="download_disclosure" type="button">Download Disclosures</button>
-          <button class="actionButton" data-action="parse" type="button">Parse</button>
-          <button class="actionButton" data-action="extract" type="button">Extract</button>
-          <button class="actionButton" data-action="rules" type="button">Run Rules</button>
-          <button class="actionButton" data-action="alerts" type="button">Alerts</button>
-          <button class="actionButton" data-action="canary" type="button">Canary</button>
-          <button class="actionButton" data-action="export" type="button">Export Snapshot</button>
-        </div>
-        <div class="controlToolbar">
-          <label>Year <input id="financialYear" type="number" min="2000" step="1"></label>
-          <label>Limit <input id="stageLimit" type="number" min="1" step="1" value="5"></label>
-          <button id="refreshButton" class="ghostButton" type="button">Refresh Data</button>
-        </div>
-        <div class="sectionEyebrow">Recent Run</div>
-        <h2>Action Output</h2>
-        <div id="actionStatus" class="meta metaLight">Ready.</div>
-        <pre id="actionOutput" class="terminal">Select an action to run it from the dashboard.</pre>
-        <div id="actionHistory"></div>
+          <div class="sectionEyebrow">Workflow</div>
+          <div class="opsHeader">
+            <div>
+              <h2>Control Panel</h2>
+              <p class="lead leadLight">Use the daily sweep for the common path. Open advanced actions only when you need a specific stage.</p>
+            </div>
+            <div class="primaryActions">
+              <button class="actionButton primaryAction" data-action="daily_sweep" type="button">Run Daily Sweep</button>
+              <button id="refreshButton" class="ghostButton" type="button">Refresh Data</button>
+            </div>
+          </div>
+          <details class="advancedActions">
+            <summary>Advanced actions</summary>
+            <div class="advancedBody">
+              <div class="controlToolbar">
+                <label>Year <input id="financialYear" type="number" min="2000" step="1"></label>
+                <label>Limit <input id="stageLimit" type="number" min="1" step="1" value="5"></label>
+              </div>
+              <div class="controlGrid">
+                <button class="actionButton" data-action="discover_company" type="button">Discover Companies</button>
+                <button class="actionButton" data-action="discover_disclosure" type="button">Discover Disclosures</button>
+                <button class="actionButton" data-action="discover_financial" type="button">Discover Financials</button>
+                <button class="actionButton" data-action="download_financial" type="button">Download Financials</button>
+                <button class="actionButton" data-action="download_disclosure" type="button">Download Disclosures</button>
+                <button class="actionButton" data-action="parse" type="button">Parse</button>
+                <button class="actionButton" data-action="extract" type="button">Extract</button>
+                <button class="actionButton" data-action="rules" type="button">Run Rules</button>
+                <button class="actionButton" data-action="alerts" type="button">Alerts</button>
+                <button class="actionButton" data-action="canary" type="button">Canary</button>
+                <button class="actionButton" data-action="export" type="button">Export Snapshot</button>
+              </div>
+            </div>
+          </details>
+          <div class="sectionEyebrow">Recent Run</div>
+          <h2>Action Output</h2>
+          <div id="actionStatus" class="meta metaLight">Ready.</div>
+          <pre id="actionOutput" class="terminal">Run the daily sweep or pick a specific action from the advanced list.</pre>
+          <div id="actionHistory"></div>
         </article>
 
         <article class="panel focusHeader">

@@ -98,6 +98,11 @@ input {
   color: #ddfff2;
 }
 
+.panelDark .ghostButton {
+  color: #ddfff2;
+  border-color: rgba(221, 255, 242, 0.24);
+}
+
 .sectionEyebrow {
   margin-bottom: 10px;
   font-size: 11px;
@@ -547,19 +552,87 @@ input {
   gap: 8px;
 }
 
+.findingCard.sev-warning {
+  border-color: rgba(193, 119, 42, 0.28);
+  background: linear-gradient(180deg, rgba(255, 252, 245, 0.92), rgba(255, 246, 235, 0.94));
+}
+
+.findingCard.sev-critical {
+  border-color: rgba(160, 53, 45, 0.28);
+  background: linear-gradient(180deg, rgba(255, 252, 245, 0.92), rgba(255, 239, 237, 0.96));
+}
+
+.findingCard.sev-info {
+  border-color: rgba(61, 111, 153, 0.22);
+}
+
 .findingClaim {
   font-size: 16px;
   line-height: 1.5;
 }
 
 .severity {
-  color: var(--warning);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
   font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .opsPanel {
   display: grid;
   gap: 16px;
+}
+
+.opsHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.primaryActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.primaryAction {
+  padding-inline: 18px;
+}
+
+.advancedActions {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.advancedActions summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 16px;
+  font-weight: 600;
+}
+
+.advancedActions summary::-webkit-details-marker {
+  display: none;
+}
+
+.advancedActions[open] summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.advancedBody {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
 }
 
 .controlGrid {
@@ -605,12 +678,24 @@ input {
   border-top: 0;
 }
 
+.statusPill {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .emptyState {
   padding: 18px;
   border: 1px dashed var(--line);
   border-radius: 18px;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.5);
+  line-height: 1.55;
+}
+
+.emptyState strong {
+  color: var(--ink);
 }
 
 @media (max-width: 1220px) {
@@ -627,6 +712,10 @@ input {
   .sidebar {
     position: static;
   }
+
+  .opsHeader {
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 760px) {
@@ -640,12 +729,14 @@ input {
 
   .statusHeader,
   .sectionHeader,
+  .opsHeader,
   .inboxItem,
   .docItem {
     grid-template-columns: 1fr;
   }
 
   .statusLinks,
+  .primaryActions,
   .inboxActions,
   .docActions {
     justify-content: flex-start;
