@@ -200,14 +200,14 @@ def _parse_document(cfg: Config, document: ParseDocument) -> ParsedDocumentResul
             for idx in ocr_required_pages:
                 page = pdf[idx]
                 ocr_text = _normalize_text(_ocr_page_text(cfg, page))
-                if not _visible_text(ocr_text):
-                    raise ParseError("ocr_failed", f"OCR returned no text for page {idx + 1}")
                 pages[idx] = ParsedPage(page_number=idx + 1, text=ocr_text, ocr_used=True)
             strategy = "ocr_full" if full_ocr else "ocr_partial"
         else:
             strategy = "native"
 
         chunks = _build_chunks(document.document_id, pages)
+        if not chunks:
+            raise ParseError("parse_empty_text", f"Parsing produced no usable text for {document.document_id}")
         confidence = _parse_confidence(strategy=strategy, pages=pages)
         return ParsedDocumentResult(
             page_count=pdf.page_count,
@@ -227,7 +227,7 @@ def _ocr_available() -> bool:
 def _ocr_page_text(cfg: Config, page: fitz.Page) -> str:
     try:
         textpage = page.get_textpage_ocr(
-            language="eng",
+            language=cfg.ocr.languages,
             dpi=300,
             full=False,
         )

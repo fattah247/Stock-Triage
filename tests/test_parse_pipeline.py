@@ -155,6 +155,47 @@ def test_run_parse_marks_document_failed_when_ocr_is_unavailable(tmp_config, mon
         rconn.close()
 
 
+def test_run_parse_tolerates_blank_ocr_pages_when_other_pages_have_text(tmp_config, monkeypatch):
+    document_id = _insert_downloaded_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="ocr-blank-page-1",
+        pdf_bytes=_pdf_bytes_with_pages(
+            [
+                "This page stays native and contains enough financial text to remain parseable without OCR.",
+                "",
+            ]
+        ),
+    )
+
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_available", lambda: True)
+    monkeypatch.setattr("stock_triage.parse.pipeline._ocr_page_text", lambda cfg, page: "")
+
+    result = run_parse(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    assert result.selected == 1
+    assert result.parsed == 1
+    assert result.failed == 0
+    assert result.ocr_partial == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        doc = rconn.execute(
+            """
+            SELECT process_state, parse_strategy, chunk_count
+            FROM documents
+            WHERE document_id = ?
+            """,
+            (document_id,),
+        ).fetchone()
+        assert doc["process_state"] == "parsed"
+        assert doc["parse_strategy"] == "ocr_partial"
+        assert doc["chunk_count"] >= 1
+    finally:
+        rconn.close()
+
+
 def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(

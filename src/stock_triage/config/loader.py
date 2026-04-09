@@ -73,6 +73,7 @@ class BrowserConfig(BaseModel):
 
 class OCRConfig(BaseModel):
     min_chars_per_page: int = 50
+    languages: str = "eng+ind"
 
 
 class LLMConfig(BaseModel):

@@ -83,7 +83,12 @@ python -m stock_triage download --source idx_disclosures --include-quarantined
 python -m stock_triage parse --source idx_financial_reports --limit 10
 ```
 
-For OCR fallback on scanned PDFs, install a local `tesseract` binary on the host.
+For OCR fallback on scanned PDFs, install local `tesseract` plus language data.
+On macOS with Homebrew:
+
+```bash
+brew install tesseract tesseract-lang
+```
 
 ## Configuration
 

@@ -41,6 +41,7 @@ download:
 ocr:
   # If extracted text density falls below this, route through OCR.
   min_chars_per_page: 50
+  languages: "eng+ind"
 
 llm:
   # Phase 7 — local model. Left empty until model is selected.

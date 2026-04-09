@@ -36,6 +36,10 @@ def tmp_config(tmp_path: Path):
             "retry_backoff_seconds": 1,
             "retry_backoff_max_seconds": 30,
         },
+        "ocr": {
+            "min_chars_per_page": 50,
+            "languages": "eng",
+        },
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(raw))
