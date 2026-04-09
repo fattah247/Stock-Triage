@@ -9,6 +9,7 @@ from datetime import date
 from .config import load_config
 from .db import WriterQueue, run_migrations
 from .download import run_downloads
+from .extract import load_extract_status, run_extract
 from .parse import load_parse_status, run_parse
 from .discovery import (
     load_watermark,
@@ -176,6 +177,61 @@ def cmd_parse_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_extract(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    result = run_extract(
+        cfg,
+        source_name=source_name,
+        limit=args.limit,
+        include_extracted=args.include_extracted,
+        retry_failed_only=args.retry_failed,
+    )
+    print(
+        "extract: "
+        f"selected={result.selected} "
+        f"extracted={result.extracted} "
+        f"partial={result.partial} "
+        f"failed={result.failed} "
+        f"metrics={result.metrics} "
+        f"events={result.events}"
+    )
+    return 0
+
+
+def cmd_extract_status(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    source_name = None if args.source == "all" else args.source
+    report = load_extract_status(
+        cfg,
+        source_name=source_name,
+        failure_limit=args.failure_limit,
+    )
+    for row in report.rows:
+        completeness = f"{row.completeness_pct:.2f}%" if row.completeness_pct is not None else "n/a"
+        print(
+            f"{row.source_name}: total={row.total} pending={row.pending} "
+            f"extracted={row.extracted} partial={row.partial} failed={row.failed} "
+            f"metrics={row.metrics} events={row.events} completeness={completeness}"
+        )
+    if report.recent_failures:
+        print("recent_failures:")
+        for failure in report.recent_failures:
+            print(
+                f"{failure.source_name} {failure.document_id} "
+                f"record={failure.source_record_id} status={failure.status} "
+                f"error={failure.error_code or 'unknown'} "
+                f"updated_at={failure.updated_at}"
+            )
+    return 0
+
+
 def _adapters_for_source(source: str):
     mapping = {
         "company_universe": IDXCompanyUniverseAdapter,
@@ -294,6 +350,44 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum number of recent failed documents to display",
     )
     p_parse_status.set_defaults(func=cmd_parse_status)
+    p_extract = sub.add_parser("extract", help="Normalize facts and detect events from parsed documents")
+    p_extract.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for parsed documents",
+    )
+    p_extract.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of parsed documents to extract",
+    )
+    p_extract.add_argument(
+        "--include-extracted",
+        action="store_true",
+        help="Reconsider documents already marked extracted or analyzed",
+    )
+    p_extract.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry only documents currently marked failed",
+    )
+    p_extract.set_defaults(func=cmd_extract)
+    p_extract_status = sub.add_parser("extract-status", help="Show extraction-state counts and recent failures")
+    p_extract_status.add_argument(
+        "--source",
+        choices=["idx_disclosures", "idx_financial_reports", "all"],
+        default="all",
+        help="Optional source filter for extracted documents",
+    )
+    p_extract_status.add_argument(
+        "--failure-limit",
+        type=int,
+        default=10,
+        help="Maximum number of recent extraction failures to display",
+    )
+    p_extract_status.set_defaults(func=cmd_extract_status)
     args = parser.parse_args(argv)
     return args.func(args)
 

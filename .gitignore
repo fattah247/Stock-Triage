@@ -24,6 +24,8 @@ data/logs/
 data/browser/
 data/recon/
 data/quarantine/
+data/*.sqlite
+data/*.db
 
 # OS
 .DS_Store

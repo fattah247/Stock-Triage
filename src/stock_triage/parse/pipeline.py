@@ -173,7 +173,7 @@ def load_parse_status(
                 source_name,
                 COUNT(*) AS total,
                 SUM(CASE WHEN process_state = 'downloaded' THEN 1 ELSE 0 END) AS downloaded,
-                SUM(CASE WHEN process_state = 'parsed' THEN 1 ELSE 0 END) AS parsed,
+                SUM(CASE WHEN process_state IN ('parsed', 'extracted', 'analyzed') THEN 1 ELSE 0 END) AS parsed,
                 SUM(CASE WHEN process_state = 'failed' THEN 1 ELSE 0 END) AS failed,
                 SUM(CASE WHEN parse_strategy = 'ocr_partial' THEN 1 ELSE 0 END) AS ocr_partial,
                 SUM(CASE WHEN parse_strategy = 'ocr_full' THEN 1 ELSE 0 END) AS ocr_full
