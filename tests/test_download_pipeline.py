@@ -6,7 +6,7 @@ from stock_triage.__main__ import main
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.discovery import persist_document_candidates
 from stock_triage.download import run_downloads
-from stock_triage.download.pipeline import AttachmentDownloader, DownloadCandidate
+from stock_triage.download.pipeline import AttachmentDownloader, DownloadCandidate, DownloadResource
 from stock_triage.sources import DocumentCandidate, SourceClass
 
 
@@ -283,6 +283,61 @@ def test_run_downloads_include_existing_reconsiders_prior_documents(tmp_config):
         rconn.close()
 
 
+def test_disclosure_candidate_remains_pending_until_attachments_downloaded(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-attach",
+        ticker="BGTG",
+        title="Disclosure With Attachments",
+        attachment_url="https://example.test/disclosures/main.pdf",
+        attachment_filename="main.pdf",
+        raw_metadata={
+            "attachments": [
+                {"filename": "att-1.pdf", "url": "https://example.test/disclosures/att-1.pdf"},
+                {"filename": "att-2.pdf", "url": "https://example.test/disclosures/att-2.pdf"},
+            ]
+        },
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    calls: list[str] = []
+
+    def _transport(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if str(request.url).endswith("main.pdf"):
+            return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.4 main", request=request)
+        if str(request.url).endswith("att-1.pdf"):
+            return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.4 att1", request=request)
+        return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.4 att2", request=request)
+
+    first_client = httpx.Client(transport=httpx.MockTransport(_transport))
+    try:
+        first = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=first_client)
+    finally:
+        first_client.close()
+
+    assert first.selected == 1
+    assert first.fetched == 3
+    assert first.inserted == 3
+    assert len(calls) == 3
+
+    second_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(AssertionError("fully downloaded disclosure should not be selected"))
+        )
+    )
+    try:
+        second = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=second_client)
+    finally:
+        second_client.close()
+
+    assert second.selected == 0
+
+
 def test_run_downloads_persists_failed_attempts(tmp_config):
     candidate = DocumentCandidate(
         source_name="idx_disclosures",
@@ -401,6 +456,11 @@ def test_attachment_downloader_uses_browser_session_for_idx_urls(tmp_config, mon
                 attachment_filename="example.pdf",
                 upstream_published_at=None,
                 raw_metadata={"report_type": "rdf"},
+            ),
+            DownloadResource(
+                source_file_id="file-1",
+                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_filename="example.pdf",
             ),
             existing=type("Existing", (), {"etag": '"v1"', "last_modified": None, "document_id": "doc-1"})(),
         )
