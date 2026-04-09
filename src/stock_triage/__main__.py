@@ -105,6 +105,8 @@ def cmd_download(args: argparse.Namespace) -> int:
         source_name=source_name,
         limit=args.limit,
         include_existing=args.include_existing,
+        retry_failed=args.retry_failed,
+        include_quarantined=args.include_quarantined,
     )
     print(
         "download: "
@@ -186,6 +188,16 @@ def main(argv: list[str] | None = None) -> int:
         "--include-existing",
         action="store_true",
         help="Reconsider candidates that already have at least one downloaded document",
+    )
+    p_download.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Ignore backoff windows and target failed download resources immediately",
+    )
+    p_download.add_argument(
+        "--include-quarantined",
+        action="store_true",
+        help="Reconsider resources previously quarantined for corrupt payloads",
     )
     p_download.set_defaults(func=cmd_download)
     args = parser.parse_args(argv)

@@ -7,6 +7,7 @@ paths:
   files_dir: data/files
   db_path: data/db/stock_triage.sqlite
   logs_dir: data/logs
+  quarantine_dir: data/quarantine
 
 database:
   # SQLite is single-writer; use WAL for concurrent readers.
@@ -32,6 +33,10 @@ browser:
   challenge_timeout_s: 180
   page_settle_ms: 5000
   channel: ""
+
+download:
+  retry_backoff_seconds: 300
+  retry_backoff_max_seconds: 86400
 
 ocr:
   # If extracted text density falls below this, route through OCR.

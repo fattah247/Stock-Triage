@@ -10,14 +10,14 @@ review of source-data and model licensing.
 
 ## Status
 
-**Phase 2 — Universe and discovery layer** (done).
+**Phase 3 — Download, versioning, and file store** (done).
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Repo, config, SQLite schema, file storage | done |
 | 1 | Source reconnaissance and proof of access | done |
 | 2 | Universe and discovery layer | done |
-| 3 | Download, versioning, file store | in progress |
+| 3 | Download, versioning, file store | done |
 | 4 | Parsing, OCR, chunking | pending |
 | 5 | Normalization, extraction, events | pending |
 | 6 | Rule engine and evaluation harness | pending |
@@ -74,6 +74,10 @@ python -m stock_triage discover financial_report --year 2025
 
 # Download attachment candidates into the file store and documents table
 python -m stock_triage download --source idx_financial_reports --limit 10
+
+# Force an immediate retry of failed resources or reconsider quarantined payloads
+python -m stock_triage download --source idx_disclosures --retry-failed
+python -m stock_triage download --source idx_disclosures --include-quarantined
 ```
 
 ## Configuration
@@ -94,10 +98,15 @@ Defaults live in `config/default.yaml`. Override either by:
 - **Phase 2 discovery layer.** The repository now supports live company-universe
   sync with issuer enrichment plus incremental disclosure and financial-report
   discovery backed by persisted source watermarks in SQLite.
-- **Phase 3 bootstrap.** Download now persists concrete `documents` and
-  `document_versions` rows, stores bytes in the content-addressed file store,
-  and uses the warmed browser session for IDX attachment routes that block
-  plain HTTP clients.
+- **Phase 3 download layer.** Download now persists concrete `documents`,
+  file-level `document_versions`, and per-resource `download_resources`
+  state, stores bytes in the content-addressed file store, and uses the
+  warmed browser session for IDX attachment routes that block plain HTTP
+  clients.
+- **Retry and quarantine semantics.** Failed resources back off
+  automatically, `--retry-failed` forces immediate retries, and corrupt
+  payloads are quarantined under `data/quarantine/` until explicitly
+  reconsidered with `--include-quarantined`.
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB
   tracks revision/relisting semantics.

@@ -16,6 +16,7 @@ def tmp_config(tmp_path: Path):
             "files_dir": str(tmp_path / "data" / "files"),
             "db_path": str(tmp_path / "data" / "db" / "stock_triage.sqlite"),
             "logs_dir": str(tmp_path / "data" / "logs"),
+            "quarantine_dir": str(tmp_path / "data" / "quarantine"),
         },
         "discovery": {
             "user_agent": "stock-triage-test/0.0",
@@ -31,6 +32,10 @@ def tmp_config(tmp_path: Path):
             "channel": "",
         },
         "logging": {"level": "WARNING", "json": False},
+        "download": {
+            "retry_backoff_seconds": 1,
+            "retry_backoff_max_seconds": 30,
+        },
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(raw))

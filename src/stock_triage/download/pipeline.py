@@ -11,7 +11,7 @@ import json
 import mimetypes
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -69,6 +69,24 @@ class DownloadedAttachment:
     etag: str | None
     last_modified: str | None
     stored_file: StoredFile
+
+
+class CorruptDownloadError(ValueError):
+    def __init__(
+        self,
+        *,
+        url: str,
+        filename: str | None,
+        detail: str,
+        body: bytes,
+        mime_type: str | None,
+    ) -> None:
+        super().__init__(detail)
+        self.url = url
+        self.filename = filename
+        self.detail = detail
+        self.body = body
+        self.mime_type = mime_type
 
 
 @dataclass(frozen=True)
@@ -166,6 +184,14 @@ class AttachmentDownloader:
                 url=resource.attachment_url,
             )
             stored = self.store.put_bytes(fetched.body)
+            if not self.store.verify(stored.sha256):
+                raise CorruptDownloadError(
+                    url=resource.attachment_url,
+                    filename=resource.attachment_filename,
+                    detail="Stored file failed post-write SHA-256 verification",
+                    body=fetched.body,
+                    mime_type=fetched.content_type,
+                )
             return DownloadedAttachment(
                 original_url=fetched.final_url,
                 retrieved_at=retrieved_at,
@@ -187,6 +213,14 @@ class AttachmentDownloader:
         )
 
         stored = self.store.put_bytes(response.content)
+        if not self.store.verify(stored.sha256):
+            raise CorruptDownloadError(
+                url=resource.attachment_url,
+                filename=resource.attachment_filename,
+                detail="Stored file failed post-write SHA-256 verification",
+                body=response.content,
+                mime_type=response.headers.get("content-type"),
+            )
         return DownloadedAttachment(
             original_url=str(response.url),
             retrieved_at=retrieved_at,
@@ -203,6 +237,8 @@ def run_downloads(
     source_name: str | None = None,
     limit: int = 25,
     include_existing: bool = False,
+    retry_failed: bool = False,
+    include_quarantined: bool = False,
     client: httpx.Client | None = None,
 ) -> DownloadRunResult:
     cfg.ensure_dirs()
@@ -219,6 +255,8 @@ def run_downloads(
                 source_name=source_name,
                 limit=limit,
                 include_existing=include_existing,
+                retry_failed=retry_failed,
+                include_quarantined=include_quarantined,
             )
             result = DownloadRunResult(selected=len(candidates))
 
@@ -230,8 +268,9 @@ def run_downloads(
                     if state is None:
                         initial_status = "downloaded" if resource.source_file_id in existing_downloads else "pending"
                         wq.submit(
-                            lambda conn, c=candidate, r=resource, s=initial_status, doc=existing_downloads.get(resource.source_file_id): _upsert_download_resource(
+                            lambda conn, conn_cfg=cfg, c=candidate, r=resource, s=initial_status, doc=existing_downloads.get(resource.source_file_id): _upsert_download_resource(
                                 conn,
+                                cfg=conn_cfg,
                                 candidate=c,
                                 resource=r,
                                 status=s,
@@ -239,7 +278,15 @@ def run_downloads(
                             )
                         )
                     existing = existing_downloads.get(resource.source_file_id)
-                    if not include_existing and existing is not None:
+                    if not _should_fetch_resource(
+                        resource=resource,
+                        existing=existing,
+                        state=state,
+                        include_existing=include_existing,
+                        retry_failed=retry_failed,
+                        include_quarantined=include_quarantined,
+                        now=datetime.now(timezone.utc),
+                    ):
                         continue
 
                     started_at = datetime.now(timezone.utc)
@@ -247,6 +294,20 @@ def run_downloads(
                         fetched = downloader.fetch(candidate, resource, existing=existing)
                     except Exception as exc:  # noqa: BLE001 - surfaced in summary/logs
                         finished_at = datetime.now(timezone.utc)
+                        if isinstance(exc, CorruptDownloadError):
+                            quarantine_path = _quarantine_download(
+                                cfg,
+                                candidate=candidate,
+                                resource=resource,
+                                exc=exc,
+                            )
+                            exc = CorruptDownloadError(
+                                url=exc.url,
+                                filename=exc.filename,
+                                detail=f"{exc.detail}; quarantined at {quarantine_path}",
+                                body=exc.body,
+                                mime_type=exc.mime_type,
+                            )
                         failure = _attempt_from_exception(exc, started_at=started_at, finished_at=finished_at)
                         wq.submit(
                             lambda conn, c=candidate, r=resource, a=failure: _persist_download_attempt(
@@ -257,8 +318,9 @@ def run_downloads(
                             )
                         )
                         wq.submit(
-                            lambda conn, c=candidate, r=resource, a=failure: _upsert_download_resource(
+                            lambda conn, conn_cfg=cfg, c=candidate, r=resource, a=failure: _upsert_download_resource(
                                 conn,
+                                cfg=conn_cfg,
                                 candidate=c,
                                 resource=r,
                                 status=a.status,
@@ -282,21 +344,29 @@ def run_downloads(
 
                     if fetched is None:
                         finished_at = datetime.now(timezone.utc)
-                        wq.submit(
-                            lambda conn, c=candidate, r=resource, a=DownloadAttemptPersist(
-                                status="not_modified",
-                                started_at=started_at,
-                                finished_at=finished_at,
-                                document_id=existing.document_id if existing is not None else None,
-                            ): _persist_download_attempt(conn, candidate=c, resource=r, attempt=a)
+                        not_modified_attempt = DownloadAttemptPersist(
+                            status="not_modified",
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            document_id=existing.document_id if existing is not None else None,
                         )
                         wq.submit(
-                            lambda conn, c=candidate, r=resource, existing_doc=existing: _upsert_download_resource(
+                            lambda conn, c=candidate, r=resource, a=not_modified_attempt: _persist_download_attempt(
                                 conn,
+                                candidate=c,
+                                resource=r,
+                                attempt=a,
+                            )
+                        )
+                        wq.submit(
+                            lambda conn, conn_cfg=cfg, c=candidate, r=resource, existing_doc=existing, a=not_modified_attempt: _upsert_download_resource(
+                                conn,
+                                cfg=conn_cfg,
                                 candidate=c,
                                 resource=r,
                                 status="downloaded",
                                 document_id=None if existing_doc is None else existing_doc.document_id,
+                                attempt=a,
                             )
                         )
                         result = _replace_result(result, not_modified=result.not_modified + 1)
@@ -313,22 +383,30 @@ def run_downloads(
                     finished_at = datetime.now(timezone.utc)
                     attempt_status = "downloaded" if persist.inserted else "duplicate"
                     http_status = 200 if fetched.original_url.startswith("http") else None
-                    wq.submit(
-                        lambda conn, c=candidate, r=resource, a=DownloadAttemptPersist(
-                            status=attempt_status,
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            http_status=http_status,
-                            document_id=persist.document_id,
-                        ): _persist_download_attempt(conn, candidate=c, resource=r, attempt=a)
+                    success_attempt = DownloadAttemptPersist(
+                        status=attempt_status,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        http_status=http_status,
+                        document_id=persist.document_id,
                     )
                     wq.submit(
-                        lambda conn, c=candidate, r=resource, doc_id=persist.document_id: _upsert_download_resource(
+                        lambda conn, c=candidate, r=resource, a=success_attempt: _persist_download_attempt(
                             conn,
+                            candidate=c,
+                            resource=r,
+                            attempt=a,
+                        )
+                    )
+                    wq.submit(
+                        lambda conn, conn_cfg=cfg, c=candidate, r=resource, doc_id=persist.document_id, a=success_attempt: _upsert_download_resource(
+                            conn,
+                            cfg=conn_cfg,
                             candidate=c,
                             resource=r,
                             status="downloaded",
                             document_id=doc_id,
+                            attempt=a,
                         )
                     )
                     result = _replace_result(result, fetched=result.fetched + 1)
@@ -361,6 +439,8 @@ def _select_candidates(
     source_name: str | None,
     limit: int,
     include_existing: bool,
+    retry_failed: bool,
+    include_quarantined: bool,
 ) -> list[DownloadCandidate]:
     sql = """
         SELECT
@@ -385,6 +465,7 @@ def _select_candidates(
 
     rows = conn.execute(sql, tuple(params)).fetchall()
     selected: list[DownloadCandidate] = []
+    now = datetime.now(timezone.utc)
     for row in rows:
         raw_metadata = json.loads(row["raw_metadata"])
         candidate = DownloadCandidate(
@@ -398,7 +479,14 @@ def _select_candidates(
             upstream_published_at=row["upstream_published_at"],
             raw_metadata=raw_metadata,
         )
-        if include_existing or _candidate_has_pending_work(conn, candidate):
+        if _candidate_has_pending_work(
+            conn,
+            candidate,
+            include_existing=include_existing,
+            retry_failed=retry_failed,
+            include_quarantined=include_quarantined,
+            now=now,
+        ):
             selected.append(candidate)
             if len(selected) >= limit:
                 break
@@ -531,6 +619,7 @@ def _persist_download(
 def _upsert_download_resource(
     conn: sqlite3.Connection,
     *,
+    cfg: Config,
     candidate: DownloadCandidate,
     resource: DownloadResource,
     status: str,
@@ -552,10 +641,11 @@ def _upsert_download_resource(
         attempt_count += 1
         if attempt.status == "failed":
             failure_count += 1
-        elif status == "downloaded":
+        elif attempt.status in {"downloaded", "not_modified"} or status == "downloaded":
             failure_count = 0
     first_seen_at = now if existing is None else existing["first_seen_at"]
     resolved_document_id = document_id or (None if existing is None else existing["document_id"])
+    next_attempt_at = _compute_next_attempt_at(cfg, attempt=attempt, failure_count=failure_count)
     conn.execute(
         """
         INSERT INTO download_resources (
@@ -593,7 +683,7 @@ def _upsert_download_resource(
             attempt_count,
             failure_count,
             None if attempt is None else attempt.finished_at.isoformat(),
-            None,
+            next_attempt_at,
             None if attempt is None else attempt.http_status,
             None if attempt is None else attempt.error_code,
             None if attempt is None else attempt.error_detail,
@@ -674,13 +764,27 @@ def _resources_for_candidate(candidate: DownloadCandidate) -> list[DownloadResou
     return resources
 
 
-def _candidate_has_pending_work(conn: sqlite3.Connection, candidate: DownloadCandidate) -> bool:
+def _candidate_has_pending_work(
+    conn: sqlite3.Connection,
+    candidate: DownloadCandidate,
+    *,
+    include_existing: bool,
+    retry_failed: bool,
+    include_quarantined: bool,
+    now: datetime,
+) -> bool:
     existing_downloads = _existing_downloads_for_candidate(conn, candidate)
     for resource in _resources_for_candidate(candidate):
         state = _resource_state_for_candidate(conn, candidate, resource)
-        if state is not None and state.status == "downloaded" and state.document_id is not None:
-            continue
-        if resource.source_file_id not in existing_downloads:
+        if _should_fetch_resource(
+            resource=resource,
+            existing=existing_downloads.get(resource.source_file_id),
+            state=state,
+            include_existing=include_existing,
+            retry_failed=retry_failed,
+            include_quarantined=include_quarantined,
+            now=now,
+        ):
             return True
     return False
 
@@ -700,10 +804,24 @@ def _validate_download_bytes(*, body: bytes, mime_type: str | None, filename: st
     normalized_mime = _normalize_mime_type(mime_type, filename)
     expected_pdf = normalized_mime == "application/pdf" or (filename or url).lower().endswith(".pdf")
     if expected_pdf and not body.startswith(b"%PDF-"):
-        raise ValueError(f"Expected PDF bytes from {url}, but received non-PDF content")
+        raise CorruptDownloadError(
+            url=url,
+            filename=filename,
+            detail=f"Expected PDF bytes from {url}, but received non-PDF content",
+            body=body,
+            mime_type=mime_type,
+        )
 
 
 def _attempt_from_exception(exc: Exception, *, started_at: datetime, finished_at: datetime) -> DownloadAttemptPersist:
+    if isinstance(exc, CorruptDownloadError):
+        return DownloadAttemptPersist(
+            status="quarantined",
+            started_at=started_at,
+            finished_at=finished_at,
+            error_code="corrupt_download",
+            error_detail=exc.detail,
+        )
     if isinstance(exc, httpx.HTTPStatusError):
         return DownloadAttemptPersist(
             status="failed",
@@ -757,3 +875,78 @@ def _source_page_url(source_name: str) -> str:
         "idx_disclosures": "https://www.idx.co.id/en/listed-companies/disclosure",
     }
     return mapping.get(source_name, "https://www.idx.co.id/en/")
+
+
+def _should_fetch_resource(
+    *,
+    resource: DownloadResource,
+    existing: ExistingDownload | None,
+    state: ResourceState | None,
+    include_existing: bool,
+    retry_failed: bool,
+    include_quarantined: bool,
+    now: datetime,
+) -> bool:
+    if state is not None:
+        if state.status == "quarantined":
+            return include_quarantined
+        if state.status == "failed":
+            if retry_failed:
+                return True
+            return _retry_due(state.next_attempt_at, now)
+        if state.status == "downloaded" and state.document_id is not None:
+            return include_existing
+        if state.status == "pending":
+            return True
+    if existing is not None:
+        return include_existing
+    return True
+
+
+def _retry_due(next_attempt_at: str | None, now: datetime) -> bool:
+    if next_attempt_at is None:
+        return True
+    return datetime.fromisoformat(next_attempt_at) <= now
+
+
+def _compute_next_attempt_at(cfg: Config, *, attempt: DownloadAttemptPersist | None, failure_count: int) -> str | None:
+    if attempt is None:
+        return None
+    if attempt.status != "failed":
+        return None
+    backoff = cfg.download.retry_backoff_seconds * (2 ** max(failure_count - 1, 0))
+    backoff = min(backoff, cfg.download.retry_backoff_max_seconds)
+    return (attempt.finished_at + timedelta(seconds=backoff)).isoformat()
+
+
+def _quarantine_download(
+    cfg: Config,
+    *,
+    candidate: DownloadCandidate,
+    resource: DownloadResource,
+    exc: CorruptDownloadError,
+) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stem = f"{stamp}_{_stable_id(resource.attachment_url)}"
+    payload_path = cfg.paths.quarantine_dir / f"{stem}.bin"
+    meta_path = cfg.paths.quarantine_dir / f"{stem}.json"
+    payload_path.write_bytes(exc.body)
+    meta_path.write_text(
+        json.dumps(
+            {
+                "candidate_id": candidate.candidate_id,
+                "source_name": candidate.source_name,
+                "source_record_id": candidate.source_record_id,
+                "source_file_id": resource.source_file_id,
+                "attachment_url": resource.attachment_url,
+                "attachment_filename": resource.attachment_filename,
+                "mime_type": exc.mime_type,
+                "error": exc.detail,
+                "payload_path": str(payload_path),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return str(payload_path)

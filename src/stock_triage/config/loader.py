@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "default.yaml"
@@ -19,12 +19,21 @@ class PathsConfig(BaseModel):
     files_dir: Path
     db_path: Path
     logs_dir: Path
+    quarantine_dir: Path | None = None
 
-    @field_validator("data_dir", "files_dir", "db_path", "logs_dir", mode="before")
+    @field_validator("data_dir", "files_dir", "db_path", "logs_dir", "quarantine_dir", mode="before")
     @classmethod
-    def _to_path(cls, v: Any) -> Path:
+    def _to_path(cls, v: Any) -> Path | None:
+        if v is None:
+            return None
         p = Path(v)
         return p if p.is_absolute() else (REPO_ROOT / p)
+
+    @model_validator(mode="after")
+    def _default_quarantine_dir(self) -> "PathsConfig":
+        if self.quarantine_dir is None:
+            self.quarantine_dir = self.data_dir / "quarantine"
+        return self
 
 
 class DatabaseConfig(BaseModel):
@@ -71,12 +80,18 @@ class LLMConfig(BaseModel):
     context_budget_tokens: int = 8000
 
 
+class DownloadConfig(BaseModel):
+    retry_backoff_seconds: int = 300
+    retry_backoff_max_seconds: int = 86400
+
+
 class Config(BaseModel):
     paths: PathsConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     discovery: DiscoveryConfig
     browser: BrowserConfig
+    download: DownloadConfig = Field(default_factory=DownloadConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
@@ -85,6 +100,7 @@ class Config(BaseModel):
             self.paths.data_dir,
             self.paths.files_dir,
             self.paths.logs_dir,
+            self.paths.quarantine_dir,
             self.paths.db_path.parent,
             self.browser.profile_dir,
             self.browser.artifacts_dir,

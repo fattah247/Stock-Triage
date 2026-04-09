@@ -457,11 +457,184 @@ def test_run_downloads_persists_failed_attempts(tmp_config):
         rconn.close()
 
 
+def test_failed_resources_respect_backoff_until_retry_requested(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-retry",
+        ticker="BRMS",
+        title="Retry Me",
+        attachment_url="https://example.test/disclosures/disc-retry.pdf",
+        attachment_filename="disc-retry.pdf",
+        raw_metadata={"filename": "disc-retry.pdf"},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    failed_client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, request=request))
+    )
+    try:
+        first = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=failed_client)
+    finally:
+        failed_client.close()
+
+    assert first.failed == 1
+
+    blocked_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(AssertionError("backoff window should suppress immediate retry"))
+        )
+    )
+    try:
+        second = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=blocked_client)
+    finally:
+        blocked_client.close()
+
+    assert second.selected == 0
+
+    success_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 recovered",
+                request=request,
+            )
+        )
+    )
+    try:
+        third = run_downloads(
+            tmp_config,
+            source_name="idx_disclosures",
+            limit=10,
+            retry_failed=True,
+            client=success_client,
+        )
+    finally:
+        success_client.close()
+
+    assert third.selected == 1
+    assert third.inserted == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT status, failure_count, document_id, next_attempt_at
+            FROM download_resources
+            WHERE source_name = 'idx_disclosures' AND source_record_id = 'disc-retry'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "downloaded"
+        assert row["failure_count"] == 0
+        assert row["document_id"] is not None
+        assert row["next_attempt_at"] is None
+    finally:
+        rconn.close()
+
+
+def test_corrupt_downloads_are_quarantined_and_skipped_by_default(tmp_config):
+    candidate = DocumentCandidate(
+        source_name="idx_disclosures",
+        source_class=SourceClass.DISCLOSURE,
+        source_record_id="disc-corrupt",
+        ticker="BRMS",
+        title="Corrupt Payload",
+        attachment_url="https://example.test/disclosures/disc-corrupt.pdf",
+        attachment_filename="disc-corrupt.pdf",
+        raw_metadata={"filename": "disc-corrupt.pdf"},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+
+    corrupt_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"<html>blocked</html>",
+                request=request,
+            )
+        )
+    )
+    try:
+        first = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=corrupt_client)
+    finally:
+        corrupt_client.close()
+
+    assert first.failed == 1
+
+    quarantined = sorted(tmp_config.paths.quarantine_dir.glob("*.bin"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"<html>blocked</html>"
+
+    blocked_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(AssertionError("quarantined resources should stay out of normal runs"))
+        )
+    )
+    try:
+        second = run_downloads(tmp_config, source_name="idx_disclosures", limit=10, client=blocked_client)
+    finally:
+        blocked_client.close()
+
+    assert second.selected == 0
+
+    recovered_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf"},
+                content=b"%PDF-1.4 recovered",
+                request=request,
+            )
+        )
+    )
+    try:
+        third = run_downloads(
+            tmp_config,
+            source_name="idx_disclosures",
+            limit=10,
+            include_quarantined=True,
+            client=recovered_client,
+        )
+    finally:
+        recovered_client.close()
+
+    assert third.selected == 1
+    assert third.inserted == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        attempt = rconn.execute(
+            """
+            SELECT status, error_code
+            FROM download_attempts
+            WHERE candidate_id = 'idx_disclosures:disc-corrupt'
+            ORDER BY finished_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert attempt is not None
+        assert attempt["status"] == "quarantined"
+        assert attempt["error_code"] == "corrupt_download"
+    finally:
+        rconn.close()
+
+
 def test_download_cli_uses_run_downloads(tmp_config, monkeypatch, capsys):
     monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
     monkeypatch.setattr(
         "stock_triage.__main__.run_downloads",
-        lambda cfg, source_name=None, limit=25, include_existing=False: type(
+        lambda cfg, source_name=None, limit=25, include_existing=False, retry_failed=False, include_quarantined=False: type(
             "R",
             (),
             {
