@@ -65,6 +65,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Advanced actions" in html
         assert "Daily Digest" in html
         assert "Open Review Queue" in html
+        assert "Market Monitor" in html
         assert "Decision Snapshot" in html
         assert "Claims and Thesis" in html
         assert "Sector and Peer Explorer" in html
@@ -81,6 +82,8 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"
+        assert "market_monitor" in snapshot
+        assert "counts" in snapshot["market_monitor"]
         assert snapshot["inbox_rows"][0]["ticker"] == "TAMU"
         assert snapshot["inbox_rows"][0]["kind"] in {"document", "rule", "summary", "event"}
         assert snapshot["backlog_rows"][0]["source_name"] == "idx_financial_reports"

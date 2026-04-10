@@ -236,6 +236,7 @@ def _handler_factory():
                 html = render_dashboard_html(
                     title=self.server.title,
                     issuers=snapshot["issuers"],
+                    market_monitor=snapshot["market_monitor"],
                     documents=snapshot["documents"],
                     metrics=snapshot["metrics"],
                     findings=snapshot["findings"],
@@ -581,6 +582,7 @@ def _snapshot_payload(cfg: Config, action_history: list[dict[str, object]]) -> d
     snapshot = load_dashboard_snapshot(cfg)
     return {
         "issuers": snapshot.issuers,
+        "market_monitor": snapshot.market_monitor,
         "documents": snapshot.documents,
         "metrics": snapshot.metrics,
         "findings": snapshot.findings,

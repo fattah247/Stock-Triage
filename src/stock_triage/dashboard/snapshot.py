@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from ..canary import load_canary_status
 from ..config import Config
@@ -16,6 +17,7 @@ from ..intelligence.review import load_intelligence_kpis, load_latest_digests, l
 @dataclass(frozen=True)
 class DashboardSnapshot:
     issuers: list[dict[str, object]]
+    market_monitor: dict[str, object]
     documents: list[dict[str, object]]
     metrics: list[dict[str, object]]
     findings: list[dict[str, object]]
@@ -46,6 +48,7 @@ def load_dashboard_snapshot(
         configure_pragmas(conn, cfg)
         snapshot = DashboardSnapshot(
             issuers=_load_issuers(conn),
+            market_monitor=_load_market_monitor(conn),
             documents=_load_latest_documents(conn, limit=document_limit),
             metrics=_load_metric_snapshot(conn),
             findings=_load_findings(conn, limit=finding_limit),
@@ -69,6 +72,7 @@ def load_dashboard_snapshot(
     kpis = load_intelligence_kpis(cfg)
     return DashboardSnapshot(
         issuers=snapshot.issuers,
+        market_monitor=snapshot.market_monitor,
         documents=snapshot.documents,
         metrics=snapshot.metrics,
         findings=snapshot.findings,
@@ -95,12 +99,14 @@ def load_snapshot_lite(cfg: Config) -> dict[str, object]:
     try:
         configure_pragmas(conn, cfg)
         issuers = _load_issuers(conn)
+        market_monitor = _load_market_monitor(conn)
     finally:
         conn.close()
 
     kpis = load_intelligence_kpis(cfg)
     return {
         "issuers": issuers,
+        "market_monitor": market_monitor,
         "intelligence_kpis": kpis,
     }
 
@@ -237,6 +243,263 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
         (limit,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
+    week_start = now - timedelta(days=7)
+    overdue_threshold = now - timedelta(days=420)
+
+    new_disclosures_today = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM documents
+        WHERE source_name = 'idx_disclosures'
+          AND updated_at >= ?
+        """,
+        (today_start.isoformat(),),
+    ).fetchone()["count"]
+
+    low_signal_event_types = {"shareholder_meeting_summary", "dividend_notice"}
+    material_event_filings_today = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT e.document_id) AS count
+        FROM events e
+        WHERE e.detected_at >= ?
+          AND e.event_type NOT IN ({",".join("?" for _ in low_signal_event_types)})
+        """,
+        (today_start.isoformat(), *sorted(low_signal_event_types)),
+    ).fetchone()["count"]
+
+    recent_event_rows = conn.execute(
+        """
+        SELECT event_type, COUNT(*) AS count
+        FROM events
+        WHERE detected_at >= ?
+        GROUP BY event_type
+        ORDER BY count DESC, event_type ASC
+        """,
+        (week_start.isoformat(),),
+    ).fetchall()
+    event_counts = {row["event_type"]: row["count"] for row in recent_event_rows}
+
+    recent_financial_rows = conn.execute(
+        """
+        SELECT
+            c.ticker,
+            c.issuer_name,
+            MAX(COALESCE(d.source_modified_at, d.updated_at, d.created_at)) AS latest_periodic_at
+        FROM companies c
+        LEFT JOIN documents d
+          ON d.ticker = c.ticker
+         AND d.document_type IN ('annual_report', 'financial_statement')
+        WHERE COALESCE(c.active_status, 'listed') != 'delisted'
+        GROUP BY c.ticker, c.issuer_name
+        ORDER BY c.ticker ASC
+        """
+    ).fetchall()
+    late_periodic_rows: list[dict[str, object]] = []
+    for row in recent_financial_rows:
+        latest = _parse_iso_datetime(row["latest_periodic_at"])
+        if latest is not None and latest >= overdue_threshold:
+            continue
+        late_periodic_rows.append(
+            {
+                "ticker": row["ticker"],
+                "issuer_name": row["issuer_name"],
+                "latest_periodic_at": row["latest_periodic_at"],
+                "days_since_periodic": (now - latest).days if latest is not None else None,
+            }
+        )
+
+    sector_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(c.sector, 'unknown') AS sector,
+            d.document_id,
+            d.updated_at,
+            e.event_type,
+            e.severity,
+            rr.rule_name,
+            rr.severity AS rule_severity
+        FROM companies c
+        LEFT JOIN documents d
+          ON d.ticker = c.ticker
+         AND d.updated_at >= ?
+        LEFT JOIN events e
+          ON e.document_id = d.document_id
+         AND e.detected_at >= ?
+        LEFT JOIN rule_runs rr
+          ON rr.document_id = d.document_id
+         AND rr.triggered = 1
+         AND rr.evaluated_at >= ?
+        ORDER BY sector ASC
+        """,
+        (week_start.isoformat(), week_start.isoformat(), week_start.isoformat()),
+    ).fetchall()
+    sector_map: dict[str, dict[str, object]] = {}
+    for row in sector_rows:
+        sector = str(row["sector"] or "unknown")
+        entry = sector_map.setdefault(
+            sector,
+            {
+                "sector": sector,
+                "disclosures_7d": set(),
+                "material_events_7d": set(),
+                "warning_signals_7d": 0,
+                "critical_signals_7d": 0,
+            },
+        )
+        if row["document_id"]:
+            entry["disclosures_7d"].add(row["document_id"])
+        if row["event_type"] and row["event_type"] not in low_signal_event_types:
+            entry["material_events_7d"].add(row["document_id"])
+            if row["severity"] == "critical":
+                entry["critical_signals_7d"] += 1
+            elif row["severity"] == "warning":
+                entry["warning_signals_7d"] += 1
+        if row["rule_name"]:
+            if row["rule_severity"] == "critical":
+                entry["critical_signals_7d"] += 1
+            elif row["rule_severity"] == "warning":
+                entry["warning_signals_7d"] += 1
+    sector_heatmap = sorted(
+        (
+            {
+                "sector": sector,
+                "disclosures_7d": len(payload["disclosures_7d"]),
+                "material_events_7d": len(payload["material_events_7d"]),
+                "warning_signals_7d": payload["warning_signals_7d"],
+                "critical_signals_7d": payload["critical_signals_7d"],
+            }
+            for sector, payload in sector_map.items()
+        ),
+        key=lambda item: (
+            -int(item["critical_signals_7d"]),
+            -int(item["material_events_7d"]),
+            -int(item["disclosures_7d"]),
+            str(item["sector"]),
+        ),
+    )[:10]
+
+    review_counts = {
+        row["ticker"]: row["count"]
+        for row in conn.execute(
+            """
+            SELECT ticker, COUNT(*) AS count
+            FROM review_queue_items
+            WHERE status = 'open'
+            GROUP BY ticker
+            """
+        ).fetchall()
+    }
+    snapshot_rows = conn.execute(
+        """
+        SELECT ticker, as_of_date, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+        ORDER BY updated_at DESC, ticker ASC
+        """
+    ).fetchall()
+    highest_risk_changes: list[dict[str, object]] = []
+    most_improved: list[dict[str, object]] = []
+    for row in snapshot_rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        top_card = payload.get("top_card", {})
+        ticker = str(row["ticker"])
+        peer_anomalies = len(payload.get("peer_comparison", {}).get("anomalies") or [])
+        open_reviews = review_counts.get(ticker, 0)
+        negative_factors = payload.get("top_card", {}).get("negative_factors") or []
+        positive_factors = payload.get("top_card", {}).get("positive_factors") or []
+        risk_score = (
+            (120 if top_card.get("decision_state") == "Avoid" else 0)
+            + (95 if top_card.get("decision_state") == "Review manually" else 0)
+            + (40 if top_card.get("overall_state") == "critical" else 0)
+            + (25 if top_card.get("thesis_state") == "broken" else 0)
+            + (open_reviews * 8)
+            + (peer_anomalies * 5)
+            + (len(negative_factors) * 4)
+        )
+        if risk_score:
+            highest_risk_changes.append(
+                {
+                    "ticker": ticker,
+                    "issuer_name": payload.get("issuer_name"),
+                    "decision_state": top_card.get("decision_state"),
+                    "overall_state": top_card.get("overall_state"),
+                    "risk_score": risk_score,
+                    "reasons": list(top_card.get("reasons") or [])[:3],
+                    "as_of_date": row["as_of_date"] or row["updated_at"],
+                }
+            )
+
+        improvement_score = (
+            (60 if top_card.get("decision_state") == "Buy" else 0)
+            + (20 if top_card.get("thesis_state") == "improving" else 0)
+            + (8 * len(positive_factors))
+            - (10 if top_card.get("overall_state") in {"critical", "review_required"} else 0)
+        )
+        if improvement_score > 0:
+            most_improved.append(
+                {
+                    "ticker": ticker,
+                    "issuer_name": payload.get("issuer_name"),
+                    "decision_state": top_card.get("decision_state"),
+                    "improvement_score": improvement_score,
+                    "positive_factors": positive_factors[:3],
+                    "as_of_date": row["as_of_date"] or row["updated_at"],
+                }
+            )
+
+    major_event_counts = {
+        "auditor_changes_7d": _sum_event_counts(event_counts, {"auditor_change"}),
+        "management_changes_7d": _sum_event_counts(
+            event_counts,
+            {"governance_appointment", "director_change", "commissioner_change", "board_change", "management_change"},
+        ),
+        "debt_restructurings_7d": _sum_event_counts(event_counts, {"debt_refinancing", "debt_restructuring"}),
+        "rights_issues_7d": _sum_event_counts(
+            event_counts,
+            {"rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue"},
+        ),
+        "buybacks_7d": _sum_event_counts(event_counts, {"buyback", "share_buyback", "treasury_share_change"}),
+        "lawsuits_regulatory_7d": _sum_event_counts(
+            event_counts,
+            {"lawsuit", "regulatory_action", "regulator_supervision", "special_supervision", "business_restriction"},
+        ),
+        "contract_changes_7d": _sum_event_counts(
+            event_counts,
+            {"major_contract_win", "major_contract_loss", "contract_change"},
+        ),
+    }
+
+    return {
+        "as_of": now.isoformat(),
+        "counts": {
+            "new_disclosures_today": new_disclosures_today,
+            "material_event_filings_today": material_event_filings_today,
+            "late_periodic_filings": len(late_periodic_rows),
+            **major_event_counts,
+        },
+        "sector_heatmap": sector_heatmap,
+        "highest_risk_changes": sorted(
+            highest_risk_changes,
+            key=lambda item: (-int(item["risk_score"]), str(item["ticker"])),
+        )[:8],
+        "most_improved": sorted(
+            most_improved,
+            key=lambda item: (-int(item["improvement_score"]), str(item["ticker"])),
+        )[:8],
+        "late_periodic_rows": sorted(
+            late_periodic_rows,
+            key=lambda item: (
+                item["days_since_periodic"] is None,
+                -(item["days_since_periodic"] or 0),
+                str(item["ticker"]),
+            ),
+        )[:8],
+    }
 
 
 def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
@@ -625,3 +888,16 @@ def _evidence_preview(span_ids: list[str], evidence_map: dict[str, dict[str, obj
             continue
         previews.append(f"{entry['id']} p{entry['page_start']}: {entry.get('excerpt_text', '')[:120]}")
     return " | ".join(previews)
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _sum_event_counts(event_counts: dict[str, int], watched: set[str]) -> int:
+    return sum(event_counts.get(name, 0) for name in watched)

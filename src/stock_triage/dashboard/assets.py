@@ -16,6 +16,7 @@ def render_dashboard_html(
     *,
     title: str,
     issuers: list[dict[str, object]],
+    market_monitor: dict[str, object],
     documents: list[dict[str, object]],
     metrics: list[dict[str, object]],
     findings: list[dict[str, object]],
@@ -41,6 +42,7 @@ def render_dashboard_html(
         {
             "payload": {
                 "issuers": issuers,
+                "market_monitor": market_monitor,
                 "documents": documents,
                 "metrics": metrics,
                 "findings": findings,

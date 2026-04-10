@@ -49,6 +49,7 @@ def export_dashboard(
         render_dashboard_html(
             title=cfg.dashboard.title,
             issuers=snapshot.issuers,
+            market_monitor=snapshot.market_monitor,
             documents=snapshot.documents,
             metrics=snapshot.metrics,
             findings=snapshot.findings,
