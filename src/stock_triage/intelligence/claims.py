@@ -91,6 +91,46 @@ _CLAIM_PATTERNS: list[tuple[str, str, str | None, float, tuple[re.Pattern[str], 
             re.compile(r"\b(?:margin|margins|profitability|operating profit)\b.{0,30}\b(?:improve|improving|expand|expanding|restore)\b", re.I),
         ),
     ),
+    (
+        "capex_plan_claim",
+        "capital_allocation",
+        "capex",
+        0.75,
+        (
+            re.compile(r"\b(?:plan|plans|intend|intends|target|targets|akan)\b.{0,40}\b(?:capex|capital expenditure|belanja modal)\b", re.I),
+            re.compile(r"\b(?:capex|capital expenditure|belanja modal)\b.{0,40}\b(?:plan|target|202\d)\b", re.I),
+        ),
+    ),
+    (
+        "funding_use_claim",
+        "capital_allocation",
+        "use_of_proceeds",
+        0.7,
+        (
+            re.compile(r"\b(?:use of proceeds|penggunaan dana)\b.{0,60}\b(?:for|to|untuk)\b", re.I),
+            re.compile(r"\b(?:proceeds|dana hasil penawaran)\b.{0,60}\b(?:used|allocated|dialokasikan)\b", re.I),
+        ),
+    ),
+    (
+        "outlook_claim",
+        "outlook",
+        "outlook",
+        0.65,
+        (
+            re.compile(r"\b(?:guidance|outlook|prospek)\b.{0,60}\b(?:202\d|next year|tahun depan)\b", re.I),
+            re.compile(r"\b(?:expects|target|aims|memproyeksikan|menargetkan)\b.{0,50}\b(?:202\d|tahun)\b", re.I),
+        ),
+    ),
+    (
+        "risk_statement_claim",
+        "risk",
+        "risk",
+        0.6,
+        (
+            re.compile(r"\b(?:risk|risiko)\b.{0,60}\b(?:may|could|dapat|berpotensi)\b", re.I),
+            re.compile(r"\b(?:headwind|tantangan|uncertainty|ketidakpastian)\b", re.I),
+        ),
+    ),
 ]
 
 

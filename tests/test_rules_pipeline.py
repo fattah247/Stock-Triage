@@ -94,6 +94,55 @@ def test_run_rules_persists_event_driven_flags(tmp_config):
         rconn.close()
 
 
+def test_run_rules_persists_expanded_event_flags(tmp_config):
+    document_id = _insert_extracted_document(
+        tmp_config,
+        source_name="idx_disclosures",
+        source_record_id="disc-expanded-1",
+        ticker="CNAF",
+        metrics=[],
+        events=[
+            "rights_issue",
+            "private_placement",
+            "lawsuit",
+            "regulatory_action",
+            "major_contract_loss",
+            "segment_closure",
+            "guidance_change",
+        ],
+    )
+
+    result = run_rules(tmp_config, source_name="idx_disclosures", limit=10)
+
+    assert result.selected == 1
+    assert result.analyzed == 1
+    assert result.triggered == 6
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        rules = rconn.execute(
+            """
+            SELECT rule_name, triggered
+            FROM rule_runs
+            WHERE document_id = ?
+            ORDER BY rule_name
+            """,
+            (document_id,),
+        ).fetchall()
+        triggered = {row["rule_name"] for row in rules if row["triggered"] == 1}
+        assert triggered == {
+            "contract_loss",
+            "dilution_event",
+            "funding_event",
+            "guidance_change",
+            "legal_regulatory_issue",
+            "segment_closure",
+        }
+    finally:
+        rconn.close()
+
+
 def test_load_rule_status_reports_recent_triggers(tmp_config):
     _insert_extracted_document(
         tmp_config,

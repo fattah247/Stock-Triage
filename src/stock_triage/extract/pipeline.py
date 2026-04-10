@@ -499,6 +499,16 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
         if metric is not None:
             out.setdefault(metric.metric_name, metric)
 
+        for metric in _extract_optional_financial_metrics(
+            chunk,
+            fiscal_year=fiscal_year,
+            period_end_date=period_end_date,
+            audit_status=audit_status,
+            consolidation_scope=consolidation_scope,
+            language_variant=language_variant,
+        ):
+            out.setdefault(metric.metric_name, metric)
+
         if "laba usaha" in lower or "operating profit" in lower:
             metric = _extract_operating_profit_guidance(
                 chunk,
@@ -510,6 +520,8 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
             )
             if metric is not None:
                 out[metric.metric_name] = metric
+    for metric in _derive_financial_metrics(out):
+        out.setdefault(metric.metric_name, metric)
     return list(out.values())
 
 
@@ -635,6 +647,113 @@ def _extract_operating_profit_guidance(
     )
 
 
+def _extract_optional_financial_metrics(
+    chunk: ChunkText,
+    *,
+    fiscal_year: int | None,
+    period_end_date: str | None,
+    audit_status: str | None,
+    consolidation_scope: str | None,
+    language_variant: str,
+) -> list[ExtractedMetric]:
+    patterns = [
+        ("cash", r"(?:Kas dan setara kas|Cash and cash equivalents|Cash)\s+([\(]?\d[\d\.,]*\)?)"),
+        (
+            "short_term_debt",
+            r"(?:Liabilitas jangka pendek|Utang jangka pendek|Short[- ]term debt|Current borrowings)\s+([\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "long_term_debt",
+            r"(?:Liabilitas jangka panjang|Utang jangka panjang|Long[- ]term debt|Non-current borrowings)\s+([\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "share_count",
+            r"(?:Jumlah saham beredar|Shares outstanding|Weighted average shares outstanding)\s+([\(]?\d[\d\.,]*\)?)",
+        ),
+        ("capex", r"(?:Belanja modal|Capital expenditure|Capex)\s+([\(]?\d[\d\.,]*\)?)"),
+    ]
+    out: list[ExtractedMetric] = []
+    for metric_name, pattern in patterns:
+        match = re.search(pattern, chunk.text, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        raw = match.group(1)
+        out.append(
+            ExtractedMetric(
+                metric_name=metric_name,
+                value_normalized=_parse_number(raw),
+                raw_value_text=raw,
+                currency="USD",
+                unit_scale="units",
+                fiscal_year=fiscal_year,
+                fiscal_period="Annual",
+                period_end_date=period_end_date,
+                audit_status=audit_status,
+                consolidation_scope=consolidation_scope,
+                language_variant=language_variant,
+                chunk=chunk,
+                excerpt_text=chunk.text[max(0, match.start() - 40): min(len(chunk.text), match.end() + 80)],
+                char_start=chunk.char_start + match.start(1),
+                char_end=chunk.char_start + match.end(1),
+            )
+        )
+    return out
+
+
+def _derive_financial_metrics(metrics: dict[str, ExtractedMetric]) -> list[ExtractedMetric]:
+    derived: list[ExtractedMetric] = []
+    cash = metrics.get("cash")
+    short_term_debt = metrics.get("short_term_debt")
+    long_term_debt = metrics.get("long_term_debt")
+    operating_cash_flow = metrics.get("operating_cash_flow")
+    capex = metrics.get("capex")
+    debt_total = None
+    debt_source = short_term_debt or long_term_debt
+    if short_term_debt is not None or long_term_debt is not None:
+        debt_total = (short_term_debt.value_normalized or 0.0) + (long_term_debt.value_normalized or 0.0)
+    if cash is not None and debt_total is not None and debt_source is not None:
+        derived.append(
+            ExtractedMetric(
+                metric_name="net_debt",
+                value_normalized=debt_total - (cash.value_normalized or 0.0),
+                raw_value_text=f"{debt_total} - {cash.raw_value_text}",
+                currency=cash.currency,
+                unit_scale=cash.unit_scale,
+                fiscal_year=cash.fiscal_year,
+                fiscal_period=cash.fiscal_period,
+                period_end_date=cash.period_end_date,
+                audit_status=cash.audit_status,
+                consolidation_scope=cash.consolidation_scope,
+                language_variant=cash.language_variant,
+                chunk=debt_source.chunk,
+                excerpt_text=debt_source.excerpt_text,
+                char_start=debt_source.char_start,
+                char_end=debt_source.char_end,
+            )
+        )
+    if operating_cash_flow is not None and capex is not None:
+        derived.append(
+            ExtractedMetric(
+                metric_name="free_cash_flow",
+                value_normalized=(operating_cash_flow.value_normalized or 0.0) - abs(capex.value_normalized or 0.0),
+                raw_value_text=f"{operating_cash_flow.raw_value_text} - {capex.raw_value_text}",
+                currency=operating_cash_flow.currency,
+                unit_scale=operating_cash_flow.unit_scale,
+                fiscal_year=operating_cash_flow.fiscal_year,
+                fiscal_period=operating_cash_flow.fiscal_period,
+                period_end_date=operating_cash_flow.period_end_date,
+                audit_status=operating_cash_flow.audit_status,
+                consolidation_scope=operating_cash_flow.consolidation_scope,
+                language_variant=operating_cash_flow.language_variant,
+                chunk=capex.chunk,
+                excerpt_text=capex.excerpt_text,
+                char_start=capex.char_start,
+                char_end=capex.char_end,
+            )
+        )
+    return derived
+
+
 def _extract_financial_events(document: ExtractDocument, chunks: list[ChunkText]) -> list[ExtractedEvent]:
     del document
     patterns = [
@@ -703,10 +822,108 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
         ),
         (
             "governance_appointment",
-            "mengangkat kembali",
+            "perubahan susunan pengurus",
             "info",
             "Document records an appointment or reappointment of governance personnel.",
-            [r"mengangkat kembali", r"perubahan susunan pengurus", r"appointment", r"dewan komisaris", r"direksi"],
+            [r"perubahan susunan pengurus", r"appointment", r"reappointment of management", r"perubahan pengurus"],
+        ),
+        (
+            "director_change",
+            "direksi",
+            "warning",
+            "Document records a director or executive management change.",
+            [r"perubahan direksi", r"anggota direksi", r"director change", r"chief executive officer", r"chief financial officer"],
+        ),
+        (
+            "commissioner_change",
+            "dewan komisaris",
+            "warning",
+            "Document records a commissioner or supervisory-board change.",
+            [r"perubahan dewan komisaris", r"anggota dewan komisaris", r"commissioner change"],
+        ),
+        (
+            "rights_issue",
+            "hmetd",
+            "warning",
+            "Document announces a rights issue or pre-emptive offering.",
+            [r"\bhmetd\b", r"hak memesan efek terlebih dahulu", r"rights issue"],
+        ),
+        (
+            "private_placement",
+            "pmthmetd",
+            "warning",
+            "Document announces a private placement or non-preemptive capital raise.",
+            [r"\bpmthmetd\b", r"private placement", r"penambahan modal tanpa hak memesan efek terlebih dahulu"],
+        ),
+        (
+            "stock_split",
+            "pemecahan saham",
+            "info",
+            "Document announces a stock split.",
+            [r"pemecahan saham", r"stock split"],
+        ),
+        (
+            "reverse_split",
+            "reverse stock split",
+            "warning",
+            "Document announces a reverse stock split or nominal share consolidation.",
+            [r"reverse stock split", r"penggabungan nilai nominal saham", r"reverse split"],
+        ),
+        (
+            "buyback",
+            "pembelian kembali saham",
+            "info",
+            "Document announces a share buyback or treasury share action.",
+            [r"pembelian kembali saham", r"buyback", r"treasury share"],
+        ),
+        (
+            "major_contract_win",
+            "perolehan kontrak",
+            "info",
+            "Document announces a major contract win.",
+            [r"perolehan kontrak", r"memperoleh kontrak", r"contract win", r"new material contract"],
+        ),
+        (
+            "major_contract_loss",
+            "pemutusan kontrak",
+            "warning",
+            "Document announces a major contract loss or termination.",
+            [r"pemutusan kontrak", r"kehilangan kontrak", r"contract termination", r"major contract loss"],
+        ),
+        (
+            "lawsuit",
+            "gugatan hukum",
+            "critical",
+            "Document discloses a lawsuit, legal dispute, or litigation matter.",
+            [r"gugatan hukum", r"sengketa hukum", r"lawsuit", r"litigation", r"legal dispute"],
+        ),
+        (
+            "regulatory_action",
+            "sanksi",
+            "critical",
+            "Document discloses a regulatory sanction, supervision, or restriction.",
+            [r"sanksi", r"otoritas jasa keuangan", r"regulatory action", r"regulatory sanction", r"special supervision", r"pembatasan kegiatan usaha"],
+        ),
+        (
+            "segment_closure",
+            "penutupan segmen",
+            "warning",
+            "Document discloses a segment shutdown or closure.",
+            [r"penutupan segmen", r"menghentikan segmen", r"segment closure", r"shutdown of .* segment"],
+        ),
+        (
+            "guidance_change",
+            "revisi proyeksi",
+            "warning",
+            "Document revises guidance or discloses a projection miss.",
+            [r"revisi proyeksi", r"guidance revision", r"projection miss", r"guidance miss", r"target .* tidak tercapai"],
+        ),
+        (
+            "use_of_proceeds_update",
+            "penggunaan dana",
+            "info",
+            "Document updates or revises use-of-proceeds disclosures.",
+            [r"penggunaan dana", r"use of proceeds", r"realisasi penggunaan dana"],
         ),
     ]
     if "treatise summary" in title:
@@ -924,7 +1141,7 @@ def _persist_span(
     span_id = _stable_id(f"span:{document_id}:{chunk.chunk_id}:{char_start}:{char_end}")
     conn.execute(
         """
-        INSERT INTO evidence_spans (
+        INSERT OR IGNORE INTO evidence_spans (
             span_id, document_id, chunk_id, page_start, page_end,
             char_start, char_end, excerpt_text, display_anchor
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

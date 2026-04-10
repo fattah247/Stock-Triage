@@ -207,10 +207,111 @@ def test_run_extract_detects_extended_event_taxonomy(tmp_config):
         assert [row["event_type"] for row in events] == [
             "auditor_change",
             "bond_issuance",
+            "commissioner_change",
             "debt_facility",
             "dividend_notice",
-            "governance_appointment",
             "shareholder_meeting_summary",
+        ]
+    finally:
+        rconn.close()
+
+
+def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-optional-1",
+        document_type="annual_report",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025"},
+        title="Annual Report 2024",
+        chunks=[
+            (
+                0,
+                1,
+                None,
+                "Cash and cash equivalents 900,000\n"
+                "Short-term debt 300,000\n"
+                "Long-term debt 500,000\n"
+                "Shares outstanding 100,000,000\n"
+                "Capital expenditure 200,000\n"
+                "Arus kas yang digunakan untuk aktivitas operasi pada 2024 tercatat sebesar 1,12 juta USD",
+            ),
+        ],
+    )
+    _insert_parsed_document(
+        tmp_config,
+        source_name="idx_disclosures",
+        source_record_id="disc-new-taxonomy-1",
+        document_type="disclosure",
+        ticker="CNAF",
+        title="Keterbukaan Informasi",
+        chunks=[
+            (
+                0,
+                1,
+                None,
+                "Perseroan menyampaikan HMETD / rights issue dan private placement.\n"
+                "Perseroan mengumumkan buyback dan stock split.\n"
+                "Perseroan memperoleh kontrak baru namun juga menghadapi pemutusan kontrak material.\n"
+                "Perseroan menghadapi gugatan hukum dan sanksi regulator.\n"
+                "Perseroan merevisi proyeksi serta menyampaikan penggunaan dana hasil penawaran umum.\n"
+                "Perseroan menghentikan segmen usaha tertentu.",
+            ),
+        ],
+    )
+
+    result = run_extract(tmp_config, limit=10, include_extracted=True)
+
+    assert result.selected == 2
+    assert result.events >= 10
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        metrics = rconn.execute(
+            """
+            SELECT metric_name, value_normalized
+            FROM metric_items
+            WHERE document_id = ?
+            ORDER BY metric_name
+            """,
+            (document_id,),
+        ).fetchall()
+        names = {row["metric_name"] for row in metrics}
+        assert {
+            "cash",
+            "short_term_debt",
+            "long_term_debt",
+            "share_count",
+            "capex",
+            "net_debt",
+            "free_cash_flow",
+        }.issubset(names)
+        values = {row["metric_name"]: row["value_normalized"] for row in metrics}
+        assert values["net_debt"] == -100000.0
+        assert values["free_cash_flow"] == -1320000.0
+
+        disclosure_events = rconn.execute(
+            """
+            SELECT event_type
+            FROM events
+            WHERE document_id = 'doc-disc-new-taxonomy-1'
+            ORDER BY event_type
+            """
+        ).fetchall()
+        assert [row["event_type"] for row in disclosure_events] == [
+            "buyback",
+            "guidance_change",
+            "lawsuit",
+            "major_contract_loss",
+            "major_contract_win",
+            "private_placement",
+            "regulatory_action",
+            "rights_issue",
+            "segment_closure",
+            "stock_split",
+            "use_of_proceeds_update",
         ]
     finally:
         rconn.close()
