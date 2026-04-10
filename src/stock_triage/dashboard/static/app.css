@@ -76,21 +76,26 @@ input {
   margin: 0 auto;
   padding: 0 20px;
   display: flex;
-  gap: 4px;
+  gap: 8px;
   overflow-x: auto;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  backdrop-filter: blur(12px);
 }
 
 .viewTab {
   all: unset;
   cursor: pointer;
-  padding: 9px 18px;
-  font-size: 13px;
+  padding: 12px 18px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s;
+  border-radius: 14px 14px 0 0;
+  border-bottom: 3px solid transparent;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
   white-space: nowrap;
   box-shadow: none;
 }
@@ -98,11 +103,13 @@ input {
 .viewTab:hover {
   color: var(--ink);
   transform: none;
+  background: rgba(255, 255, 255, 0.42);
 }
 
 .viewTab.active {
   color: var(--accent-strong);
   border-bottom-color: var(--accent);
+  background: rgba(255, 255, 255, 0.58);
 }
 
 [data-views] {
@@ -123,6 +130,45 @@ section[data-views].viewVisible {
   padding: 24px 20px 36px;
   display: grid;
   gap: 18px;
+}
+
+.workspaceHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.workspaceIntro {
+  display: grid;
+  gap: 8px;
+}
+
+.selectedIssuerCard {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(15, 118, 96, 0.12);
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(247, 241, 228, 0.86));
+}
+
+.selectedIssuerTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.selectedIssuerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selectedIssuerEmpty {
+  display: grid;
+  gap: 6px;
 }
 
 .panel {
@@ -297,6 +343,10 @@ section[data-views].viewVisible {
   background: linear-gradient(135deg, rgba(15, 118, 96, 0.12), rgba(255, 255, 255, 0.94));
 }
 
+.issuerCard:hover {
+  border-color: rgba(15, 118, 96, 0.28);
+}
+
 .issuerLine {
   display: flex;
   gap: 10px;
@@ -353,9 +403,43 @@ section[data-views].viewVisible {
   font-size: 12px;
 }
 
+.issuerCta {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
 .mainColumn {
   display: grid;
   gap: 18px;
+}
+
+.homeGuide {
+  display: grid;
+  gap: 14px;
+}
+
+.guideGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.guideCard {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 20px;
+  text-align: left;
+  align-items: start;
+}
+
+.guideStep {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.82;
 }
 
 .inboxPanel {
@@ -377,6 +461,15 @@ section[data-views].viewVisible {
   border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
+}
+
+.clickableCard {
+  cursor: pointer;
+}
+
+.clickableCard:hover {
+  border-color: rgba(15, 118, 96, 0.28);
+  box-shadow: 0 14px 30px rgba(15, 118, 96, 0.08);
 }
 
 .freshRow {
@@ -520,6 +613,30 @@ section[data-views].viewVisible {
 .companyStack {
   display: grid;
   gap: 18px;
+}
+
+body[data-active-view="home"] .workspaceHeader {
+  background:
+    linear-gradient(130deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.46)),
+    linear-gradient(120deg, rgba(61, 111, 153, 0.08), rgba(15, 118, 96, 0.05));
+}
+
+body[data-active-view="company"] .workspaceHeader {
+  background:
+    linear-gradient(130deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.46)),
+    linear-gradient(120deg, rgba(15, 118, 96, 0.11), rgba(26, 35, 31, 0.03));
+}
+
+body[data-active-view="review"] .workspaceHeader {
+  background:
+    linear-gradient(130deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.46)),
+    linear-gradient(120deg, rgba(193, 119, 42, 0.11), rgba(160, 53, 45, 0.05));
+}
+
+body[data-active-view="ops"] .workspaceHeader {
+  background:
+    linear-gradient(130deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.46)),
+    linear-gradient(120deg, rgba(26, 35, 31, 0.1), rgba(15, 118, 96, 0.05));
 }
 
 .docGroups {
@@ -822,7 +939,9 @@ section[data-views].viewVisible {
 
 @media (max-width: 1220px) {
   .workspace,
+  .workspaceHeader,
   .focusHeader,
+  .guideGrid,
   .statusStats {
     grid-template-columns: 1fr;
   }
@@ -852,6 +971,7 @@ section[data-views].viewVisible {
   .statusHeader,
   .sectionHeader,
   .opsHeader,
+  .selectedIssuerTop,
   .inboxItem,
   .docItem {
     grid-template-columns: 1fr;

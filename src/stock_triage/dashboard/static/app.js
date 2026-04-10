@@ -41,6 +41,10 @@
   const reviewEndpoint = "/api/review";
 
   const search = document.getElementById("issuerSearch");
+  const viewEyebrow = document.getElementById("viewEyebrow");
+  const viewTitle = document.getElementById("viewTitle");
+  const viewLead = document.getElementById("viewLead");
+  const selectedIssuerCard = document.getElementById("selectedIssuerCard");
   const issuerList = document.getElementById("issuerList");
   const companyOverview = document.getElementById("companyOverview");
   const companyStats = document.getElementById("companyStats");
@@ -262,6 +266,48 @@
     }
   }
 
+  function renderSelectedIssuerCard(selectedIssuer, companySnapshot) {
+    if (!selectedIssuerCard) return;
+    if (!selectedIssuer) {
+      selectedIssuerCard.innerHTML = `
+        <div class="selectedIssuerEmpty">
+          <div class="summaryLabel">Selected Company</div>
+          <strong>None yet</strong>
+          <div class="meta">Pick one from the left rail or from the inbox to open the company workspace.</div>
+        </div>
+      `;
+      return;
+    }
+
+    const snapshotPayload = companySnapshot?.payload || {};
+    const topCard = snapshotPayload.top_card || {};
+    const reasons = (topCard.reasons || []).slice(0, 2);
+    selectedIssuerCard.innerHTML = `
+      <div class="selectedIssuerTop">
+        <div>
+          <div class="summaryLabel">Selected Company</div>
+          <strong>${esc(selectedIssuer.ticker)} · ${esc(selectedIssuer.issuer_name || "")}</strong>
+        </div>
+        <button class="ghostButton miniButton" data-view="company" type="button">Open company</button>
+      </div>
+      <div class="selectedIssuerMeta">
+        <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
+        ${
+          topCard.decision_state
+            ? `<span class="chip">Decision ${esc(topCard.decision_state)}</span>`
+            : `<span class="chip">No current decision snapshot</span>`
+        }
+      </div>
+      <div class="meta">
+        ${
+          reasons.length
+            ? reasons.map(esc).join(" · ")
+            : "Use Company view to inspect filings, findings, claims, and thesis state for this issuer."
+        }
+      </div>
+    `;
+  }
+
   function renderHistory() {
     if (!actionHistory) return;
     const rows = (data.action_history || []).slice(0, 10);
@@ -326,6 +372,7 @@
 
   function switchView(view) {
     state.activeView = view;
+    document.body.dataset.activeView = view;
     // Update tab highlight.
     document.querySelectorAll(".viewTab").forEach((tab) => {
       tab.classList.toggle("active", tab.dataset.view === view);
@@ -343,14 +390,52 @@
     const hint = document.getElementById("sidebarHint");
     if (hint) {
       const hints = {
-        home: "Choose a company, then switch to the Company view for deep-dive.",
-        watchlist: "Showing watchlisted issuers. Star toggles manage membership.",
-        company: "Select an issuer to see its full intelligence page.",
-        sector: "Select an issuer to explore its sector peers.",
-        review: "Open review items across all issuers.",
-        ops: "Pipeline control panel and source health.",
+        home: "Start with recent changes, then open one issuer.",
+        watchlist: "Star tickers here, then use this view to stay inside your watchlist.",
+        company: "Everything below is scoped to the selected issuer only.",
+        sector: "Compare the selected issuer against its peers and sector context.",
+        review: "Resolve or snooze the human queue here.",
+        ops: "Pipeline control panel, backlog, and source health live here.",
       };
       hint.textContent = hints[view] || "";
+    }
+    if (viewTitle && viewLead && viewEyebrow) {
+      const copy = {
+        home: {
+          eyebrow: "Daily Workflow",
+          title: "Triage what changed before you open a company.",
+          lead: "Home is the landing screen: recent changes, digest, and KPI health. Use it to choose the next issuer, not to do detailed analysis.",
+        },
+        watchlist: {
+          eyebrow: "Watchlist Mode",
+          title: "Stay inside the names you actively care about.",
+          lead: "This view uses the same inbox and digest surfaces, but the issuer rail is narrowed to your starred tickers.",
+        },
+        company: {
+          eyebrow: "Company Workspace",
+          title: "Review one issuer deeply, with everything scoped to that name.",
+          lead: "Decision snapshot, claims, filings, findings, and normalized facts are all gathered here so you do not need to jump between sections.",
+        },
+        sector: {
+          eyebrow: "Comparative Intelligence",
+          title: "Compare the selected issuer against peers and sector context.",
+          lead: "Use this screen when you want relative position, peer anomalies, or comparability warnings rather than a single-company read.",
+        },
+        review: {
+          eyebrow: "Human Review Loop",
+          title: "Work the open queue without wading through the entire dashboard.",
+          lead: "This screen is for analyst judgment: revised filings, broken theses, contradictions, and other items that require a human decision.",
+        },
+        ops: {
+          eyebrow: "Operations",
+          title: "Run the pipeline and inspect source health in one place.",
+          lead: "Use Ops only when you want to change the system state. Day-to-day reading should happen in Home, Company, or Review.",
+        },
+      };
+      const current = copy[view] || copy.home;
+      viewEyebrow.textContent = current.eyebrow;
+      viewTitle.textContent = current.title;
+      viewLead.textContent = current.lead;
     }
     // Trigger lazy-load for sections relevant to the new view.
     if (view === "home" || view === "watchlist") {
@@ -408,6 +493,7 @@
     const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
+    renderSelectedIssuerCard(selectedIssuer, companySnapshot);
 
     issuerList.innerHTML = issuers.length
       ? issuers
@@ -426,6 +512,7 @@
                   <span class="${!item.sector || item.sector === "unknown" ? "sectorMissing" : ""}">${esc(item.sector || "unknown")}</span>
                   <span>${esc(item.latest_document_at || item.last_seen_at || "")}</span>
                 </div>
+                <div class="issuerCta">${item.ticker === state.selectedTicker ? "Open in company workspace" : "Select issuer"}</div>
               </button>
             `
           )
@@ -438,7 +525,9 @@
         ? inboxRows
             .map(
               (item) => `
-                <article class="inboxItem ${hasHighlight("inbox", inboxKey(item)) ? "freshRow" : ""}">
+                <article class="inboxItem ${hasHighlight("inbox", inboxKey(item)) ? "freshRow" : ""} ${item.ticker ? "clickableCard" : ""}" ${
+                  item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                }>
                   <div class="inboxKind sev-${esc(item.severity || "info")}">${esc(item.kind || "update")}</div>
                   <div>
                     <div class="inboxTitle">${esc(item.title || item.kind || "Update")}</div>
@@ -455,11 +544,7 @@
                     </div>
                   </div>
                   <div class="inboxActions">
-                    ${
-                      item.ticker
-                        ? `<button class="ghostButton miniButton" type="button" data-focus-ticker="${esc(item.ticker)}">focus issuer</button>`
-                        : ""
-                    }
+                    ${item.ticker ? `<button class="ghostButton miniButton" type="button" data-focus-ticker="${esc(item.ticker)}">Open company</button>` : ""}
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">open file</a>` : ""}
                     ${item.original_url ? `<a class="chip" href="${esc(item.original_url)}">origin</a>` : ""}
                   </div>
@@ -533,10 +618,13 @@
             .slice(0, 8)
             .map(
               (item) => `
-                <article class="findingCard sev-${statusTag(item.overall_state)}">
+                <article class="findingCard sev-${statusTag(item.overall_state)} ${item.ticker ? "clickableCard" : ""}" ${
+                  item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                }>
                   <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
                   <div class="meta">${esc(item.decision_state || "Watch")} · review ${esc(item.review_item_count || 0)} · anomalies ${esc(item.peer_anomaly_count || 0)}</div>
                   <div class="meta">${(item.reasons || []).map(esc).join(" · ")}</div>
+                  <div class="meta">Click to open this issuer in the company workspace.</div>
                 </article>
               `
             )
@@ -1301,7 +1389,7 @@
       })
         .then((r) => r.json())
         .then((result) => {
-          state.data.watchlist = result.tickers || [];
+          data.watchlist = result.tickers || [];
           render();
         })
         .catch(() => {});
@@ -1314,9 +1402,7 @@
       render();
       if (state.selectedTicker) {
         fetchCompanyDetail(state.selectedTicker);
-        if (state.activeView === "home" || state.activeView === "watchlist") {
-          switchView("company");
-        }
+        switchView("company");
       }
       return;
     }
@@ -1325,6 +1411,10 @@
     if (focusTarget) {
       state.selectedTicker = focusTarget.dataset.focusTicker || null;
       render();
+      if (state.selectedTicker) {
+        fetchCompanyDetail(state.selectedTicker);
+      }
+      switchView("company");
       companyOverview?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }

@@ -37,6 +37,21 @@
       <button class="viewTab" data-view="ops" type="button">Ops</button>
     </nav>
 
+    <section class="workspaceHeader panel">
+      <div class="workspaceIntro">
+        <div class="sectionEyebrow" id="viewEyebrow">Daily Workflow</div>
+        <h2 id="viewTitle">Start from the inbox, then move into one issuer.</h2>
+        <p id="viewLead" class="lead">Home is for triage, Company is for one issuer, Review is for human decisions, and Ops is for pipeline control.</p>
+      </div>
+      <div id="selectedIssuerCard" class="selectedIssuerCard">
+        <div class="selectedIssuerEmpty">
+          <div class="summaryLabel">Selected Company</div>
+          <strong>None yet</strong>
+          <div class="meta">Pick one from the left rail or from the inbox to open the company workspace.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="workspace">
       <aside class="sidebar">
         <article class="panel searchBox">
@@ -51,12 +66,39 @@
       </aside>
 
       <section class="mainColumn">
+        <article class="panel homeGuide" data-views="home">
+          <div class="sectionEyebrow">Start Here</div>
+          <div class="sectionHeader">
+            <div>
+              <h2>Use the dashboard in this order</h2>
+              <p class="lead">Treat the dashboard as a workflow: triage changes, open one company, resolve review items, then run operations when needed.</p>
+            </div>
+          </div>
+          <div class="guideGrid">
+            <button class="guideCard" data-view="company" type="button">
+              <span class="guideStep">1. Open a company</span>
+              <strong>Choose an issuer from the left rail or inbox.</strong>
+              <span class="meta">Company view is where filings, findings, claims, and thesis state are reviewed.</span>
+            </button>
+            <button class="guideCard" data-view="review" type="button">
+              <span class="guideStep">2. Clear the human queue</span>
+              <strong>Go to Review for the items that still need judgment.</strong>
+              <span class="meta">Resolve, snooze, or reopen work without scanning every issuer page.</span>
+            </button>
+            <button class="guideCard actionButton" data-action="digest" type="button">
+              <span class="guideStep">3. Refresh today’s picture</span>
+              <strong>Build the daily digest when you want a fresh market summary.</strong>
+              <span class="meta">This is the safest live dashboard action to run first.</span>
+            </button>
+          </div>
+        </article>
+
         <article class="panel inboxPanel" data-views="home watchlist">
           <div class="sectionEyebrow">Inbox</div>
           <div class="sectionHeader">
             <div>
               <h2>What changed recently</h2>
-              <p class="lead">Use this as the landing view. Each item can jump the workspace to its issuer or open the underlying artifact.</p>
+              <p class="lead">Use this as the triage screen. Each item should help you decide what changed, what matters, and which issuer to open next.</p>
             </div>
           </div>
           <div id="inboxList"></div>
@@ -76,7 +118,12 @@
 
         <article class="panel" data-views="review">
           <div class="sectionEyebrow">Review Loop</div>
-          <h2>Open Review Queue</h2>
+          <div class="sectionHeader">
+            <div>
+              <h2>Open Review Queue</h2>
+              <p class="lead">This is the human decision screen. Work through ambiguities and contradictions here instead of hunting through every company page.</p>
+            </div>
+          </div>
           <div id="reviewList"></div>
         </article>
 
