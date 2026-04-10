@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from typing import Any
 
@@ -1105,6 +1105,16 @@ def _build_snapshot_payload_json(
     if peer_view.get("comparability_warnings"):
         warning_count = len(peer_view["comparability_warnings"])
         health["reasons"].append(f"Peer comparison has {warning_count} comparability warning(s).")
+    decision_panel = _build_decision_panel(
+        latest_document=latest_document,
+        latest_metrics=latest_metrics,
+        latest_analysis=latest_analysis,
+        deltas=deltas,
+        events=events,
+        triggered_rules=triggered_rules,
+        thesis_evaluations=thesis_evaluations,
+        top_card=health,
+    )
     payload = {
         "ticker": profile.ticker,
         "issuer_name": profile.issuer_name,
@@ -1140,6 +1150,7 @@ def _build_snapshot_payload_json(
             }
         ),
         "top_card": health,
+        "decision_panel": decision_panel,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
         "management_credibility": {
@@ -1485,6 +1496,175 @@ def _build_health_state(
     }
 
 
+def _build_decision_panel(
+    *,
+    latest_document: CompanyDocument,
+    latest_metrics: list[MetricPoint],
+    latest_analysis: AnalysisSummary | None,
+    deltas: list[DeltaRecord],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    thesis_evaluations: list[ThesisEvaluationRecord],
+    top_card: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "stance": top_card.get("decision_state"),
+        "why": list(top_card.get("reasons") or [])[:3],
+        "what_changed": _summarize_deltas(deltas, limit=3),
+        "what_to_watch": _build_watch_items(
+            latest_analysis=latest_analysis,
+            events=events,
+            triggered_rules=triggered_rules,
+            top_card=top_card,
+        ),
+        "must_improve": _build_improvement_items(thesis_evaluations=thesis_evaluations, top_card=top_card),
+        "thesis_breakers": _build_thesis_breakers(thesis_evaluations),
+        "quality_flags": _build_quality_flags(deltas=deltas, events=events, triggered_rules=triggered_rules),
+        "next_catalyst": _estimate_next_catalyst(latest_document=latest_document, latest_metrics=latest_metrics),
+    }
+
+
+def _summarize_deltas(deltas: list[DeltaRecord], *, limit: int) -> list[str]:
+    summaries: list[str] = []
+    for delta in deltas:
+        if delta.delta_kind == "metric_change" and delta.metric_name:
+            metric_label = delta.metric_name.replace("_", " ")
+            if delta.percent_change is not None:
+                summaries.append(f"{metric_label} changed {delta.percent_change:+.1f}% versus baseline.")
+            elif delta.absolute_change is not None:
+                summaries.append(f"{metric_label} changed by {delta.absolute_change:+,.0f} versus baseline.")
+        elif delta.delta_kind == "event_addition" and delta.metric_name:
+            summaries.append(f"New event detected: {delta.metric_name.replace('_', ' ')}.")
+        elif delta.delta_kind == "event_resolution" and delta.metric_name:
+            summaries.append(f"Prior event cleared: {delta.metric_name.replace('_', ' ')}.")
+        elif delta.delta_kind == "rule_addition" and delta.metric_name:
+            summaries.append(f"New rule trigger: {delta.metric_name.replace('_', ' ')}.")
+        elif delta.delta_kind == "rule_resolution" and delta.metric_name:
+            summaries.append(f"Rule cleared: {delta.metric_name.replace('_', ' ')}.")
+        elif delta.delta_kind == "narrative_change":
+            summaries.append("Management narrative changed versus the prior filing.")
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def _build_watch_items(
+    *,
+    latest_analysis: AnalysisSummary | None,
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    top_card: dict[str, Any],
+) -> list[str]:
+    items: list[str] = []
+    if latest_analysis is not None:
+        items.extend(str(item) for item in latest_analysis.what_to_verify[:3])
+    for rule in triggered_rules:
+        if rule.severity in {"warning", "critical"}:
+            items.append(rule.rationale or f"Watch active rule {rule.rule_name}.")
+    for event in events:
+        if (event.severity or "") in {"warning", "critical"}:
+            items.append(event.rationale or f"Watch event {event.event_type}.")
+    if top_card.get("comparability_state") == "not_comparable":
+        items.append("Wait for a cleaner comparable baseline before upgrading conviction.")
+    return _dedupe_keep_order(items)[:3]
+
+
+def _build_improvement_items(
+    *,
+    thesis_evaluations: list[ThesisEvaluationRecord],
+    top_card: dict[str, Any],
+) -> list[str]:
+    items: list[str] = []
+    for evaluation in thesis_evaluations:
+        details = json.loads(evaluation.payload_json or "{}")
+        matched_positive = {_condition_key(record) for record in details.get("matched_positive", [])}
+        for record in details.get("positive_conditions", []):
+            if _condition_key(record) in matched_positive:
+                continue
+            items.append(_condition_to_improvement_text(record))
+        for record in details.get("matched_warning", []):
+            items.append(_condition_to_resolution_text(record))
+    if top_card.get("overall_state") == "critical":
+        items.append("Clear critical rules or events before upgrading the stance.")
+    return _dedupe_keep_order(items)[:4]
+
+
+def _build_thesis_breakers(thesis_evaluations: list[ThesisEvaluationRecord]) -> list[str]:
+    items: list[str] = []
+    for evaluation in thesis_evaluations:
+        details = json.loads(evaluation.payload_json or "{}")
+        for record in details.get("stop_conditions", []):
+            items.append(_condition_to_breaker_text(record))
+    return _dedupe_keep_order(items)[:4]
+
+
+def _build_quality_flags(
+    *,
+    deltas: list[DeltaRecord],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+) -> list[str]:
+    metric_changes = {delta.metric_name: delta for delta in deltas if delta.delta_kind == "metric_change" and delta.metric_name}
+    flags: list[str] = []
+    net_profit = metric_changes.get("net_profit")
+    cash_flow = metric_changes.get("operating_cash_flow")
+    liabilities = metric_changes.get("total_liabilities")
+    revenue = metric_changes.get("revenue")
+    if net_profit and cash_flow and (net_profit.absolute_change or 0) > 0 and (cash_flow.absolute_change or 0) < 0:
+        flags.append("Profit improved while operating cash flow deteriorated.")
+    if liabilities and revenue and (liabilities.percent_change or 0) > (revenue.percent_change or 0):
+        flags.append("Debt grew faster than revenue.")
+    event_types = {event.event_type for event in events}
+    if event_types & {"auditor_change"}:
+        flags.append("Auditor changed.")
+    if event_types & {"rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue"}:
+        flags.append("Equity issuance or dilution signal remains active.")
+    if event_types & {"lawsuit", "regulatory_action", "regulator_supervision", "special_supervision", "business_restriction"}:
+        flags.append("Legal or regulatory risk is active.")
+    if any(rule.rule_name == "cash_flow_deterioration" and rule.severity in {"warning", "critical"} for rule in triggered_rules):
+        flags.append("Cash-flow quality remains weak.")
+    return _dedupe_keep_order(flags)[:5]
+
+
+def _estimate_next_catalyst(
+    *,
+    latest_document: CompanyDocument,
+    latest_metrics: list[MetricPoint],
+) -> dict[str, Any]:
+    as_of = _parse_iso_datetime(latest_document.source_modified_at or latest_document.updated_at)
+    anchor = _anchor_metric(latest_metrics)
+    period_end = _parse_iso_date(anchor.period_end_date) if anchor is not None else None
+    if latest_document.source_name == "idx_financial_reports" and period_end is not None:
+        window_start = period_end + timedelta(days=75)
+        window_end = period_end + timedelta(days=120)
+        return {
+            "label": "Next periodic filing window (estimate)",
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "reason": "Estimated from the latest reported period end and the normal IDX financial-report cadence.",
+        }
+    if latest_document.source_name == "idx_disclosures" and as_of is not None:
+        return {
+            "label": "Monitor for follow-up disclosure",
+            "window_start": (as_of + timedelta(days=1)).date().isoformat(),
+            "window_end": (as_of + timedelta(days=14)).date().isoformat(),
+            "reason": "Material events tend to generate related follow-up disclosures or management clarification.",
+        }
+    if as_of is not None:
+        return {
+            "label": "Refresh this issuer soon",
+            "window_start": (as_of + timedelta(days=30)).date().isoformat(),
+            "window_end": (as_of + timedelta(days=90)).date().isoformat(),
+            "reason": "No cleaner filing cadence is available from the latest document metadata.",
+        }
+    return {
+        "label": "No catalyst estimate yet",
+        "window_start": None,
+        "window_end": None,
+        "reason": "Insufficient timing metadata exists for this issuer.",
+    }
+
+
 def _evaluate_theses(
     *,
     theses: list[LocalThesisDefinition],
@@ -1498,6 +1678,9 @@ def _evaluate_theses(
 ) -> list[ThesisEvaluationRecord]:
     evaluations: list[ThesisEvaluationRecord] = []
     for thesis in theses:
+        positive_conditions: list[dict[str, Any]] = []
+        warning_conditions: list[dict[str, Any]] = []
+        stop_conditions: list[dict[str, Any]] = []
         matched_positive: list[dict[str, Any]] = []
         matched_warning: list[dict[str, Any]] = []
         matched_stop: list[dict[str, Any]] = []
@@ -1516,6 +1699,12 @@ def _evaluate_theses(
                 "kind": condition.kind,
                 "payload": condition.payload,
             }
+            if condition.severity == "positive":
+                positive_conditions.append(record)
+            elif condition.severity == "stop":
+                stop_conditions.append(record)
+            else:
+                warning_conditions.append(record)
             if matched is None:
                 unsupported.append(record)
             elif matched:
@@ -1534,6 +1723,9 @@ def _evaluate_theses(
         payload = {
             "ticker": ticker,
             "baseline_kind": baseline.kind if baseline is not None else "none",
+            "positive_conditions": positive_conditions,
+            "warning_conditions": warning_conditions,
+            "stop_conditions": stop_conditions,
             "matched_positive": matched_positive,
             "matched_warning": matched_warning,
             "matched_stop": matched_stop,
@@ -1687,15 +1879,15 @@ def _decision_state_for(
 ) -> str:
     thesis_state = _aggregate_thesis_state(thesis_evaluations)
     if thesis_state == "broken":
-        return "Avoid Candidate"
+        return "Avoid"
     if overall_state in {"critical", "review_required"}:
-        return "Review"
+        return "Review manually"
     if thesis_state == "improving" and confidence != "low":
-        return "Buy Candidate"
+        return "Buy"
     if thesis_state in {"weakening", "unsupported"}:
         return "Watch"
     if confidence == "low":
-        return "Insufficient Signal"
+        return "Review manually"
     return "Watch"
 
 
@@ -1726,6 +1918,90 @@ def _compare_numeric(value: float, operator: str, threshold: float) -> bool:
     if operator == "eq":
         return value == threshold
     return False
+
+
+def _condition_key(record: dict[str, Any]) -> str:
+    return json.dumps(record, sort_keys=True)
+
+
+def _condition_to_improvement_text(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    payload = record.get("payload") or {}
+    if kind == "metric_delta":
+        metric_name = str(payload.get("metric_name") or "metric").replace("_", " ")
+        operator = str(payload.get("operator") or "gte")
+        value = payload.get("value")
+        operator_text = {
+            "gt": ">",
+            "gte": ">=",
+            "lt": "<",
+            "lte": "<=",
+            "eq": "=",
+        }.get(operator, operator)
+        return f"Need {metric_name} change {operator_text} {value}."
+    if kind == "rule_absent":
+        return f"Need rule {str(payload.get('rule_name') or 'unknown').replace('_', ' ')} to stay clear."
+    if kind == "event_absent":
+        return f"Need event {str(payload.get('event_type') or 'unknown').replace('_', ' ')} to stay absent."
+    if kind == "event_present":
+        return f"Need confirming event {str(payload.get('event_type') or 'unknown').replace('_', ' ')}."
+    if kind == "review_item_present":
+        return f"Need human review on {str(payload.get('item_type') or 'unknown').replace('_', ' ')}."
+    return "Need more evidence to improve the thesis."
+
+
+def _condition_to_resolution_text(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    payload = record.get("payload") or {}
+    if kind == "rule_present":
+        return f"Resolve active rule {str(payload.get('rule_name') or 'unknown').replace('_', ' ')}."
+    if kind == "event_present":
+        return f"Resolve active event {str(payload.get('event_type') or 'unknown').replace('_', ' ')}."
+    if kind == "review_item_present":
+        return f"Close review item {str(payload.get('item_type') or 'unknown').replace('_', ' ')}."
+    return "Resolve the active warning condition."
+
+
+def _condition_to_breaker_text(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    payload = record.get("payload") or {}
+    if kind == "rule_present":
+        return f"Thesis breaks if {str(payload.get('rule_name') or 'unknown').replace('_', ' ')} triggers."
+    if kind == "event_present":
+        return f"Thesis breaks if {str(payload.get('event_type') or 'unknown').replace('_', ' ')} appears."
+    if kind == "metric_delta":
+        return _condition_to_improvement_text(record).replace("Need", "Thesis breaks if")
+    return "Thesis has a stop-rule condition."
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _build_comparable_company_state(

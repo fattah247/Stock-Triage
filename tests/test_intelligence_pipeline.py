@@ -22,12 +22,12 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     assert result.snapshots == 1
     assert result.timeseries == 7
     assert result.briefs == 1
-    assert result.review_items == 5
+    assert result.review_items == 6
     assert result.peer_sets == 1
     assert result.sector_rollups == 1
     assert result.thesis_evaluations == 1
-    assert result.claims == 3
-    assert result.claim_outcomes == 3
+    assert result.claims == 4
+    assert result.claim_outcomes == 4
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
     try:
@@ -83,8 +83,14 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["top_card"]["leverage_state"] == "warning"
         assert payload["top_card"]["management_credibility"] == "deteriorating"
         assert payload["top_card"]["thesis_state"] == "broken"
-        assert payload["top_card"]["decision_state"] == "Avoid Candidate"
+        assert payload["top_card"]["decision_state"] == "Avoid"
         assert payload["top_card"]["watchlist_priority"] == "high"
+        assert payload["decision_panel"]["stance"] == "Avoid"
+        assert payload["decision_panel"]["what_changed"]
+        assert payload["decision_panel"]["what_to_watch"]
+        assert payload["decision_panel"]["must_improve"]
+        assert payload["decision_panel"]["thesis_breakers"]
+        assert payload["decision_panel"]["next_catalyst"]["label"]
         assert "revenue increased" in payload["top_card"]["positive_factors"]
         assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
         assert payload["delta_count_by_kind"]["metric_change"] == 3
@@ -95,11 +101,13 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert {claim["claim_type"] for claim in payload["claims"]} == {
             "debt_reduction_claim",
             "margin_improvement_claim",
+            "outlook_claim",
             "revenue_growth_claim",
         }
         assert {outcome["outcome_status"] for outcome in payload["claim_outcomes"]} == {
             "Achieved",
             "Contradicted",
+            "Open",
         }
         assert payload["thesis_evaluations"][0]["status"] == "broken"
         assert payload["thesis_evaluations"][0]["details"]["matched_stop"][0]["kind"] == "rule_present"
@@ -129,11 +137,11 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert counts == {
             "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 5,
+            "review_queue_items": 6,
             "peer_sets": 1,
             "sector_rollups": 1,
-            "management_claims": 3,
-            "claim_outcomes": 3,
+            "management_claims": 4,
+            "claim_outcomes": 4,
             "thesis_definitions": 1,
             "thesis_conditions": 3,
             "thesis_evaluations": 1,
@@ -175,11 +183,11 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
             "company_snapshots": 1,
             "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 5,
+            "review_queue_items": 6,
             "peer_sets": 1,
             "sector_rollups": 1,
-            "management_claims": 3,
-            "claim_outcomes": 3,
+            "management_claims": 4,
+            "claim_outcomes": 4,
             "thesis_evaluations": 1,
         }
     finally:
@@ -203,8 +211,8 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     assert "derived_version=phase14-v1" in captured
     assert "selected_tickers=1" in captured
     assert "thesis_evaluations=1" in captured
-    assert "claims=3" in captured
-    assert "claim_outcomes=3" in captured
+    assert "claims=4" in captured
+    assert "claim_outcomes=4" in captured
 
 
 def _seed_phase10_inputs(tmp_config) -> None:
