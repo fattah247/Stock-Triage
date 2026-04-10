@@ -86,9 +86,9 @@ def test_run_sqlite_benchmark_returns_throughput_metrics(tmp_config):
 
 
 def test_phase9_cli_uses_hardening_commands(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.hardening.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_sqlite_benchmark",
+        "stock_triage.commands.hardening.run_sqlite_benchmark",
         lambda cfg, batches, rows_per_batch: SimpleNamespace(
             batches=batches,
             rows_per_batch=rows_per_batch,
@@ -100,7 +100,7 @@ def test_phase9_cli_uses_hardening_commands(tmp_config, monkeypatch, capsys):
         ),
     )
     monkeypatch.setattr(
-        "stock_triage.__main__.load_backlog",
+        "stock_triage.commands.hardening.load_backlog",
         lambda cfg: SimpleNamespace(
             rows=[
                 SimpleNamespace(

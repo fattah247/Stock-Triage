@@ -631,9 +631,9 @@ def test_corrupt_downloads_are_quarantined_and_skipped_by_default(tmp_config):
 
 
 def test_download_cli_uses_run_downloads(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_downloads",
+        "stock_triage.commands.pipeline.run_downloads",
         lambda cfg, source_name=None, limit=25, include_existing=False, retry_failed=False, include_quarantined=False: type(
             "R",
             (),

@@ -120,9 +120,9 @@ def test_load_rule_status_reports_recent_triggers(tmp_config):
 
 
 def test_rules_cli_uses_run_rules(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_rules",
+        "stock_triage.commands.pipeline.run_rules",
         lambda cfg, source_name=None, document_id=None, limit=25, include_analyzed=False: type(
             "R",
             (),
@@ -176,9 +176,9 @@ def test_run_rules_can_target_single_document(tmp_config):
 
 
 def test_rules_status_cli_uses_load_rule_status(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.load_rule_status",
+        "stock_triage.commands.pipeline.load_rule_status",
         lambda cfg, source_name=None, trigger_limit=10: type(
             "R",
             (),

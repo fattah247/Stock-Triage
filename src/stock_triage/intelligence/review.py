@@ -402,6 +402,7 @@ def _load_kpis(conn) -> dict[str, object]:
     credibility_counts: dict[str, int] = {}
     stale_snapshots = 0
     total_peer_anomalies = 0
+    complete_snapshots = 0
     for row in snapshot_rows:
         payload = json.loads(row["payload_json"])
         top_card = payload.get("top_card", {})
@@ -419,6 +420,16 @@ def _load_kpis(conn) -> dict[str, object]:
                 dt = dt.replace(tzinfo=timezone.utc)
             if now - dt > timedelta(days=3):
                 stale_snapshots += 1
+        # Completeness per PRD v3 §18: a snapshot is "complete" when every
+        # major derived section is populated. Missing sections mean the
+        # analyst cannot fully triage from the single card.
+        has_top_card = bool(top_card.get("overall_state"))
+        has_summary = bool(payload.get("latest_summary"))
+        has_metrics = bool(payload.get("metrics"))
+        has_peer = isinstance(payload.get("peer_comparison"), dict)
+        has_credibility = isinstance(payload.get("management_credibility"), dict)
+        if has_top_card and has_summary and has_metrics and has_peer and has_credibility:
+            complete_snapshots += 1
     review_counts = conn.execute(
         """
         SELECT status, COUNT(*) AS count
@@ -426,15 +437,77 @@ def _load_kpis(conn) -> dict[str, object]:
         GROUP BY status
         """
     ).fetchall()
+
+    snapshot_count = len(snapshot_rows)
+    freshness_pct = (
+        round((snapshot_count - stale_snapshots) / snapshot_count * 100.0, 1)
+        if snapshot_count
+        else None
+    )
+    completeness_pct = (
+        round(complete_snapshots / snapshot_count * 100.0, 1) if snapshot_count else None
+    )
+
+    # Digest validity per PRD v3 §18: every company card in the latest digest
+    # should ship with at least one narrative "reason" so the digest can be
+    # audited end-to-end. We compute this against the most recent digest.
+    digest_row = conn.execute(
+        """
+        SELECT payload_json
+        FROM daily_digests
+        WHERE derived_version = ?
+        ORDER BY digest_date DESC, updated_at DESC
+        LIMIT 1
+        """,
+        (DERIVED_VERSION,),
+    ).fetchone()
+    digest_validity_pct: float | None = None
+    digest_card_count = 0
+    digest_card_with_reason = 0
+    if digest_row is not None:
+        try:
+            digest_payload = json.loads(digest_row["payload_json"])
+        except (TypeError, ValueError):
+            digest_payload = {}
+        cards = digest_payload.get("company_cards") or []
+        digest_card_count = len(cards)
+        for card in cards:
+            if card.get("reasons"):
+                digest_card_with_reason += 1
+        if digest_card_count:
+            digest_validity_pct = round(
+                digest_card_with_reason / digest_card_count * 100.0, 1
+            )
+
+    # PRD v3 §18 targets. Audit-only KPIs (delta precision, thesis correctness,
+    # alert relevance, claim linkage precision) are surfaced with a null actual
+    # value so the UI can show the target without pretending we computed it.
+    kpi_targets = {
+        "snapshot_freshness_pct": 95.0,
+        "snapshot_completeness_pct": 90.0,
+        "digest_validity_pct": 100.0,
+        "delta_precision_pct": 95.0,
+        "thesis_correctness_pct": 98.0,
+        "alert_relevance_pct": 85.0,
+        "claim_linkage_pct": 80.0,
+    }
+
     return {
-        "snapshot_count": len(snapshot_rows),
+        "snapshot_count": snapshot_count,
         "stale_snapshots": stale_snapshots,
+        "complete_snapshots": complete_snapshots,
         "overall_state_counts": overall_state_counts,
         "thesis_state_counts": thesis_state_counts,
         "credibility_counts": credibility_counts,
         "open_review_items": sum(row["count"] for row in review_counts if row["status"] == "open"),
         "review_status_counts": {row["status"]: row["count"] for row in review_counts},
         "peer_anomaly_count": total_peer_anomalies,
+        "snapshot_freshness_pct": freshness_pct,
+        "snapshot_completeness_pct": completeness_pct,
+        "digest_validity_pct": digest_validity_pct,
+        "digest_card_count": digest_card_count,
+        "digest_card_with_reason": digest_card_with_reason,
+        "kpi_targets": kpi_targets,
     }
 
 

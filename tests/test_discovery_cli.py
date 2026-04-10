@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
-from stock_triage.__main__ import _effective_window, _window_from_args, cmd_discover
+from stock_triage.commands.pipeline import _effective_window, _window_from_args, cmd_discover
 from stock_triage.db import WriterQueue, run_migrations
 from stock_triage.discovery import persist_watermark
 from stock_triage.sources import DiscoveryWindow, SourceClass
@@ -86,10 +86,10 @@ def test_cmd_discover_uses_persisted_watermark_by_default(tmp_config, monkeypatc
         )
 
     adapter = _FakeAdapter()
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
-    monkeypatch.setattr("stock_triage.__main__.setup_logging", lambda _cfg: None)
-    monkeypatch.setattr("stock_triage.__main__.get_logger", lambda _name: _DummyLogger())
-    monkeypatch.setattr("stock_triage.__main__._adapters_for_source", lambda _source: [adapter])
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.setup_logging", lambda _cfg: None)
+    monkeypatch.setattr("stock_triage.commands.pipeline.get_logger", lambda _name: _DummyLogger())
+    monkeypatch.setattr("stock_triage.commands.pipeline._adapters_for_source", lambda _source: [adapter])
 
     args = SimpleNamespace(source="disclosure", start=None, end=None, year=None, cursor=None)
     assert cmd_discover(args) == 0
@@ -112,10 +112,10 @@ def test_cmd_discover_uses_explicit_window_over_watermark(tmp_config, monkeypatc
         )
 
     adapter = _FakeAdapter()
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
-    monkeypatch.setattr("stock_triage.__main__.setup_logging", lambda _cfg: None)
-    monkeypatch.setattr("stock_triage.__main__.get_logger", lambda _name: _DummyLogger())
-    monkeypatch.setattr("stock_triage.__main__._adapters_for_source", lambda _source: [adapter])
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.setup_logging", lambda _cfg: None)
+    monkeypatch.setattr("stock_triage.commands.pipeline.get_logger", lambda _name: _DummyLogger())
+    monkeypatch.setattr("stock_triage.commands.pipeline._adapters_for_source", lambda _source: [adapter])
 
     args = SimpleNamespace(source="disclosure", start=None, end=None, year=2025, cursor="manual")
     assert cmd_discover(args) == 0

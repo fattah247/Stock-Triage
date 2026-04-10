@@ -262,6 +262,24 @@ input {
   font-weight: 700;
 }
 
+.starButton {
+  all: unset;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--muted);
+  transition: color 0.15s;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.starButton:hover {
+  color: var(--accent-strong);
+}
+
+.starButton.starred {
+  color: #d4a017;
+}
+
 .issuerCountBadge {
   min-width: 28px;
   padding: 2px 8px;

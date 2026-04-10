@@ -4,7 +4,7 @@ import argparse
 import json
 from datetime import datetime, timedelta, timezone
 
-from stock_triage.__main__ import cmd_intelligence_run
+from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.intelligence import DERIVED_VERSION, run_intelligence
 
@@ -189,9 +189,9 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
 def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     _seed_phase10_inputs(tmp_config)
     _write_phase12_theses(tmp_config)
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.intelligence.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_intelligence",
+        "stock_triage.commands.intelligence.run_intelligence",
         lambda cfg, ticker, limit: run_intelligence(tmp_config, ticker=ticker, limit=limit),
     )
 

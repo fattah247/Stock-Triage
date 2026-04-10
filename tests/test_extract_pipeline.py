@@ -305,9 +305,9 @@ def test_extract_status_reports_completeness_and_failures(tmp_config):
 
 
 def test_extract_cli_uses_run_extract(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_extract",
+        "stock_triage.commands.pipeline.run_extract",
         lambda cfg, source_name=None, document_id=None, limit=25, include_extracted=False, retry_failed_only=False: type(
             "R",
             (),
@@ -380,9 +380,9 @@ def test_run_extract_can_target_single_document(tmp_config):
 
 
 def test_extract_status_cli_uses_load_extract_status(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.load_extract_status",
+        "stock_triage.commands.pipeline.load_extract_status",
         lambda cfg, source_name=None, failure_limit=10: type(
             "R",
             (),

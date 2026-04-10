@@ -235,9 +235,9 @@ def test_run_parse_persists_section_labels_from_heading_blocks(tmp_config):
 
 
 def test_parse_cli_uses_run_parse(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.run_parse",
+        "stock_triage.commands.pipeline.run_parse",
         lambda cfg, source_name=None, document_id=None, limit=25, include_parsed=False, retry_failed_only=False: type(
             "R",
             (),
@@ -371,9 +371,9 @@ def test_load_parse_status_reports_recent_failures(tmp_config, monkeypatch):
 
 
 def test_parse_status_cli_uses_status_loader(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.pipeline.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.load_parse_status",
+        "stock_triage.commands.pipeline.load_parse_status",
         lambda cfg, source_name=None, failure_limit=10: type(
             "Report",
             (),

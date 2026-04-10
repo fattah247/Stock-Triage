@@ -367,6 +367,7 @@
     const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
+    const watchlist = new Set((data.watchlist || []).map((t) => t.toUpperCase()));
 
     issuerList.innerHTML = issuers.length
       ? issuers
@@ -377,6 +378,7 @@
               )}">
                 <div class="issuerLine">
                   <div class="issuerTicker">${esc(item.ticker)}</div>
+                  <button class="starButton ${watchlist.has(item.ticker.toUpperCase()) ? "starred" : ""}" type="button" data-star-ticker="${esc(item.ticker)}" title="Toggle watchlist">${watchlist.has(item.ticker.toUpperCase()) ? "\u2605" : "\u2606"}</button>
                   <div class="issuerCountBadge">${esc(item.document_count || 0)}</div>
                 </div>
                 <div class="issuerName">${esc(item.issuer_name)}</div>
@@ -431,13 +433,52 @@
     if (kpiList) {
       const overallStates = intelligenceKpis.overall_state_counts || {};
       const thesisStates = intelligenceKpis.thesis_state_counts || {};
+      const targets = intelligenceKpis.kpi_targets || {};
+      const kpiSeverity = (actual, target) => {
+        if (actual == null || target == null) return "info";
+        if (actual >= target) return "ok";
+        if (actual >= target - 5) return "warning";
+        return "critical";
+      };
+      const formatPct = (value) => (value == null ? "—" : `${Number(value).toFixed(1)}%`);
+      const formatTarget = (value) => (value == null ? "" : `target ≥ ${Number(value).toFixed(0)}%`);
+      const kpiCard = (label, actual, target, note) => {
+        const sev = kpiSeverity(actual, target);
+        return `
+          <div class="stat sev-${sev}">
+            <div class="summaryLabel">${esc(label)}</div>
+            <strong>${esc(formatPct(actual))}</strong>
+            <div class="meta">${esc(formatTarget(target))}${note ? ` · ${esc(note)}` : ""}</div>
+          </div>
+        `;
+      };
+      const countCard = (label, value) => `
+        <div class="stat"><div class="summaryLabel">${esc(label)}</div><strong>${esc(value || 0)}</strong></div>
+      `;
       kpiList.innerHTML = `
-        <div class="stat"><div class="summaryLabel">Snapshots</div><strong>${esc(intelligenceKpis.snapshot_count || 0)}</strong></div>
-        <div class="stat"><div class="summaryLabel">Open Reviews</div><strong>${esc(intelligenceKpis.open_review_items || 0)}</strong></div>
-        <div class="stat"><div class="summaryLabel">Peer Anomalies</div><strong>${esc(intelligenceKpis.peer_anomaly_count || 0)}</strong></div>
-        <div class="stat"><div class="summaryLabel">Stale Snapshots</div><strong>${esc(intelligenceKpis.stale_snapshots || 0)}</strong></div>
-        <div class="stat"><div class="summaryLabel">Critical Names</div><strong>${esc(overallStates.critical || 0)}</strong></div>
-        <div class="stat"><div class="summaryLabel">Broken Theses</div><strong>${esc(thesisStates.broken || 0)}</strong></div>
+        ${kpiCard(
+          "Snapshot freshness",
+          intelligenceKpis.snapshot_freshness_pct,
+          targets.snapshot_freshness_pct,
+          `${esc((intelligenceKpis.snapshot_count || 0) - (intelligenceKpis.stale_snapshots || 0))}/${esc(intelligenceKpis.snapshot_count || 0)} fresh`
+        )}
+        ${kpiCard(
+          "Snapshot completeness",
+          intelligenceKpis.snapshot_completeness_pct,
+          targets.snapshot_completeness_pct,
+          `${esc(intelligenceKpis.complete_snapshots || 0)}/${esc(intelligenceKpis.snapshot_count || 0)} complete`
+        )}
+        ${kpiCard(
+          "Digest validity",
+          intelligenceKpis.digest_validity_pct,
+          targets.digest_validity_pct,
+          `${esc(intelligenceKpis.digest_card_with_reason || 0)}/${esc(intelligenceKpis.digest_card_count || 0)} cited`
+        )}
+        ${countCard("Open reviews", intelligenceKpis.open_review_items)}
+        ${countCard("Critical names", overallStates.critical)}
+        ${countCard("Broken theses", thesisStates.broken)}
+        ${countCard("Peer anomalies", intelligenceKpis.peer_anomaly_count)}
+        ${countCard("Stale snapshots", intelligenceKpis.stale_snapshots)}
       `;
     }
 
@@ -1135,6 +1176,26 @@
   });
 
   document.addEventListener("click", (event) => {
+    const starTarget = event.target.closest("[data-star-ticker]");
+    if (starTarget) {
+      event.stopPropagation();
+      const ticker = starTarget.dataset.starTicker || "";
+      const isStarred = starTarget.classList.contains("starred");
+      const action = isStarred ? "remove" : "add";
+      fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: `ticker=${encodeURIComponent(ticker)}&action=${encodeURIComponent(action)}`,
+      })
+        .then((r) => r.json())
+        .then((result) => {
+          state.data.watchlist = result.tickers || [];
+          render();
+        })
+        .catch(() => {});
+      return;
+    }
+
     const issuerTarget = event.target.closest("[data-ticker]");
     if (issuerTarget) {
       state.selectedTicker = issuerTarget.dataset.ticker || null;

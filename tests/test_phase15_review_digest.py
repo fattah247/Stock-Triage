@@ -40,6 +40,16 @@ def test_phase15_digest_review_and_kpis(tmp_config):
     assert kpis["snapshot_count"] == 1
     assert kpis["open_review_items"] >= 0
     assert "critical" in kpis["overall_state_counts"]
+    # PRD v3 §18 derived KPI fields
+    assert kpis["snapshot_freshness_pct"] is not None
+    assert 0 <= kpis["snapshot_freshness_pct"] <= 100
+    assert kpis["snapshot_completeness_pct"] is not None
+    assert kpis["digest_validity_pct"] is not None
+    assert kpis["kpi_targets"]["snapshot_freshness_pct"] == 95.0
+    assert kpis["kpi_targets"]["snapshot_completeness_pct"] == 90.0
+    assert kpis["kpi_targets"]["digest_validity_pct"] == 100.0
+    assert kpis["kpi_targets"]["delta_precision_pct"] == 95.0
+    assert kpis["kpi_targets"]["thesis_correctness_pct"] == 98.0
 
     rconn = connect(tmp_config.paths.db_path, read_only=True)
     try:

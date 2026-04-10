@@ -99,7 +99,7 @@ def test_validate_summary_file_rejects_unknown_evidence(tmp_config, tmp_path):
 
 def test_summary_context_cli_and_validate_cli(tmp_config, tmp_path, monkeypatch, capsys):
     document_id, span_id = _insert_analyzed_document(tmp_config)
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.summary.load_config", lambda: tmp_config)
 
     rc = main(["summary-context", document_id])
     out = capsys.readouterr().out
@@ -182,9 +182,9 @@ def test_generate_summary_calls_local_model_and_persists_result(tmp_config, monk
 
 
 def test_summary_generate_cli_uses_generate_summary(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.summary.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.generate_summary",
+        "stock_triage.commands.summary.generate_summary",
         lambda cfg, document_id, prompt_version="phase7-v2": type(
             "R",
             (),

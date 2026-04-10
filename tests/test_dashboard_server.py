@@ -11,7 +11,12 @@ from urllib.request import Request, urlopen
 import pytest
 
 from stock_triage.__main__ import main
-from stock_triage.dashboard.server import DashboardJobState, _build_cli_command, create_dashboard_server
+from stock_triage.dashboard.server import (
+    DashboardJobState,
+    _build_cli_command,
+    _parse_range_header,
+    create_dashboard_server,
+)
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -147,6 +152,68 @@ def test_dashboard_server_updates_review_status(tmp_config) -> None:
         thread.join(timeout=5)
 
 
+def test_parse_range_header_handles_common_range_forms() -> None:
+    # Full file when no header is supplied.
+    assert _parse_range_header(None, 100) == (0, 99)
+    # Explicit start and end.
+    assert _parse_range_header("bytes=0-49", 100) == (0, 49)
+    # Open-ended range clamps to file size.
+    assert _parse_range_header("bytes=50-", 100) == (50, 99)
+    # Suffix range returns the final N bytes.
+    assert _parse_range_header("bytes=-20", 100) == (80, 99)
+    # Unsatisfiable ranges raise ValueError for the handler to translate into 416.
+    import pytest as _pytest
+
+    for header in ("bytes=abc", "bytes=200-300", "items=0-10", "bytes=-0"):
+        with _pytest.raises(ValueError):
+            _parse_range_header(header, 100)
+
+
+def test_dashboard_server_streams_artifact_range(tmp_config) -> None:
+    payload = (b"".join(bytes([i % 256]) for i in range(4096))) + b"TAIL"
+    artifact_path = tmp_config.paths.data_dir / "range-sample.bin"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(payload)
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        path_query = quote(str(artifact_path), safe="")
+        base_url = f"{handle.url}/artifact?path={path_query}"
+
+        # Full body advertises Accept-Ranges so clients know they can seek.
+        full_req = Request(base_url)
+        with urlopen(full_req) as full_resp:
+            full_body = full_resp.read()
+            assert full_body == payload
+            assert full_resp.headers.get("Accept-Ranges") == "bytes"
+            assert int(full_resp.headers.get("Content-Length") or "0") == len(payload)
+
+        # Explicit byte range returns 206 with the right slice.
+        ranged_req = Request(base_url, headers={"Range": "bytes=10-19"})
+        with urlopen(ranged_req) as ranged_resp:
+            assert ranged_resp.status == 206
+            assert ranged_resp.headers.get("Content-Range") == f"bytes 10-19/{len(payload)}"
+            assert ranged_resp.read() == payload[10:20]
+
+        # Suffix range returns the tail.
+        suffix_req = Request(base_url, headers={"Range": "bytes=-4"})
+        with urlopen(suffix_req) as suffix_resp:
+            assert suffix_resp.status == 206
+            assert suffix_resp.read() == b"TAIL"
+
+        # Unsatisfiable range returns 416.
+        bad_req = Request(base_url, headers={"Range": f"bytes={len(payload) + 10}-"})
+        with pytest.raises(HTTPError) as excinfo:
+            urlopen(bad_req)
+        assert excinfo.value.code == 416
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_server_rejects_paths_outside_data_dir(tmp_config) -> None:
     handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
     thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
@@ -161,15 +228,59 @@ def test_dashboard_server_rejects_paths_outside_data_dir(tmp_config) -> None:
         thread.join(timeout=5)
 
 
+def test_dashboard_server_watchlist_add_remove(tmp_config) -> None:
+    _seed_phase8_data(tmp_config)
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # Initially the watchlist is empty (no sidecar file).
+        wl = json.loads(urlopen(f"{handle.url}/api/watchlist").read().decode("utf-8"))
+        assert wl["tickers"] == []
+
+        # Add a ticker via POST.
+        add_req = Request(
+            f"{handle.url}/api/watchlist",
+            data=urlencode({"ticker": "TAMU", "action": "add"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        add_resp = json.loads(urlopen(add_req).read().decode("utf-8"))
+        assert "TAMU" in add_resp["tickers"]
+        assert add_resp["action"] == "add"
+
+        # Snapshot should include the watchlist.
+        snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        assert "TAMU" in snapshot["watchlist"]
+
+        # Remove the ticker.
+        rm_req = Request(
+            f"{handle.url}/api/watchlist",
+            data=urlencode({"ticker": "TAMU", "action": "remove"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        rm_resp = json.loads(urlopen(rm_req).read().decode("utf-8"))
+        assert "TAMU" not in rm_resp["tickers"]
+
+        # Sidecar file should exist on disk.
+        sidecar = tmp_config.paths.data_dir / "watchlist.json"
+        assert sidecar.exists()
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> None:
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
     seen = {}
 
     def fake_serve_dashboard(cfg, host, port, open_browser):
         seen.update({"cfg": cfg, "host": host, "port": port, "open_browser": open_browser})
         return SimpleNamespace(url=f"http://{host}:{port}")
 
-    monkeypatch.setattr("stock_triage.__main__.serve_dashboard", fake_serve_dashboard)
+    monkeypatch.setattr("stock_triage.commands.dashboard.serve_dashboard", fake_serve_dashboard)
 
     rc = main(["dashboard-serve", "--host", "127.0.0.1", "--port", "9001"])
     out = capsys.readouterr().out

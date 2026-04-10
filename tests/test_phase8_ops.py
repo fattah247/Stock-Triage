@@ -161,9 +161,10 @@ def test_run_canary_persists_failures_instead_of_raising(tmp_config, monkeypatch
 
 
 def test_dashboard_and_canary_cli_use_phase8_commands(tmp_config, monkeypatch, capsys):
-    monkeypatch.setattr("stock_triage.__main__.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
+    monkeypatch.setattr("stock_triage.commands.alerts_canary.load_config", lambda: tmp_config)
     monkeypatch.setattr(
-        "stock_triage.__main__.export_dashboard",
+        "stock_triage.commands.dashboard.export_dashboard",
         lambda cfg, output_dir=None: type(
             "R",
             (),
@@ -178,7 +179,7 @@ def test_dashboard_and_canary_cli_use_phase8_commands(tmp_config, monkeypatch, c
         )(),
     )
     monkeypatch.setattr(
-        "stock_triage.__main__.load_canary_status",
+        "stock_triage.commands.alerts_canary.load_canary_status",
         lambda cfg: type(
             "R",
             (),

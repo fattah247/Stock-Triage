@@ -27,6 +27,38 @@ from ..logging_setup import get_logger
 from .assets import read_static_asset
 from .pipeline import load_dashboard_snapshot, render_dashboard_html
 
+
+def _watchlist_path(cfg: Config) -> Path:
+    """Sidecar JSON file that overrides ``cfg.alerts.watchlist``."""
+    return cfg.paths.data_dir / "watchlist.json"
+
+
+def _load_watchlist(cfg: Config) -> list[str]:
+    """Return the effective watchlist — sidecar file wins if it exists."""
+    path = _watchlist_path(cfg)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("tickers"), list):
+                return [str(t).upper() for t in data["tickers"]]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return [t.upper() for t in cfg.alerts.watchlist]
+
+
+def _save_watchlist(cfg: Config, tickers: list[str]) -> list[str]:
+    """Persist a watchlist sidecar and return the normalised list."""
+    normalised = sorted({t.upper().strip() for t in tickers if t.strip()})
+    path = _watchlist_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"tickers": normalised}, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    # Also update the live config so subsequent snapshot loads pick it up.
+    cfg.alerts.watchlist = list(normalised)
+    return normalised
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -279,12 +311,19 @@ def _handler_factory():
                 requested = params.get("path", [""])[0]
                 self._serve_artifact(requested, emit_body=emit_body)
                 return
+            if parsed.path == "/api/watchlist":
+                tickers = _load_watchlist(self.server.cfg)
+                self._write_json(HTTPStatus.OK, {"tickers": tickers}, emit_body=emit_body)
+                return
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"}, emit_body=emit_body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib interface
             parsed = urlparse(self.path)
             if parsed.path == "/api/review":
                 self._handle_review_update()
+                return
+            if parsed.path == "/api/watchlist":
+                self._handle_watchlist_update()
                 return
             if parsed.path != "/api/action":
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -343,6 +382,26 @@ def _handler_factory():
                 },
             )
 
+        def _handle_watchlist_update(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            params = {
+                key: values[-1]
+                for key, values in parse_qs(body.decode("utf-8")).items()
+            }
+            action = params.get("action", "").strip()
+            ticker = params.get("ticker", "").strip().upper()
+            if not ticker:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_ticker"})
+                return
+            current = _load_watchlist(self.server.cfg)
+            current_set = set(current)
+            if action == "remove":
+                current_set.discard(ticker)
+            else:
+                current_set.add(ticker)
+            updated = _save_watchlist(self.server.cfg, list(current_set))
+            self._write_json(HTTPStatus.OK, {"tickers": updated, "ticker": ticker, "action": action or "add"})
+
         def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
             get_logger("stock_triage.dashboard").info(
                 "dashboard request",
@@ -361,7 +420,29 @@ def _handler_factory():
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "file_not_found"}, emit_body=emit_body)
                 return
             mime, _ = mimetypes.guess_type(str(path))
-            self._write_bytes(HTTPStatus.OK, mime or "application/octet-stream", path.read_bytes(), emit_body=emit_body)
+            content_type = mime or "application/octet-stream"
+            total_size = path.stat().st_size
+            range_header = self.headers.get("Range")
+            try:
+                start, end = _parse_range_header(range_header, total_size)
+            except ValueError:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE.value)
+                self.send_header("Content-Range", f"bytes */{total_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            length = end - start + 1
+            status = HTTPStatus.PARTIAL_CONTENT if range_header else HTTPStatus.OK
+            self.send_response(status.value)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if range_header:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{total_size}")
+            self.end_headers()
+            if not emit_body:
+                return
+            _stream_file_range(self.wfile, path, start=start, length=length)
 
         def _serve_action_stream(self, job_id: str) -> None:
             if not job_id:
@@ -488,6 +569,7 @@ def _snapshot_payload(cfg: Config, action_history: list[dict[str, object]]) -> d
         "backlog_rows": snapshot.backlog_rows,
         "canary_rows": snapshot.canary_rows,
         "action_history": list(action_history),
+        "watchlist": _load_watchlist(cfg),
     }
 
 
@@ -584,6 +666,61 @@ def _pipe_stream(stream, job: DashboardJobState, stream_name: str) -> None:
             job.append_output(stream_name, line)
     finally:
         stream.close()
+
+
+_ARTIFACT_CHUNK_SIZE = 64 * 1024
+
+
+def _parse_range_header(header: str | None, total_size: int) -> tuple[int, int]:
+    """Return an inclusive ``(start, end)`` tuple for a ``Range: bytes=`` header.
+
+    Raises ``ValueError`` for malformed or unsatisfiable ranges so the caller
+    can return a ``416`` response. When ``header`` is ``None`` the caller
+    receives the full file range.
+    """
+
+    if header is None:
+        if total_size == 0:
+            return 0, 0
+        return 0, total_size - 1
+    if not header.startswith("bytes="):
+        raise ValueError("invalid_range_unit")
+    spec = header[len("bytes="):].strip()
+    if "," in spec:
+        spec = spec.split(",", 1)[0].strip()
+    if "-" not in spec:
+        raise ValueError("invalid_range")
+    start_raw, end_raw = spec.split("-", 1)
+    if start_raw == "":
+        if end_raw == "":
+            raise ValueError("invalid_range")
+        suffix = int(end_raw)
+        if suffix <= 0 or total_size == 0:
+            raise ValueError("invalid_range")
+        start = max(0, total_size - suffix)
+        end = total_size - 1
+    else:
+        start = int(start_raw)
+        end = int(end_raw) if end_raw != "" else total_size - 1
+    if start < 0 or end < start or start >= total_size:
+        raise ValueError("invalid_range")
+    end = min(end, total_size - 1)
+    return start, end
+
+
+def _stream_file_range(wfile, path: Path, *, start: int, length: int) -> None:
+    with path.open("rb") as handle:
+        handle.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = handle.read(min(_ARTIFACT_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            try:
+                wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            remaining -= len(chunk)
 
 
 def _is_allowed_artifact_path(path: Path, cfg: Config) -> bool:
