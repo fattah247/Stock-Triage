@@ -124,11 +124,22 @@
     if (!value) return "";
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-      timeZoneName: "short",
-    }).format(date);
+    // Safari is stricter than Chromium here and rejects some combinations of
+    // `dateStyle`/`timeStyle` with `timeZoneName`. Fall back progressively so
+    // the whole dashboard does not crash during first render.
+    const candidates = [
+      { dateStyle: "medium", timeStyle: "short", timeZoneName: "short" },
+      { dateStyle: "medium", timeStyle: "short" },
+      { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" },
+    ];
+    for (const options of candidates) {
+      try {
+        return new Intl.DateTimeFormat(undefined, options).format(date);
+      } catch (_) {
+        // Try the next supported formatter shape.
+      }
+    }
+    return date.toLocaleString();
   }
 
   function relativeTime(value) {
