@@ -272,6 +272,43 @@ def test_dashboard_server_watchlist_add_remove(tmp_config) -> None:
         thread.join(timeout=5)
 
 
+def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
+    _seed_phase8_data(tmp_config)
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # Lite endpoint should return issuers and KPIs but not heavy sections.
+        lite = json.loads(urlopen(f"{handle.url}/api/snapshot/lite").read().decode("utf-8"))
+        assert "issuers" in lite
+        assert "intelligence_kpis" in lite
+        assert "documents" not in lite
+
+        # Section detail endpoints.
+        for section in ("inbox", "digest", "review", "ops"):
+            detail = json.loads(
+                urlopen(f"{handle.url}/api/detail?section={section}").read().decode("utf-8")
+            )
+            assert isinstance(detail, dict)
+
+        # Invalid section returns 400.
+        with pytest.raises(HTTPError) as excinfo:
+            urlopen(f"{handle.url}/api/detail?section=nope")
+        assert excinfo.value.code == 400
+
+        # Company detail endpoint.
+        company = json.loads(
+            urlopen(f"{handle.url}/api/company?ticker=TAMU").read().decode("utf-8")
+        )
+        assert company["ticker"] == "TAMU"
+        assert "documents" in company
+        assert "metrics" in company
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> None:
     monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
     seen = {}

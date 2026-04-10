@@ -84,6 +84,111 @@ def load_dashboard_snapshot(
     )
 
 
+def load_snapshot_lite(cfg: Config) -> dict[str, object]:
+    """Lightweight snapshot: issuers + KPIs only, suitable for frequent polling."""
+    cfg.ensure_dirs()
+
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        issuers = _load_issuers(conn)
+    finally:
+        conn.close()
+
+    kpis = load_intelligence_kpis(cfg)
+    return {
+        "issuers": issuers,
+        "intelligence_kpis": kpis,
+    }
+
+
+def load_company_detail(cfg: Config, ticker: str) -> dict[str, object]:
+    """Load documents, metrics, findings, revisions, and snapshot for one ticker."""
+    cfg.ensure_dirs()
+
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        documents = _load_latest_documents(conn, limit=200)
+        metrics = _load_metric_snapshot(conn)
+        findings = _load_findings(conn, limit=100)
+        revisions = _load_revision_history(conn, limit=50)
+        company_snapshots = _load_company_snapshots(conn)
+        sector_rollups = _load_sector_rollups(conn)
+    finally:
+        conn.close()
+
+    ticker_upper = ticker.upper()
+    return {
+        "ticker": ticker_upper,
+        "documents": [d for d in documents if d.get("ticker") == ticker_upper],
+        "metrics": [m for m in metrics if m.get("ticker") == ticker_upper],
+        "findings": [f for f in findings if f.get("ticker") == ticker_upper],
+        "revisions": [r for r in revisions if r.get("ticker") == ticker_upper],
+        "company_snapshot": next(
+            (s for s in company_snapshots if s.get("ticker") == ticker_upper),
+            None,
+        ),
+        "sector_rollup": next(
+            (
+                s
+                for s in sector_rollups
+                if s.get("rollup_key") == "peer_intelligence"
+                and s.get("sector")
+                == next(
+                    (
+                        cs.get("payload", {}).get("sector")
+                        for cs in company_snapshots
+                        if cs.get("ticker") == ticker_upper
+                    ),
+                    None,
+                )
+            ),
+            None,
+        ),
+    }
+
+
+def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
+    """Load a single detail section: inbox, digest, review, or ops."""
+    cfg.ensure_dirs()
+
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+
+    if section == "inbox":
+        conn = connect(cfg.paths.db_path, read_only=True)
+        try:
+            configure_pragmas(conn, cfg)
+            return {"inbox_rows": _load_inbox_rows(conn, limit=60)}
+        finally:
+            conn.close()
+
+    if section == "digest":
+        digests = load_latest_digests(cfg, limit=5)
+        return {"digest_rows": digests}
+
+    if section == "review":
+        review = load_review_queue(cfg, status="open", limit=50)
+        return {"review_rows": review.rows}
+
+    if section == "ops":
+        backlog = load_backlog(cfg)
+        canary = load_canary_status(cfg)
+        return {
+            "backlog_rows": [row.__dict__ for row in backlog.rows],
+            "canary_rows": [row.__dict__ for row in canary.rows],
+        }
+
+    return {}
+
+
 def _load_issuers(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """

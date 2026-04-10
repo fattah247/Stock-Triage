@@ -71,6 +71,52 @@ input {
   font: inherit;
 }
 
+.viewNav {
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.viewTab {
+  all: unset;
+  cursor: pointer;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  box-shadow: none;
+}
+
+.viewTab:hover {
+  color: var(--ink);
+  transform: none;
+}
+
+.viewTab.active {
+  color: var(--accent-strong);
+  border-bottom-color: var(--accent);
+}
+
+[data-views] {
+  display: none;
+}
+
+[data-views].viewVisible {
+  display: block;
+}
+
+section[data-views].viewVisible {
+  display: grid;
+}
+
 .page {
   max-width: 1520px;
   margin: 0 auto;
@@ -260,6 +306,11 @@ input {
 .issuerTicker {
   font-size: 18px;
   font-weight: 700;
+}
+
+.sectorMissing {
+  color: var(--warning);
+  font-style: italic;
 }
 
 .starButton {

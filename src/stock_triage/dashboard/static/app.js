@@ -29,6 +29,10 @@
     queueTotal: 0,
     highlightedKeys: { inbox: new Map(), documents: new Map(), findings: new Map() },
     lastFailedHistory: null,
+    _companyCache: {},        // ticker -> {data, fetchedAt}
+    _sectionLoaded: {},       // section -> boolean
+    _sectionLoading: {},      // section -> boolean (in-flight guard)
+    activeView: "home",       // current view tab
   };
 
   const actionEndpoint = bootstrap.actionEndpoint || null;
@@ -93,9 +97,7 @@
     rules_one: "Run rules for document",
   };
 
-  if (opsShell && actionEndpoint && snapshotEndpoint) {
-    opsShell.hidden = false;
-  }
+  // Ops shell visibility is now managed by the view system (data-views="ops").
 
   function esc(value) {
     return String(value ?? "")
@@ -322,6 +324,43 @@
     }, 15000);
   }
 
+  function switchView(view) {
+    state.activeView = view;
+    // Update tab highlight.
+    document.querySelectorAll(".viewTab").forEach((tab) => {
+      tab.classList.toggle("active", tab.dataset.view === view);
+    });
+    // Show/hide panels based on data-views attribute.
+    document.querySelectorAll("[data-views]").forEach((el) => {
+      const views = el.dataset.views.split(/\s+/);
+      el.classList.toggle("viewVisible", views.includes(view));
+    });
+    // Auto-select company view when an issuer is picked.
+    if (view === "company" && state.selectedTicker) {
+      fetchCompanyDetail(state.selectedTicker);
+    }
+    // Sidebar hint adapts per view.
+    const hint = document.getElementById("sidebarHint");
+    if (hint) {
+      const hints = {
+        home: "Choose a company, then switch to the Company view for deep-dive.",
+        watchlist: "Showing watchlisted issuers. Star toggles manage membership.",
+        company: "Select an issuer to see its full intelligence page.",
+        sector: "Select an issuer to explore its sector peers.",
+        review: "Open review items across all issuers.",
+        ops: "Pipeline control panel and source health.",
+      };
+      hint.textContent = hints[view] || "";
+    }
+    // Trigger lazy-load for sections relevant to the new view.
+    if (view === "home" || view === "watchlist") {
+      fetchSectionDetail("inbox");
+      fetchSectionDetail("digest");
+    }
+    if (view === "review") fetchSectionDetail("review");
+    if (view === "ops") fetchSectionDetail("ops");
+  }
+
   function render() {
     renderCounts();
     if (yearInput && !yearInput.value) {
@@ -329,9 +368,11 @@
     }
 
     const q = (search?.value || "").trim().toLowerCase();
-    const issuers = data.issuers.filter(
-      (item) => !q || [item.ticker, item.issuer_name, item.sector, item.subsector].join(" ").toLowerCase().includes(q)
-    );
+    const watchlist = new Set((data.watchlist || []).map((t) => t.toUpperCase()));
+    const issuers = data.issuers.filter((item) => {
+      if (state.activeView === "watchlist" && !watchlist.has(item.ticker.toUpperCase())) return false;
+      return !q || [item.ticker, item.issuer_name, item.sector, item.subsector].join(" ").toLowerCase().includes(q);
+    });
     ensureSelection(issuers);
 
     const selectedIssuer = issuers.find((item) => item.ticker === state.selectedTicker) || null;
@@ -367,7 +408,6 @@
     const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
-    const watchlist = new Set((data.watchlist || []).map((t) => t.toUpperCase()));
 
     issuerList.innerHTML = issuers.length
       ? issuers
@@ -383,7 +423,7 @@
                 </div>
                 <div class="issuerName">${esc(item.issuer_name)}</div>
                 <div class="issuerMeta">
-                  <span>${esc(item.sector || "unknown")}</span>
+                  <span class="${!item.sector || item.sector === "unknown" ? "sectorMissing" : ""}">${esc(item.sector || "unknown")}</span>
                   <span>${esc(item.latest_document_at || item.last_seen_at || "")}</span>
                 </div>
               </button>
@@ -888,14 +928,70 @@
 
   async function refreshSnapshot() {
     if (!snapshotEndpoint) return;
-    const response = await fetch(snapshotEndpoint);
+    // Use lite endpoint for polling — only issuers + KPIs + watchlist.
+    const response = await fetch("/api/snapshot/lite");
     if (!response.ok) {
       throw new Error(`Snapshot refresh failed: ${response.status}`);
     }
-    const nextData = await response.json();
-    updateHighlights(data, nextData);
-    data = nextData;
+    const lite = await response.json();
+    data.issuers = lite.issuers || data.issuers;
+    data.intelligence_kpis = lite.intelligence_kpis || data.intelligence_kpis;
+    data.watchlist = lite.watchlist || data.watchlist;
+    data.action_history = lite.action_history || data.action_history;
+    // Invalidate company cache so next selection re-fetches.
+    state._companyCache = {};
     render();
+  }
+
+  async function fetchCompanyDetail(ticker) {
+    if (!ticker) return;
+    const cached = state._companyCache[ticker];
+    if (cached && Date.now() - cached.fetchedAt < 30000) return;
+    try {
+      const response = await fetch(`/api/company?ticker=${encodeURIComponent(ticker)}`);
+      if (!response.ok) return;
+      const detail = await response.json();
+      // Merge into data — replace per-ticker slices.
+      data.documents = (data.documents || []).filter((d) => d.ticker !== ticker).concat(detail.documents || []);
+      data.metrics = (data.metrics || []).filter((m) => m.ticker !== ticker).concat(detail.metrics || []);
+      data.findings = (data.findings || []).filter((f) => f.ticker !== ticker).concat(detail.findings || []);
+      data.revisions = (data.revisions || []).filter((r) => r.ticker !== ticker).concat(detail.revisions || []);
+      if (detail.company_snapshot) {
+        data.company_snapshots = (data.company_snapshots || []).filter((s) => s.ticker !== ticker).concat([detail.company_snapshot]);
+      }
+      if (detail.sector_rollup) {
+        const key = detail.sector_rollup.rollup_key;
+        const sector = detail.sector_rollup.sector;
+        data.sector_rollups = (data.sector_rollups || [])
+          .filter((s) => !(s.rollup_key === key && s.sector === sector))
+          .concat([detail.sector_rollup]);
+      }
+      state._companyCache[ticker] = { data: detail, fetchedAt: Date.now() };
+      render();
+    } catch (_) {
+      // Silently fail — data stays stale until next poll.
+    }
+  }
+
+  async function fetchSectionDetail(section) {
+    if (state._sectionLoaded[section] || state._sectionLoading[section]) return;
+    state._sectionLoading[section] = true;
+    try {
+      const response = await fetch(`/api/detail?section=${encodeURIComponent(section)}`);
+      if (!response.ok) return;
+      const detail = await response.json();
+      if (detail.inbox_rows) data.inbox_rows = detail.inbox_rows;
+      if (detail.digest_rows) data.digest_rows = detail.digest_rows;
+      if (detail.review_rows) data.review_rows = detail.review_rows;
+      if (detail.backlog_rows) data.backlog_rows = detail.backlog_rows;
+      if (detail.canary_rows) data.canary_rows = detail.canary_rows;
+      state._sectionLoaded[section] = true;
+      render();
+    } catch (_) {
+      // Silently fail.
+    } finally {
+      state._sectionLoading[section] = false;
+    }
   }
 
   function isSequenceActive() {
@@ -1082,8 +1178,18 @@
   function finishActiveJob(action, ok, returncode, durationMs, fallbackMessage) {
     state.activeJobId = null;
     state.activeJobStartedAt = null;
+    // Invalidate lazy caches so sections re-fetch after pipeline actions.
+    state._companyCache = {};
+    state._sectionLoaded = {};
     const sequenceActive = isSequenceActive();
     refreshSnapshot()
+      .then(() => {
+        fetchSectionDetail("inbox");
+        fetchSectionDetail("digest");
+        fetchSectionDetail("review");
+        fetchSectionDetail("ops");
+        if (state.selectedTicker) fetchCompanyDetail(state.selectedTicker);
+      })
       .catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       })
@@ -1176,6 +1282,12 @@
   });
 
   document.addEventListener("click", (event) => {
+    const viewTarget = event.target.closest("[data-view]");
+    if (viewTarget) {
+      switchView(viewTarget.dataset.view);
+      return;
+    }
+
     const starTarget = event.target.closest("[data-star-ticker]");
     if (starTarget) {
       event.stopPropagation();
@@ -1200,6 +1312,12 @@
     if (issuerTarget) {
       state.selectedTicker = issuerTarget.dataset.ticker || null;
       render();
+      if (state.selectedTicker) {
+        fetchCompanyDetail(state.selectedTicker);
+        if (state.activeView === "home" || state.activeView === "watchlist") {
+          switchView("company");
+        }
+      }
       return;
     }
 
@@ -1229,5 +1347,15 @@
   });
 
   startPolling();
+  switchView("home");
   render();
+
+  // Lazy-load detail sections after initial render so the page is interactive
+  // before heavy queries complete. The initial HTML render bootstraps issuers
+  // and KPIs; detail sections fill in asynchronously.
+  fetchSectionDetail("inbox");
+  fetchSectionDetail("digest");
+  fetchSectionDetail("review");
+  fetchSectionDetail("ops");
+  if (state.selectedTicker) fetchCompanyDetail(state.selectedTicker);
 })();

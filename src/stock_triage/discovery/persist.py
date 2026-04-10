@@ -30,6 +30,11 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
         listing_date = candidate.raw_metadata.get("listing_date")
         source_urls = json.dumps([candidate.raw_metadata.get("profile_url")] if candidate.raw_metadata.get("profile_url") else [])
         raw_metadata = json.dumps(candidate.raw_metadata, sort_keys=True)
+        # IDX company profiles include sector/subsector/industry in raw_metadata.
+        sector = candidate.raw_metadata.get("sector") or candidate.raw_metadata.get("sub_sector") or "unknown"
+        subsector = candidate.raw_metadata.get("sub_sector") or "unknown"
+        industry = candidate.raw_metadata.get("industry") or "unknown"
+        listing_board = candidate.raw_metadata.get("listing_board") or ""
 
         existing = conn.execute(
             "SELECT ticker FROM companies WHERE ticker = ?",
@@ -40,8 +45,9 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                 """
                 INSERT INTO companies (
                     ticker, issuer_name, listing_date, source_urls, raw_metadata,
+                    sector, subsector, industry, listing_board,
                     first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate.ticker,
@@ -49,6 +55,10 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     listing_date,
                     source_urls,
                     raw_metadata,
+                    sector,
+                    subsector,
+                    industry,
+                    listing_board,
                     now,
                     now,
                 ),
@@ -59,7 +69,11 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                 """
                 UPDATE companies
                 SET issuer_name = ?, listing_date = COALESCE(?, listing_date),
-                    source_urls = ?, raw_metadata = ?, last_seen_at = ?
+                    source_urls = ?, raw_metadata = ?, last_seen_at = ?,
+                    sector = CASE WHEN sector IN ('unknown', '') THEN ? ELSE sector END,
+                    subsector = CASE WHEN subsector IN ('unknown', '') THEN ? ELSE subsector END,
+                    industry = CASE WHEN industry IN ('unknown', '') THEN ? ELSE industry END,
+                    listing_board = CASE WHEN listing_board = '' THEN ? ELSE listing_board END
                 WHERE ticker = ?
                 """,
                 (
@@ -68,6 +82,10 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     source_urls,
                     raw_metadata,
                     now,
+                    sector,
+                    subsector,
+                    industry,
+                    listing_board,
                     candidate.ticker,
                 ),
             )

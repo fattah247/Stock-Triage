@@ -26,6 +26,7 @@ from ..intelligence.review import update_review_status
 from ..logging_setup import get_logger
 from .assets import read_static_asset
 from .pipeline import load_dashboard_snapshot, render_dashboard_html
+from .snapshot import load_company_detail, load_section_detail, load_snapshot_lite
 
 
 def _watchlist_path(cfg: Config) -> Path:
@@ -263,6 +264,30 @@ def _handler_factory():
                 return
             if parsed.path == "/api/snapshot":
                 self._write_json(HTTPStatus.OK, _snapshot_payload(self.server.cfg, self.server.action_history), emit_body=emit_body)
+                return
+            if parsed.path == "/api/snapshot/lite":
+                lite = load_snapshot_lite(self.server.cfg)
+                lite["watchlist"] = _load_watchlist(self.server.cfg)
+                lite["action_history"] = list(self.server.action_history)
+                self._write_json(HTTPStatus.OK, lite, emit_body=emit_body)
+                return
+            if parsed.path == "/api/company":
+                params = parse_qs(parsed.query)
+                ticker = params.get("ticker", [""])[0].strip()
+                if not ticker:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_ticker"}, emit_body=emit_body)
+                    return
+                detail = load_company_detail(self.server.cfg, ticker)
+                self._write_json(HTTPStatus.OK, detail, emit_body=emit_body)
+                return
+            if parsed.path == "/api/detail":
+                params = parse_qs(parsed.query)
+                section = params.get("section", [""])[0].strip()
+                if section not in {"inbox", "digest", "review", "ops"}:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_section"}, emit_body=emit_body)
+                    return
+                detail = load_section_detail(self.server.cfg, section)
+                self._write_json(HTTPStatus.OK, detail, emit_body=emit_body)
                 return
             if parsed.path == "/api/action/stream":
                 params = parse_qs(parsed.query)

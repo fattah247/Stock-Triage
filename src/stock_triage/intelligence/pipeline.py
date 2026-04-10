@@ -1283,14 +1283,24 @@ def _build_review_items(
     triggered_rules: list[TriggeredRule],
 ) -> list[ReviewQueueItem]:
     items: list[ReviewQueueItem] = []
+    # Deduplicate per ticker+rule_name so that only the latest trigger for a
+    # given rule survives across documents (e.g. annual reports from different
+    # years that fire the same rule). The ON CONFLICT upsert in _persist will
+    # update the existing row without resetting operator status.
+    seen_rules: set[str] = set()
     for rule in triggered_rules:
+        dedup_key = f"{ticker}:{rule.rule_name}"
+        if dedup_key in seen_rules:
+            continue
+        seen_rules.add(dedup_key)
+        source_key = _stable_id("review-src", "rule", ticker, rule.rule_name, DERIVED_VERSION)
         items.append(
             ReviewQueueItem(
-                review_item_id=_stable_id("review", "rule", rule.rule_run_id, DERIVED_VERSION),
+                review_item_id=_stable_id("review", "rule", source_key, DERIVED_VERSION),
                 item_type="rule_trigger",
                 ticker=ticker,
                 document_id=document_id,
-                source_key=rule.rule_run_id,
+                source_key=source_key,
                 priority=_priority_for_severity(rule.severity),
                 rationale=rule.rationale,
                 payload_json=json.dumps(
@@ -1304,17 +1314,23 @@ def _build_review_items(
                 ),
             )
         )
+    seen_events: set[str] = set()
     for event in events:
         severity = event.severity or "info"
         if severity not in {"warning", "critical"}:
             continue
+        dedup_key = f"{ticker}:{event.event_type}"
+        if dedup_key in seen_events:
+            continue
+        seen_events.add(dedup_key)
+        source_key = _stable_id("review-src", "event", ticker, event.event_type, DERIVED_VERSION)
         items.append(
             ReviewQueueItem(
-                review_item_id=_stable_id("review", "event", event.event_id, DERIVED_VERSION),
+                review_item_id=_stable_id("review", "event", source_key, DERIVED_VERSION),
                 item_type="event_signal",
                 ticker=ticker,
                 document_id=document_id,
-                source_key=event.event_id,
+                source_key=source_key,
                 priority=_priority_for_severity(severity),
                 rationale=event.rationale,
                 payload_json=json.dumps(
