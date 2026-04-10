@@ -2,6 +2,7 @@
   const bootstrap = window.__DASHBOARD_BOOTSTRAP__ || {};
   let data = bootstrap.payload || {
     issuers: [],
+    market_monitor: {},
     documents: [],
     metrics: [],
     findings: [],
@@ -48,6 +49,7 @@
   const issuerList = document.getElementById("issuerList");
   const companyOverview = document.getElementById("companyOverview");
   const companyStats = document.getElementById("companyStats");
+  const marketMonitor = document.getElementById("marketMonitor");
   const documentList = document.getElementById("documentList");
   const metricList = document.getElementById("metricList");
   const findingList = document.getElementById("findingList");
@@ -499,12 +501,125 @@
         }) || null
       : null;
     const inboxRows = (data.inbox_rows || []).slice(0, 20);
+    const marketData = data.market_monitor || {};
     const digestRows = data.digest_rows || [];
     const reviewRows = data.review_rows || [];
     const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
     renderSelectedIssuerCard(selectedIssuer, companySnapshot);
+
+    if (marketMonitor) {
+      const counts = marketData.counts || {};
+      const riskRows = marketData.highest_risk_changes || [];
+      const improvedRows = marketData.most_improved || [];
+      const sectorRows = marketData.sector_heatmap || [];
+      const lateRows = marketData.late_periodic_rows || [];
+      marketMonitor.innerHTML = `
+        <div class="statsGrid">
+          <div class="stat"><div class="summaryLabel">New disclosures today</div><strong>${esc(counts.new_disclosures_today || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Material-event filings</div><strong>${esc(counts.material_event_filings_today || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Potential late periodic</div><strong>${esc(counts.late_periodic_filings || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Auditor changes 7d</div><strong>${esc(counts.auditor_changes_7d || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Management changes 7d</div><strong>${esc(counts.management_changes_7d || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Debt restructurings 7d</div><strong>${esc(counts.debt_restructurings_7d || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Rights issues 7d</div><strong>${esc(counts.rights_issues_7d || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Legal / regulatory 7d</div><strong>${esc(counts.lawsuits_regulatory_7d || 0)}</strong></div>
+        </div>
+        <div class="docGroups">
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Highest-risk changes in the last 7 days</h3>
+                <div class="meta">Ranked from current decision state, review pressure, peer anomalies, and negative factors.</div>
+              </div>
+            </div>
+            ${
+              riskRows.length
+                ? `<div class="findingStack">${riskRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-${statusTag(item.overall_state)} ${item.ticker ? "clickableCard" : ""}" ${
+                          item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                        }>
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.decision_state || "Review manually")} · risk ${esc(item.risk_score)}</div>
+                          <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No reasons captured."}</div>
+                          <div class="meta">${renderTimestamp(item.as_of_date)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No ranked risk changes yet.</strong></div>`
+            }
+          </section>
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Most improved fundamentals</h3>
+                <div class="meta">Names with improving thesis state and the strongest positive factor mix.</div>
+              </div>
+            </div>
+            ${
+              improvedRows.length
+                ? `<div class="findingStack">${improvedRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-ok ${item.ticker ? "clickableCard" : ""}" ${
+                          item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                        }>
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.decision_state || "Watch")} · improvement ${esc(item.improvement_score)}</div>
+                          <div class="meta">${(item.positive_factors || []).map(esc).join(" · ") || "No positive factors captured."}</div>
+                          <div class="meta">${renderTimestamp(item.as_of_date)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No improving-fundamentals ranking yet.</strong></div>`
+            }
+          </section>
+        </div>
+        <div class="docGroups">
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Sector heatmap</h3>
+                <div class="meta">Disclosure intensity and warning density over the last 7 days.</div>
+              </div>
+            </div>
+            ${
+              sectorRows.length
+                ? `<table class="metricTable"><thead><tr><th>Sector</th><th>Disclosures</th><th>Material events</th><th>Warnings</th><th>Critical</th></tr></thead><tbody>${sectorRows
+                    .map(
+                      (item) =>
+                        `<tr><td>${esc(item.sector)}</td><td>${esc(item.disclosures_7d)}</td><td>${esc(item.material_events_7d)}</td><td>${esc(item.warning_signals_7d)}</td><td>${esc(item.critical_signals_7d)}</td></tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<div class="emptyState"><strong>No sector heatmap yet.</strong></div>`
+            }
+          </section>
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Potential late / missing periodic filings</h3>
+                <div class="meta">Heuristic based on the absence of a recent annual or periodic financial filing.</div>
+              </div>
+            </div>
+            ${
+              lateRows.length
+                ? `<table class="metricTable"><thead><tr><th>Ticker</th><th>Issuer</th><th>Latest periodic</th><th>Days since</th></tr></thead><tbody>${lateRows
+                    .map(
+                      (item) =>
+                        `<tr><td>${esc(item.ticker)}</td><td>${esc(item.issuer_name || "")}</td><td>${item.latest_periodic_at ? renderTimestamp(item.latest_periodic_at) : "Never"}</td><td>${esc(item.days_since_periodic ?? "—")}</td></tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<div class="emptyState"><strong>No potentially late periodic issuers right now.</strong></div>`
+            }
+          </section>
+        </div>
+      `;
+    }
 
     issuerList.innerHTML = issuers.length
       ? issuers
@@ -722,6 +837,7 @@
       if (companySnapshot) {
         const payload = companySnapshot.payload || {};
         const topCard = payload.top_card || {};
+        const decisionPanel = payload.decision_panel || {};
         const baseline = payload.baseline || {};
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
@@ -740,8 +856,11 @@
           </div>
           <div class="findingStack">
             <article class="findingCard sev-${statusTag(topCard.overall_state)}">
-              <div class="findingClaim">Why this company currently matters</div>
-              <div class="meta">${(topCard.reasons || []).map(esc).join(" · ") || "No top-card reasons were derived."}</div>
+              <div class="findingClaim">Current view</div>
+              <div class="meta"><strong>Status:</strong> ${esc(decisionPanel.stance || topCard.decision_state || "Watch")}</div>
+              <div class="meta"><strong>Why:</strong> ${(decisionPanel.why || topCard.reasons || []).map(esc).join(" · ") || "No top-card reasons were derived."}</div>
+              <div class="meta"><strong>What changed:</strong> ${(decisionPanel.what_changed || []).map(esc).join(" · ") || "No ranked delta bullets yet."}</div>
+              <div class="meta"><strong>What to watch next:</strong> ${(decisionPanel.what_to_watch || []).map(esc).join(" · ") || "No follow-up watch items yet."}</div>
               <div class="heroBar">
                 <span class="chip">Priority ${esc(topCard.watchlist_priority || "low")}</span>
                 <span class="chip">Thesis ${esc(topCard.thesis_state || "none")}</span>
@@ -753,6 +872,14 @@
               <div class="meta">Baseline: ${esc(baseline.kind || "none")} · ${esc(baseline.reason || "No prior baseline")}</div>
               <div class="meta">Positive factors: ${(topCard.positive_factors || []).map(esc).join(" · ") || "none"}</div>
               <div class="meta">Negative factors: ${(topCard.negative_factors || []).map(esc).join(" · ") || "none"}</div>
+              <div class="meta"><strong>Must improve:</strong> ${(decisionPanel.must_improve || []).map(esc).join(" · ") || "No explicit upgrade conditions captured."}</div>
+              <div class="meta"><strong>Thesis breakers:</strong> ${(decisionPanel.thesis_breakers || []).map(esc).join(" · ") || "No stop-rule thesis breakers configured."}</div>
+              <div class="meta"><strong>Next catalyst:</strong> ${esc(decisionPanel.next_catalyst?.label || "No catalyst estimate")} ${
+                decisionPanel.next_catalyst?.window_start
+                  ? `· ${esc(decisionPanel.next_catalyst.window_start)} to ${esc(decisionPanel.next_catalyst.window_end || "")}`
+                  : ""
+              }</div>
+              <div class="meta"><strong>Quality flags:</strong> ${(decisionPanel.quality_flags || []).map(esc).join(" · ") || "No explicit quality flags right now."}</div>
             </article>
           </div>
           ${
@@ -1034,6 +1161,7 @@
     }
     const lite = await response.json();
     data.issuers = lite.issuers || data.issuers;
+    data.market_monitor = lite.market_monitor || data.market_monitor;
     data.intelligence_kpis = lite.intelligence_kpis || data.intelligence_kpis;
     data.watchlist = lite.watchlist || data.watchlist;
     data.action_history = lite.action_history || data.action_history;
