@@ -29,5 +29,11 @@ data/quarantine/
 data/*.sqlite
 data/*.db
 
+# Local-only planning artifacts. Keep these out of the public repo by default.
+*.docx
+docs/stock_triage_prd_v*.md
+docs/stock_triage_prd_v*.html
+docs/stock_triage_prd_v*.pdf
+
 # OS
 .DS_Store
