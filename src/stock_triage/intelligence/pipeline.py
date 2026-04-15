@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..fiscal_year import resolve_fiscal_year_end_month
 from .thesis import (
     LocalThesisCondition,
     LocalThesisDefinition,
@@ -96,6 +97,7 @@ class CompanyProfile:
     listing_board: str | None
     active_status: str | None
     fiscal_year_end_month: int
+    fiscal_year_end_source: str
 
 
 @dataclass(frozen=True)
@@ -308,7 +310,7 @@ def run_intelligence(
             tickers = _select_tickers(reader, ticker=ticker, limit=limit)
             result = IntelligenceRunResult(selected_tickers=len(tickers))
             for ticker_value in tickers:
-                bundle = _build_bundle(reader, ticker_value)
+                bundle = _build_bundle(reader, cfg, ticker_value)
                 if bundle is None:
                     continue
                 counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
@@ -349,7 +351,7 @@ def rederive_intelligence(
             tickers = _select_snapshot_tickers(reader, ticker=ticker, limit=limit)
             result = IntelligenceRunResult(selected_tickers=len(tickers))
             for ticker_value in tickers:
-                bundle = _build_bundle(reader, ticker_value)
+                bundle = _build_bundle(reader, cfg, ticker_value)
                 if bundle is None:
                     continue
                 counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
@@ -408,8 +410,8 @@ def _select_snapshot_tickers(conn: sqlite3.Connection, *, ticker: str | None, li
     return [row["ticker"] for row in rows]
 
 
-def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceBundle | None:
-    profile = _load_company_profile(conn, ticker)
+def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> CompanyIntelligenceBundle | None:
+    profile = _load_company_profile(conn, cfg, ticker)
     if profile is None:
         return None
     documents = _load_company_documents(conn, ticker, limit=25)
@@ -494,8 +496,8 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         conflict_items + thesis_items + claim_items,
         review_statuses=persisted_review_statuses,
     )
-    peer_set, peer_view = _build_peer_set(conn, profile, current_company_state)
-    sector_rollup, sector_view = _build_sector_rollup(conn, profile, current_company_state)
+    peer_set, peer_view = _build_peer_set(conn, cfg, profile, current_company_state)
+    sector_rollup, sector_view = _build_sector_rollup(conn, cfg, profile, current_company_state)
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
@@ -557,7 +559,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
     )
 
 
-def _load_company_profile(conn: sqlite3.Connection, ticker: str) -> CompanyProfile | None:
+def _load_company_profile(conn: sqlite3.Connection, cfg: Config, ticker: str) -> CompanyProfile | None:
     row = conn.execute(
         """
         SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status, fiscal_year_end_month
@@ -569,6 +571,12 @@ def _load_company_profile(conn: sqlite3.Connection, ticker: str) -> CompanyProfi
     ).fetchone()
     if row is None:
         return None
+    fiscal_year_end_month, fiscal_year_end_source = resolve_fiscal_year_end_month(
+        conn,
+        cfg,
+        ticker=ticker,
+        stored_month=int(row["fiscal_year_end_month"] or 12),
+    )
     return CompanyProfile(
         ticker=row["ticker"],
         issuer_name=row["issuer_name"],
@@ -577,7 +585,8 @@ def _load_company_profile(conn: sqlite3.Connection, ticker: str) -> CompanyProfi
         industry=row["industry"],
         listing_board=row["listing_board"],
         active_status=row["active_status"],
-        fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
+        fiscal_year_end_month=fiscal_year_end_month,
+        fiscal_year_end_source=fiscal_year_end_source,
     )
 
 
@@ -1252,6 +1261,7 @@ def _build_snapshot_payload_json(
         "top_card": health,
         "decision_panel": decision_panel,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
+        "fiscal_year_end_source": profile.fiscal_year_end_source,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "segment_summary": _build_segment_summary(latest_metrics),
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
@@ -2395,10 +2405,11 @@ def _build_comparable_company_state(
 
 def _build_peer_set(
     conn: sqlite3.Connection,
+    cfg: Config,
     profile: CompanyProfile,
     current_state: ComparableCompanyState,
 ) -> tuple[PeerSetRecord, dict[str, Any]]:
-    candidate_profiles = _load_sector_profiles(conn, sector=profile.sector, exclude_ticker=profile.ticker)
+    candidate_profiles = _load_sector_profiles(conn, cfg, sector=profile.sector, exclude_ticker=profile.ticker)
     candidate_states: list[tuple[ComparableCompanyState, bool]] = []
     for candidate in candidate_profiles:
         state = _build_comparable_company_state(conn, profile=candidate)
@@ -2465,10 +2476,11 @@ def _build_peer_set(
 
 def _build_sector_rollup(
     conn: sqlite3.Connection,
+    cfg: Config,
     profile: CompanyProfile,
     current_state: ComparableCompanyState,
 ) -> tuple[SectorRollupRecord, dict[str, Any]]:
-    sector_profiles = _load_sector_profiles(conn, sector=profile.sector)
+    sector_profiles = _load_sector_profiles(conn, cfg, sector=profile.sector)
     states = [state for candidate in sector_profiles if (state := _build_comparable_company_state(conn, profile=candidate)) is not None]
     metric_summaries = {
         field_name: _summarize_metric_distribution(states, field_name)
@@ -2509,6 +2521,7 @@ def _build_sector_rollup(
 
 def _load_sector_profiles(
     conn: sqlite3.Connection,
+    cfg: Config,
     *,
     sector: str | None,
     exclude_ticker: str | None = None,
@@ -2532,19 +2545,28 @@ def _load_sector_profiles(
         """,
         tuple(params),
     ).fetchall()
-    return [
-        CompanyProfile(
+    profiles: list[CompanyProfile] = []
+    for row in rows:
+        fiscal_year_end_month, fiscal_year_end_source = resolve_fiscal_year_end_month(
+            conn,
+            cfg,
             ticker=row["ticker"],
-            issuer_name=row["issuer_name"],
-            sector=row["sector"],
-            subsector=row["subsector"],
-            industry=row["industry"],
-            listing_board=row["listing_board"],
-            active_status=row["active_status"],
-            fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
+            stored_month=int(row["fiscal_year_end_month"] or 12),
         )
-        for row in rows
-    ]
+        profiles.append(
+            CompanyProfile(
+                ticker=row["ticker"],
+                issuer_name=row["issuer_name"],
+                sector=row["sector"],
+                subsector=row["subsector"],
+                industry=row["industry"],
+                listing_board=row["listing_board"],
+                active_status=row["active_status"],
+                fiscal_year_end_month=fiscal_year_end_month,
+                fiscal_year_end_source=fiscal_year_end_source,
+            )
+        )
+    return profiles
 
 
 def _load_review_status_map(conn: sqlite3.Connection, *, ticker: str) -> dict[str, str]:

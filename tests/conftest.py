@@ -43,6 +43,9 @@ def tmp_config(tmp_path: Path):
         "theses": {
             "definition_path": str(tmp_path / "data" / "theses.yaml"),
         },
+        "company_overrides": {
+            "definition_path": str(tmp_path / "data" / "company_overrides.yaml"),
+        },
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(raw))

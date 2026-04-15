@@ -7,6 +7,7 @@ import json
 from datetime import date
 
 from ..config import load_config
+from ..fiscal_year import save_fiscal_year_override
 from ..intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
 from ..intelligence.review import (
     load_intelligence_kpis,
@@ -154,6 +155,27 @@ def cmd_intelligence_rederive(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fiscal_year_override(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    overrides = save_fiscal_year_override(
+        cfg.company_overrides.definition_path,
+        ticker=args.ticker,
+        month=None if args.clear else args.month,
+    )
+    ticker = args.ticker.upper()
+    month = overrides.get(ticker)
+    print(
+        "fiscal-year-override: "
+        f"ticker={ticker} "
+        f"month={month if month is not None else '-'} "
+        f"path={cfg.company_overrides.definition_path}"
+    )
+    return 0
+
+
 def register(sub) -> None:
     p_intelligence = sub.add_parser(
         "intelligence-run",
@@ -191,3 +213,13 @@ def register(sub) -> None:
 
     p_intelligence_kpis = sub.add_parser("intelligence-kpis", help="Show v3 derived-layer KPI counts")
     p_intelligence_kpis.set_defaults(func=cmd_intelligence_kpis)
+
+    p_fye = sub.add_parser(
+        "fiscal-year-override",
+        help="Set or clear a local fiscal year end month override for one ticker",
+    )
+    p_fye.add_argument("ticker", help="Ticker to override")
+    p_fye_group = p_fye.add_mutually_exclusive_group(required=True)
+    p_fye_group.add_argument("--month", type=int, help="Fiscal year end month (1-12)")
+    p_fye_group.add_argument("--clear", action="store_true", help="Remove the local override")
+    p_fye.set_defaults(func=cmd_fiscal_year_override)

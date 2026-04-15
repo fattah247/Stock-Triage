@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from ..canary import load_canary_status
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
 from ..intelligence.review import load_intelligence_kpis, load_latest_digests, load_review_queue
 
@@ -49,7 +50,7 @@ def load_dashboard_snapshot(
         configure_pragmas(conn, cfg)
         snapshot = DashboardSnapshot(
             issuers=_load_issuers(conn),
-            market_monitor=_load_market_monitor(conn),
+            market_monitor=_load_market_monitor(conn, cfg),
             source_sync_rows=_load_source_sync_rows(conn),
             documents=_load_latest_documents(conn, limit=document_limit),
             metrics=_load_metric_snapshot(conn),
@@ -102,7 +103,7 @@ def load_snapshot_lite(cfg: Config) -> dict[str, object]:
     try:
         configure_pragmas(conn, cfg)
         issuers = _load_issuers(conn)
-        market_monitor = _load_market_monitor(conn)
+        market_monitor = _load_market_monitor(conn, cfg)
         source_sync_rows = _load_source_sync_rows(conn)
     finally:
         conn.close()
@@ -251,7 +252,7 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
     return [dict(row) for row in rows]
 
 
-def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
+def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     week_start = now - timedelta(days=7)
     source_syncs = {row["source_name"]: row for row in _load_source_sync_rows(conn)}
@@ -333,7 +334,12 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
             else None
         )
         deadline = _most_recent_periodic_deadline(
-            fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
+            fiscal_year_end_month=resolve_fiscal_year_end_month(
+                conn,
+                cfg,
+                ticker=row["ticker"],
+                stored_month=int(row["fiscal_year_end_month"] or 12),
+            )[0],
             now=now.date(),
             latest_financial_period_end=latest_financial_period_end,
             latest_annual_report_period_end=latest_annual_report_period_end,

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
+from stock_triage.fiscal_year import save_fiscal_year_override
 from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
 from stock_triage.intelligence.pipeline import _derive_stance, _next_expected_filing_window
 
@@ -230,6 +231,74 @@ def test_rederive_intelligence_rebuilds_existing_snapshot_tickers(tmp_config):
     assert result.selected_tickers == 1
     assert result.snapshots == 1
     assert result.briefs == 1
+
+
+def test_run_intelligence_prefers_local_fiscal_year_override(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    save_fiscal_year_override(tmp_config.company_overrides.definition_path, ticker="TAMU", month=6)
+
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        snapshot = rconn.execute(
+            """
+            SELECT payload_json
+            FROM company_snapshots
+            WHERE ticker = ? AND snapshot_kind = 'current' AND derived_version = ?
+            """,
+            ("TAMU", DERIVED_VERSION),
+        ).fetchone()
+        payload = json.loads(snapshot["payload_json"])
+        assert payload["fiscal_year_end_month"] == 6
+        assert payload["fiscal_year_end_source"] == "override"
+    finally:
+        rconn.close()
+
+
+def test_run_intelligence_infers_non_december_fiscal_year_end(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+
+    with WriterQueue(tmp_config) as wq:
+        def _update(conn):
+            conn.execute(
+                """
+                UPDATE companies
+                SET fiscal_year_end_month = 12
+                WHERE ticker = 'TAMU'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE metric_items
+                SET period_end_date = '2024-06-30'
+                WHERE ticker = 'TAMU' AND fiscal_period = 'Annual'
+                """
+            )
+
+        wq.submit(_update)
+
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        snapshot = rconn.execute(
+            """
+            SELECT payload_json
+            FROM company_snapshots
+            WHERE ticker = ? AND snapshot_kind = 'current' AND derived_version = ?
+            """,
+            ("TAMU", DERIVED_VERSION),
+        ).fetchone()
+        payload = json.loads(snapshot["payload_json"])
+        assert payload["fiscal_year_end_month"] == 6
+        assert payload["fiscal_year_end_source"] == "inferred"
+    finally:
+        rconn.close()
 
 
 def test_stance_mapping_table_rows():

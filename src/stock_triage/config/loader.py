@@ -131,6 +131,16 @@ class ThesesConfig(BaseModel):
         return p if p.is_absolute() else (REPO_ROOT / p)
 
 
+class CompanyOverridesConfig(BaseModel):
+    definition_path: Path = REPO_ROOT / "data" / "company_overrides.yaml"
+
+    @field_validator("definition_path", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
 class Config(BaseModel):
     paths: PathsConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -144,6 +154,7 @@ class Config(BaseModel):
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
     theses: ThesesConfig = Field(default_factory=ThesesConfig)
+    company_overrides: CompanyOverridesConfig = Field(default_factory=CompanyOverridesConfig)
 
     def ensure_dirs(self) -> None:
         for p in (
@@ -157,6 +168,7 @@ class Config(BaseModel):
             self.dashboard.output_dir,
             self.alerts.jsonl_path.parent,
             self.theses.definition_path.parent,
+            self.company_overrides.definition_path.parent,
         ):
             p.mkdir(parents=True, exist_ok=True)
 

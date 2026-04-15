@@ -22,6 +22,8 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from ..config import Config
+from ..fiscal_year import load_fiscal_year_overrides, save_fiscal_year_override
+from ..intelligence import rederive_intelligence
 from ..intelligence.review import update_review_status
 from ..logging_setup import get_logger
 from .assets import read_static_asset
@@ -341,6 +343,16 @@ def _handler_factory():
                 tickers = _load_watchlist(self.server.cfg)
                 self._write_json(HTTPStatus.OK, {"tickers": tickers}, emit_body=emit_body)
                 return
+            if parsed.path == "/api/company-override":
+                params = parse_qs(parsed.query)
+                ticker = params.get("ticker", [""])[0].strip().upper()
+                overrides = load_fiscal_year_overrides(self.server.cfg.company_overrides.definition_path)
+                self._write_json(
+                    HTTPStatus.OK,
+                    {"ticker": ticker, "month": overrides.get(ticker), "overrides": overrides},
+                    emit_body=emit_body,
+                )
+                return
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"}, emit_body=emit_body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib interface
@@ -350,6 +362,9 @@ def _handler_factory():
                 return
             if parsed.path == "/api/watchlist":
                 self._handle_watchlist_update()
+                return
+            if parsed.path == "/api/company-override":
+                self._handle_company_override_update()
                 return
             if parsed.path != "/api/action":
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -427,6 +442,39 @@ def _handler_factory():
                 current_set.add(ticker)
             updated = _save_watchlist(self.server.cfg, list(current_set))
             self._write_json(HTTPStatus.OK, {"tickers": updated, "ticker": ticker, "action": action or "add"})
+
+        def _handle_company_override_update(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            params = {key: values[-1] for key, values in parse_qs(body.decode("utf-8")).items()}
+            ticker = params.get("ticker", "").strip().upper()
+            if not ticker:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_ticker"})
+                return
+            clear = params.get("clear", "").strip().lower() in {"1", "true", "yes"}
+            month_text = params.get("month", "").strip()
+            try:
+                month = None if clear else int(month_text)
+            except ValueError:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_month"})
+                return
+            try:
+                overrides = save_fiscal_year_override(
+                    self.server.cfg.company_overrides.definition_path,
+                    ticker=ticker,
+                    month=month,
+                )
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            rederive_intelligence(self.server.cfg, ticker=ticker, limit=1)
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ticker": ticker,
+                    "month": overrides.get(ticker),
+                    "source": "override" if ticker in overrides else "default",
+                },
+            )
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
             get_logger("stock_triage.dashboard").info(

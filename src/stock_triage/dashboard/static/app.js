@@ -42,6 +42,7 @@
   const snapshotEndpoint = bootstrap.snapshotEndpoint || null;
   const artifactEndpoint = bootstrap.artifactEndpoint || null;
   const reviewEndpoint = "/api/review";
+  const companyOverrideEndpoint = "/api/company-override";
 
   const search = document.getElementById("issuerSearch");
   const viewEyebrow = document.getElementById("viewEyebrow");
@@ -172,6 +173,15 @@
   function renderTimestamp(value) {
     if (!value) return "";
     return `<span class="timeLabel" title="${esc(absoluteTime(value))}">${esc(relativeTime(value))}</span>`;
+  }
+
+  function monthLabel(month) {
+    const names = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const idx = Number(month) - 1;
+    return Number.isInteger(idx) && idx >= 0 && idx < names.length ? names[idx] : String(month || "12");
   }
 
   function updateHighlights(previous, next) {
@@ -871,7 +881,7 @@
       const decisionPanel = payload.decision_panel || {};
       const latestFiling = docs[0] || null;
 
-      companyOverview.innerHTML = `
+        companyOverview.innerHTML = `
         <div class="sectionEyebrow">Selected Company</div>
         <h2 class="focusTitle">${esc(selectedIssuer.issuer_name)}</h2>
         <div class="focusSubtitle">${esc(selectedIssuer.ticker)} is the active focus. Start with the current stance, then verify it against filings and evidence below.</div>
@@ -892,7 +902,20 @@
           <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
           <span class="chip">Last seen ${renderTimestamp(selectedIssuer.last_seen_at || "")}</span>
           <span class="chip">Latest filing ${renderTimestamp(selectedIssuer.latest_document_at || "")}</span>
+          ${companySnapshot ? `<span class="chip">FY end ${esc(monthLabel(payload.fiscal_year_end_month || 12))} · ${esc(payload.fiscal_year_end_source || "default")}</span>` : ""}
         </div>
+        ${
+          companySnapshot
+            ? `<div class="heroBar">
+                <label class="meta" for="fyeOverrideMonth">Fiscal year override</label>
+                <select id="fyeOverrideMonth">${Array.from({ length: 12 }, (_, i) => i + 1)
+                  .map((month) => `<option value="${month}" ${Number(payload.fiscal_year_end_month || 12) === month ? "selected" : ""}>${monthLabel(month)}</option>`)
+                  .join("")}</select>
+                <button class="chip" type="button" data-fye-save="1">Save FY override</button>
+                <button class="chip" type="button" data-fye-clear="1">Clear override</button>
+              </div>`
+            : ""
+        }
       `;
       companyStats.innerHTML = `
         <div class="stat"><div class="summaryLabel">Documents</div><strong>${docs.length}</strong></div>
@@ -1640,6 +1663,40 @@
       runAction(target.dataset.inlineAction, { document_id: documentId }).catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       });
+      return;
+    }
+
+    const saveOverrideTarget = event.target.closest("[data-fye-save]");
+    if (saveOverrideTarget && state.selectedTicker) {
+      const select = document.getElementById("fyeOverrideMonth");
+      const month = select ? select.value : "";
+      fetch(companyOverrideEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: `ticker=${encodeURIComponent(state.selectedTicker)}&month=${encodeURIComponent(month)}`,
+      })
+        .then((r) => r.json())
+        .then(() => Promise.all([refreshSnapshot(), fetchCompanyDetail(state.selectedTicker)]))
+        .then(() => render())
+        .catch((error) => {
+          if (actionStatus) actionStatus.textContent = error.message;
+        });
+      return;
+    }
+
+    const clearOverrideTarget = event.target.closest("[data-fye-clear]");
+    if (clearOverrideTarget && state.selectedTicker) {
+      fetch(companyOverrideEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: `ticker=${encodeURIComponent(state.selectedTicker)}&clear=1`,
+      })
+        .then((r) => r.json())
+        .then(() => Promise.all([refreshSnapshot(), fetchCompanyDetail(state.selectedTicker)]))
+        .then(() => render())
+        .catch((error) => {
+          if (actionStatus) actionStatus.textContent = error.message;
+        });
       return;
     }
 

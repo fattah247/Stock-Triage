@@ -26,6 +26,7 @@ data/browser/
 data/dashboard/
 data/recon/
 data/quarantine/
+data/company_overrides.yaml
 data/*.sqlite
 data/*.db
 

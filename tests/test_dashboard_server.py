@@ -312,6 +312,51 @@ def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
         thread.join(timeout=5)
 
 
+def test_dashboard_server_updates_company_fiscal_year_override(tmp_config) -> None:
+    from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
+    from stock_triage.intelligence import run_intelligence
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"{handle.url}/api/company-override",
+            data=urlencode({"ticker": "TAMU", "month": "6"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        payload = json.loads(urlopen(request).read().decode("utf-8"))
+        assert payload == {"ticker": "TAMU", "month": 6, "source": "override"}
+
+        company = json.loads(urlopen(f"{handle.url}/api/company?ticker=TAMU").read().decode("utf-8"))
+        snapshot_payload = company["company_snapshot"]["payload"]
+        assert snapshot_payload["fiscal_year_end_month"] == 6
+        assert snapshot_payload["fiscal_year_end_source"] == "override"
+
+        override_get = json.loads(urlopen(f"{handle.url}/api/company-override?ticker=TAMU").read().decode("utf-8"))
+        assert override_get["ticker"] == "TAMU"
+        assert override_get["month"] == 6
+        assert override_get["overrides"]["TAMU"] == 6
+
+        clear_request = Request(
+            f"{handle.url}/api/company-override",
+            data=urlencode({"ticker": "TAMU", "clear": "1"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        clear_payload = json.loads(urlopen(clear_request).read().decode("utf-8"))
+        assert clear_payload == {"ticker": "TAMU", "month": None, "source": "default"}
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> None:
     monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
     seen = {}

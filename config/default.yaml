@@ -70,3 +70,6 @@ canary:
 
 theses:
   definition_path: "data/theses.yaml"
+
+company_overrides:
+  definition_path: "data/company_overrides.yaml"
