@@ -15,7 +15,9 @@
     intelligence_kpis: {},
     backlog_rows: [],
     canary_rows: [],
+    source_sync_rows: [],
     action_history: [],
+    watchlist: [],
   };
 
   const state = {
@@ -60,8 +62,10 @@
   const digestList = document.getElementById("digestList");
   const reviewList = document.getElementById("reviewList");
   const kpiList = document.getElementById("kpiList");
+  const watchlistGrid = document.getElementById("watchlistGrid");
   const backlogList = document.getElementById("backlogList");
   const canaryList = document.getElementById("canaryList");
+  const syncStatusList = document.getElementById("syncStatusList");
   const inboxList = document.getElementById("inboxList");
   const actionStatus = document.getElementById("actionStatus");
   const actionOutput = document.getElementById("actionOutput");
@@ -223,9 +227,9 @@
 
   function statusTag(value) {
     const level = String(value || "").toLowerCase();
-    if (["critical", "broken", "failed", "high"].includes(level)) return "critical";
-    if (["warning", "review_required", "weakening", "open", "snoozed", "medium"].includes(level)) return "warning";
-    if (["improving", "ok", "resolved", "stable", "intact", "low"].includes(level)) return "ok";
+    if (["critical", "broken", "failed", "high", "avoid"].includes(level)) return "critical";
+    if (["warning", "review_required", "weakening", "open", "snoozed", "medium", "review manually", "watch"].includes(level)) return "warning";
+    if (["improving", "ok", "resolved", "stable", "holding", "low", "buy"].includes(level)) return "ok";
     return "info";
   }
 
@@ -502,11 +506,35 @@
       : null;
     const inboxRows = (data.inbox_rows || []).slice(0, 20);
     const marketData = data.market_monitor || {};
+    const sourceSyncRows = data.source_sync_rows || marketData.source_syncs || [];
     const digestRows = data.digest_rows || [];
     const reviewRows = data.review_rows || [];
     const intelligenceKpis = data.intelligence_kpis || {};
     const backlogRows = data.backlog_rows || [];
     const canaryRows = data.canary_rows || [];
+    const watchlistCards = (data.company_snapshots || [])
+      .filter((item) => watchlist.has(String(item.ticker || "").toUpperCase()))
+      .map((item) => {
+        const payload = item.payload || {};
+        const topCard = payload.top_card || {};
+        const reviewCount = reviewRows.filter((row) => row.ticker === item.ticker).length;
+        const urgencyScore =
+          (topCard.decision_state === "Review manually" ? 100 : 0)
+          + (topCard.decision_state === "Avoid" ? 120 : 0)
+          + (topCard.decision_state === "Watch" ? 40 : 0)
+          + (reviewCount * 10)
+          + ((payload.top_card?.negative_factors || []).length * 5);
+        return {
+          ticker: item.ticker,
+          issuer_name: payload.issuer_name || item.ticker,
+          decision_state: topCard.decision_state || "Watch",
+          review_count: reviewCount,
+          why: (payload.decision_panel?.why || topCard.reasons || []).slice(0, 3),
+          urgencyScore,
+          updated_at: item.updated_at || item.as_of_date,
+        };
+      })
+      .sort((a, b) => (b.urgencyScore - a.urgencyScore) || String(a.ticker).localeCompare(String(b.ticker)));
     renderSelectedIssuerCard(selectedIssuer, companySnapshot);
 
     if (marketMonitor) {
@@ -515,10 +543,16 @@
       const improvedRows = marketData.most_improved || [];
       const sectorRows = marketData.sector_heatmap || [];
       const lateRows = marketData.late_periodic_rows || [];
+      const staleWarning = marketData.staleness_warning;
       marketMonitor.innerHTML = `
+        ${
+          staleWarning
+            ? `<div class="findingCard sev-warning"><div class="findingClaim">Discovery data is stale</div><div class="meta">At least one source has not synced in the last 24 hours. Market monitor counts may be incomplete until discovery runs again.</div></div>`
+            : ""
+        }
         <div class="statsGrid">
-          <div class="stat"><div class="summaryLabel">New disclosures today</div><strong>${esc(counts.new_disclosures_today || 0)}</strong></div>
-          <div class="stat"><div class="summaryLabel">Material-event filings</div><strong>${esc(counts.material_event_filings_today || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">New since last sync</div><strong>${esc(counts.new_disclosures_since_sync || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Material events since sync</div><strong>${esc(counts.material_event_filings_since_sync || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Potential late periodic</div><strong>${esc(counts.late_periodic_filings || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Auditor changes 7d</div><strong>${esc(counts.auditor_changes_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Management changes 7d</div><strong>${esc(counts.management_changes_7d || 0)}</strong></div>
@@ -590,10 +624,10 @@
             </div>
             ${
               sectorRows.length
-                ? `<table class="metricTable"><thead><tr><th>Sector</th><th>Disclosures</th><th>Material events</th><th>Warnings</th><th>Critical</th></tr></thead><tbody>${sectorRows
+                ? `<table class="metricTable"><thead><tr><th>Sector</th><th>Signal count</th><th>Disclosures</th><th>Material events</th><th>Warnings</th><th>Critical</th></tr></thead><tbody>${sectorRows
                     .map(
                       (item) =>
-                        `<tr><td>${esc(item.sector)}</td><td>${esc(item.disclosures_7d)}</td><td>${esc(item.material_events_7d)}</td><td>${esc(item.warning_signals_7d)}</td><td>${esc(item.critical_signals_7d)}</td></tr>`
+                        `<tr><td>${esc(item.sector)}</td><td>${esc(item.signal_count_7d || 0)}</td><td>${esc(item.disclosures_7d)}</td><td>${esc(item.material_events_7d)}</td><td>${esc(item.warning_signals_7d)}</td><td>${esc(item.critical_signals_7d)}</td></tr>`
                     )
                     .join("")}</tbody></table>`
                 : `<div class="emptyState"><strong>No sector heatmap yet.</strong></div>`
@@ -608,10 +642,10 @@
             </div>
             ${
               lateRows.length
-                ? `<table class="metricTable"><thead><tr><th>Ticker</th><th>Issuer</th><th>Latest periodic</th><th>Days since</th></tr></thead><tbody>${lateRows
+                ? `<table class="metricTable"><thead><tr><th>Ticker</th><th>Issuer</th><th>Expected</th><th>Due date</th><th>Latest periodic</th></tr></thead><tbody>${lateRows
                     .map(
                       (item) =>
-                        `<tr><td>${esc(item.ticker)}</td><td>${esc(item.issuer_name || "")}</td><td>${item.latest_periodic_at ? renderTimestamp(item.latest_periodic_at) : "Never"}</td><td>${esc(item.days_since_periodic ?? "—")}</td></tr>`
+                        `<tr><td>${esc(item.ticker)}</td><td>${esc(item.issuer_name || "")}</td><td>${esc(item.expected_label || "Periodic filing")}</td><td>${esc(item.expected_due_date || "—")}</td><td>${item.latest_periodic_at ? renderTimestamp(item.latest_periodic_at) : "Never"}</td></tr>`
                     )
                     .join("")}</tbody></table>`
                 : `<div class="emptyState"><strong>No potentially late periodic issuers right now.</strong></div>`
@@ -733,6 +767,23 @@
       `;
     }
 
+    if (watchlistGrid) {
+      watchlistGrid.innerHTML = watchlistCards.length
+        ? `<div class="findingStack">${watchlistCards
+            .map(
+              (item) => `
+                <article class="findingCard sev-${statusTag(item.decision_state)} clickableCard" data-focus-ticker="${esc(item.ticker)}">
+                  <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                  <div class="meta">${esc(item.decision_state)} · open reviews ${esc(item.review_count)}</div>
+                  <div class="meta">${(item.why || []).map(esc).join(" · ") || "No ranked reasons yet."}</div>
+                  <div class="meta">${renderTimestamp(item.updated_at)}</div>
+                </article>
+              `
+            )
+            .join("")}</div>`
+        : `<div class="emptyState"><strong>No watchlist issuers yet.</strong> Star companies in the left rail to make this view useful.</div>`;
+    }
+
     if (digestList) {
       const latestDigest = digestRows[0] || null;
       const cards = latestDigest?.payload?.company_cards || [];
@@ -815,13 +866,28 @@
       const analyzedCount = docs.filter((item) => item.process_state === "analyzed").length;
       const failedCount = docs.filter((item) => item.process_state === "failed").length;
       const groupedDocs = groupBy(docs, (item) => item.source_name || "unknown");
+      const payload = companySnapshot?.payload || {};
+      const topCard = payload.top_card || {};
+      const decisionPanel = payload.decision_panel || {};
+      const latestFiling = docs[0] || null;
 
       companyOverview.innerHTML = `
         <div class="sectionEyebrow">Selected Company</div>
         <h2 class="focusTitle">${esc(selectedIssuer.issuer_name)}</h2>
-        <div class="focusSubtitle">${esc(
-          selectedIssuer.ticker
-        )} is the active focus. Documents are grouped below by source so you can move from recent inbox activity into a single issuer without re-scanning the rest of the market.</div>
+        <div class="focusSubtitle">${esc(selectedIssuer.ticker)} is the active focus. Start with the current stance, then verify it against filings and evidence below.</div>
+        ${
+          companySnapshot
+            ? `<div class="findingStack">
+                <article class="findingCard sev-${statusTag(topCard.overall_state)}">
+                  <div class="findingClaim">Current view</div>
+                  <div class="meta"><strong>Status:</strong> ${esc(decisionPanel.stance || topCard.decision_state || "Watch")} · confidence ${esc(decisionPanel.confidence || topCard.stance_confidence || topCard.confidence || "low")}</div>
+                  <div class="meta"><strong>Why:</strong> ${(decisionPanel.why || topCard.reasons || []).map(esc).join(" · ") || "No top-card reasons were derived."}</div>
+                  <div class="meta"><strong>What changed:</strong> ${(decisionPanel.what_changed || []).map(esc).join(" · ") || "No ranked delta bullets yet."}</div>
+                  <div class="meta"><strong>What to watch next:</strong> ${(decisionPanel.what_to_watch || []).map(esc).join(" · ") || "No follow-up watch items yet."}</div>
+                </article>
+              </div>`
+            : ""
+        }
         <div class="heroBar">
           <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
           <span class="chip">Last seen ${renderTimestamp(selectedIssuer.last_seen_at || "")}</span>
@@ -833,11 +899,10 @@
         <div class="stat"><div class="summaryLabel">Findings</div><strong>${findings.length}</strong></div>
         <div class="stat"><div class="summaryLabel">Analyzed</div><strong>${analyzedCount}</strong></div>
         <div class="stat"><div class="summaryLabel">Failed</div><strong>${failedCount}</strong></div>
+        <div class="stat"><div class="summaryLabel">Latest filing type</div><strong>${esc(latestFiling?.document_type || payload.latest_document?.document_type || "unknown")}</strong></div>
+        <div class="stat"><div class="summaryLabel">Priority</div><strong>${esc(topCard.watchlist_priority || "low")}</strong></div>
       `;
       if (companySnapshot) {
-        const payload = companySnapshot.payload || {};
-        const topCard = payload.top_card || {};
-        const decisionPanel = payload.decision_panel || {};
         const baseline = payload.baseline || {};
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
@@ -855,21 +920,10 @@
             <div class="stat"><div class="summaryLabel">As Of</div><strong>${renderTimestamp(companySnapshot.as_of_date || companySnapshot.updated_at)}</strong></div>
           </div>
           <div class="findingStack">
-            <article class="findingCard sev-${statusTag(topCard.overall_state)}">
-              <div class="findingClaim">Current view</div>
-              <div class="meta"><strong>Status:</strong> ${esc(decisionPanel.stance || topCard.decision_state || "Watch")}</div>
-              <div class="meta"><strong>Why:</strong> ${(decisionPanel.why || topCard.reasons || []).map(esc).join(" · ") || "No top-card reasons were derived."}</div>
-              <div class="meta"><strong>What changed:</strong> ${(decisionPanel.what_changed || []).map(esc).join(" · ") || "No ranked delta bullets yet."}</div>
-              <div class="meta"><strong>What to watch next:</strong> ${(decisionPanel.what_to_watch || []).map(esc).join(" · ") || "No follow-up watch items yet."}</div>
-              <div class="heroBar">
-                <span class="chip">Priority ${esc(topCard.watchlist_priority || "low")}</span>
-                <span class="chip">Thesis ${esc(topCard.thesis_state || "none")}</span>
-                <span class="chip">Credibility ${esc(topCard.management_credibility || "unknown")}</span>
-              </div>
-            </article>
             <article class="findingCard">
               <div class="findingClaim">Baseline and review context</div>
               <div class="meta">Baseline: ${esc(baseline.kind || "none")} · ${esc(baseline.reason || "No prior baseline")}</div>
+              <div class="meta"><strong>Stance confidence:</strong> ${esc(decisionPanel.confidence || topCard.stance_confidence || topCard.confidence || "low")} · data completeness ${esc(topCard.data_completeness_pct ?? "—")}%</div>
               <div class="meta">Positive factors: ${(topCard.positive_factors || []).map(esc).join(" · ") || "none"}</div>
               <div class="meta">Negative factors: ${(topCard.negative_factors || []).map(esc).join(" · ") || "none"}</div>
               <div class="meta"><strong>Must improve:</strong> ${(decisionPanel.must_improve || []).map(esc).join(" · ") || "No explicit upgrade conditions captured."}</div>
@@ -1129,6 +1183,17 @@
         : `<div class="emptyState"><strong>No findings yet.</strong> Run rules or summary generation after parsing and extraction to surface issuer-level signals here.</div>`;
     }
 
+    if (syncStatusList) {
+      syncStatusList.innerHTML = sourceSyncRows.length
+        ? `<table class="systemTable"><thead><tr><th>Source</th><th>Class</th><th>Last sync</th><th>Status</th></tr></thead><tbody>${sourceSyncRows
+            .map(
+              (item) =>
+                `<tr><td>${esc(item.source_name)}</td><td>${esc(item.source_class || "-")}</td><td>${renderTimestamp(item.updated_at)}</td><td><span class="statusPill sev-${item.stale ? "warning" : "ok"}">${item.stale ? "stale" : "fresh"}</span></td></tr>`
+            )
+            .join("")}</tbody></table>`
+        : `<div class="emptyState"><strong>No discovery sync records yet.</strong> Run discovery to populate source freshness.</div>`;
+    }
+
     backlogList.innerHTML = backlogRows.length
       ? `<table class="systemTable"><thead><tr><th>Source</th><th>Discovered</th><th>Downloaded</th><th>Parsed</th><th>Extracted</th><th>Analyzed</th><th>Failed</th></tr></thead><tbody>${backlogRows
           .map(
@@ -1162,6 +1227,7 @@
     const lite = await response.json();
     data.issuers = lite.issuers || data.issuers;
     data.market_monitor = lite.market_monitor || data.market_monitor;
+    data.source_sync_rows = lite.source_sync_rows || data.source_sync_rows;
     data.intelligence_kpis = lite.intelligence_kpis || data.intelligence_kpis;
     data.watchlist = lite.watchlist || data.watchlist;
     data.action_history = lite.action_history || data.action_history;
@@ -1212,6 +1278,7 @@
       if (detail.review_rows) data.review_rows = detail.review_rows;
       if (detail.backlog_rows) data.backlog_rows = detail.backlog_rows;
       if (detail.canary_rows) data.canary_rows = detail.canary_rows;
+      if (detail.source_sync_rows) data.source_sync_rows = detail.source_sync_rows;
       state._sectionLoaded[section] = true;
       render();
     } catch (_) {

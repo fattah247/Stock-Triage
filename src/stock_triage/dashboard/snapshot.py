@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from ..canary import load_canary_status
 from ..config import Config
@@ -18,6 +18,7 @@ from ..intelligence.review import load_intelligence_kpis, load_latest_digests, l
 class DashboardSnapshot:
     issuers: list[dict[str, object]]
     market_monitor: dict[str, object]
+    source_sync_rows: list[dict[str, object]]
     documents: list[dict[str, object]]
     metrics: list[dict[str, object]]
     findings: list[dict[str, object]]
@@ -49,6 +50,7 @@ def load_dashboard_snapshot(
         snapshot = DashboardSnapshot(
             issuers=_load_issuers(conn),
             market_monitor=_load_market_monitor(conn),
+            source_sync_rows=_load_source_sync_rows(conn),
             documents=_load_latest_documents(conn, limit=document_limit),
             metrics=_load_metric_snapshot(conn),
             findings=_load_findings(conn, limit=finding_limit),
@@ -73,6 +75,7 @@ def load_dashboard_snapshot(
     return DashboardSnapshot(
         issuers=snapshot.issuers,
         market_monitor=snapshot.market_monitor,
+        source_sync_rows=snapshot.source_sync_rows,
         documents=snapshot.documents,
         metrics=snapshot.metrics,
         findings=snapshot.findings,
@@ -100,6 +103,7 @@ def load_snapshot_lite(cfg: Config) -> dict[str, object]:
         configure_pragmas(conn, cfg)
         issuers = _load_issuers(conn)
         market_monitor = _load_market_monitor(conn)
+        source_sync_rows = _load_source_sync_rows(conn)
     finally:
         conn.close()
 
@@ -107,6 +111,7 @@ def load_snapshot_lite(cfg: Config) -> dict[str, object]:
     return {
         "issuers": issuers,
         "market_monitor": market_monitor,
+        "source_sync_rows": source_sync_rows,
         "intelligence_kpis": kpis,
     }
 
@@ -190,6 +195,7 @@ def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
         return {
             "backlog_rows": [row.__dict__ for row in backlog.rows],
             "canary_rows": [row.__dict__ for row in canary.rows],
+            "source_sync_rows": _load_source_sync_rows_from_cfg(cfg),
         }
 
     return {}
@@ -247,21 +253,22 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
 
 def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
     now = datetime.now(timezone.utc)
-    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
     week_start = now - timedelta(days=7)
-    overdue_threshold = now - timedelta(days=420)
+    source_syncs = {row["source_name"]: row for row in _load_source_sync_rows(conn)}
+    disclosure_sync = _parse_iso_datetime(source_syncs.get("idx_disclosures", {}).get("updated_at"))
+    disclosure_window_start = disclosure_sync or week_start
 
-    new_disclosures_today = conn.execute(
+    new_disclosures_since_sync = conn.execute(
         """
         SELECT COUNT(*) AS count
         FROM documents
         WHERE source_name = 'idx_disclosures'
-          AND updated_at >= ?
+          AND COALESCE(retrieved_at, updated_at, created_at) >= ?
         """,
-        (today_start.isoformat(),),
+        (disclosure_window_start.isoformat(),),
     ).fetchone()["count"]
 
-    low_signal_event_types = {"shareholder_meeting_summary", "dividend_notice"}
+    low_signal_event_types = {"shareholder_meeting_summary", "dividend_announcement"}
     material_event_filings_today = conn.execute(
         f"""
         SELECT COUNT(DISTINCT e.document_id) AS count
@@ -269,7 +276,7 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
         WHERE e.detected_at >= ?
           AND e.event_type NOT IN ({",".join("?" for _ in low_signal_event_types)})
         """,
-        (today_start.isoformat(), *sorted(low_signal_event_types)),
+        (disclosure_window_start.isoformat(), *sorted(low_signal_event_types)),
     ).fetchone()["count"]
 
     recent_event_rows = conn.execute(
@@ -289,27 +296,42 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
         SELECT
             c.ticker,
             c.issuer_name,
-            MAX(COALESCE(d.source_modified_at, d.updated_at, d.created_at)) AS latest_periodic_at
+            c.fiscal_year_end_month,
+            MAX(COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)) AS latest_periodic_at
         FROM companies c
         LEFT JOIN documents d
           ON d.ticker = c.ticker
          AND d.document_type IN ('annual_report', 'financial_statement')
+        LEFT JOIN metric_items mi
+          ON mi.document_id = d.document_id
         WHERE COALESCE(c.active_status, 'listed') != 'delisted'
-        GROUP BY c.ticker, c.issuer_name
+        GROUP BY c.ticker, c.issuer_name, c.fiscal_year_end_month
         ORDER BY c.ticker ASC
         """
     ).fetchall()
     late_periodic_rows: list[dict[str, object]] = []
     for row in recent_financial_rows:
-        latest = _parse_iso_datetime(row["latest_periodic_at"])
-        if latest is not None and latest >= overdue_threshold:
+        latest_period_end = _parse_iso_date(row["latest_periodic_at"]) or (
+            _parse_iso_datetime(row["latest_periodic_at"]).date()
+            if _parse_iso_datetime(row["latest_periodic_at"]) is not None
+            else None
+        )
+        deadline = _most_recent_periodic_deadline(
+            fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
+            now=now.date(),
+        )
+        if deadline is None:
+            continue
+        if latest_period_end is not None and deadline["period_end"] <= latest_period_end:
             continue
         late_periodic_rows.append(
             {
                 "ticker": row["ticker"],
                 "issuer_name": row["issuer_name"],
                 "latest_periodic_at": row["latest_periodic_at"],
-                "days_since_periodic": (now - latest).days if latest is not None else None,
+                "days_since_periodic": (now.date() - latest_period_end).days if latest_period_end is not None else None,
+                "expected_label": deadline["label"],
+                "expected_due_date": deadline["due_date"].isoformat(),
             }
         )
 
@@ -372,10 +394,12 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
                 "material_events_7d": len(payload["material_events_7d"]),
                 "warning_signals_7d": payload["warning_signals_7d"],
                 "critical_signals_7d": payload["critical_signals_7d"],
+                "signal_count_7d": payload["warning_signals_7d"] + payload["critical_signals_7d"],
             }
             for sector, payload in sector_map.items()
         ),
         key=lambda item: (
+            -int(item["signal_count_7d"]),
             -int(item["critical_signals_7d"]),
             -int(item["material_events_7d"]),
             -int(item["disclosures_7d"]),
@@ -402,7 +426,45 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
         ORDER BY updated_at DESC, ticker ASC
         """
     ).fetchall()
-    highest_risk_changes: list[dict[str, object]] = []
+    highest_risk_changes = [
+        {
+            "ticker": row["ticker"],
+            "issuer_name": row["issuer_name"],
+            "decision_state": row["decision_state"],
+            "overall_state": row["overall_state"],
+            "risk_score": 100 if row["priority"] == "high" else 60 if row["priority"] == "medium" else 20,
+            "reasons": [row["rationale"]] if row["rationale"] else [],
+            "as_of_date": row["updated_at"],
+            "item_type": row["item_type"],
+            "priority": row["priority"],
+        }
+        for row in conn.execute(
+            """
+            SELECT
+                rqi.ticker,
+                c.issuer_name,
+                rqi.item_type,
+                rqi.priority,
+                rqi.rationale,
+                rqi.updated_at,
+                json_extract(cs.payload_json, '$.top_card.decision_state') AS decision_state,
+                json_extract(cs.payload_json, '$.top_card.overall_state') AS overall_state
+            FROM review_queue_items rqi
+            LEFT JOIN companies c ON c.ticker = rqi.ticker
+            LEFT JOIN company_snapshots cs
+              ON cs.ticker = rqi.ticker
+             AND cs.snapshot_kind = 'current'
+            WHERE rqi.status = 'open'
+              AND rqi.updated_at >= ?
+            ORDER BY
+              CASE rqi.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+              rqi.updated_at DESC,
+              rqi.review_item_id ASC
+            LIMIT 10
+            """,
+            (week_start.isoformat(),),
+        ).fetchall()
+    ]
     most_improved: list[dict[str, object]] = []
     for row in snapshot_rows:
         payload = json.loads(row["payload_json"] or "{}")
@@ -421,26 +483,13 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
             + (peer_anomalies * 5)
             + (len(negative_factors) * 4)
         )
-        if risk_score:
-            highest_risk_changes.append(
-                {
-                    "ticker": ticker,
-                    "issuer_name": payload.get("issuer_name"),
-                    "decision_state": top_card.get("decision_state"),
-                    "overall_state": top_card.get("overall_state"),
-                    "risk_score": risk_score,
-                    "reasons": list(top_card.get("reasons") or [])[:3],
-                    "as_of_date": row["as_of_date"] or row["updated_at"],
-                }
-            )
-
         improvement_score = (
             (60 if top_card.get("decision_state") == "Buy" else 0)
             + (20 if top_card.get("thesis_state") == "improving" else 0)
             + (8 * len(positive_factors))
             - (10 if top_card.get("overall_state") in {"critical", "review_required"} else 0)
         )
-        if improvement_score > 0:
+        if improvement_score > 0 and top_card.get("overall_state") != "critical":
             most_improved.append(
                 {
                     "ticker": ticker,
@@ -477,20 +526,22 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
     return {
         "as_of": now.isoformat(),
         "counts": {
-            "new_disclosures_today": new_disclosures_today,
-            "material_event_filings_today": material_event_filings_today,
+            "new_disclosures_since_sync": new_disclosures_since_sync,
+            "material_event_filings_since_sync": material_event_filings_today,
             "late_periodic_filings": len(late_periodic_rows),
             **major_event_counts,
         },
+        "source_syncs": list(source_syncs.values()),
+        "staleness_warning": any(bool(row.get("stale")) for row in source_syncs.values()),
         "sector_heatmap": sector_heatmap,
         "highest_risk_changes": sorted(
             highest_risk_changes,
             key=lambda item: (-int(item["risk_score"]), str(item["ticker"])),
-        )[:8],
+        )[:10],
         "most_improved": sorted(
             most_improved,
             key=lambda item: (-int(item["improvement_score"]), str(item["ticker"])),
-        )[:8],
+        )[:10],
         "late_periodic_rows": sorted(
             late_periodic_rows,
             key=lambda item: (
@@ -498,8 +549,84 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
                 -(item["days_since_periodic"] or 0),
                 str(item["ticker"]),
             ),
-        )[:8],
+        )[:10],
     }
+
+
+def _load_source_sync_rows_from_cfg(cfg: Config) -> list[dict[str, object]]:
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        return _load_source_sync_rows(conn)
+    finally:
+        conn.close()
+
+
+def _load_source_sync_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    now = datetime.now(timezone.utc)
+    rows = conn.execute(
+        """
+        SELECT source_name, source_class, updated_at
+        FROM source_watermarks
+        ORDER BY source_name ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "source_name": row["source_name"],
+            "source_class": row["source_class"],
+            "updated_at": row["updated_at"],
+            "stale": (
+                (now - parsed).total_seconds() > 86400
+                if (parsed := _parse_iso_datetime(row["updated_at"])) is not None
+                else True
+            ),
+        }
+        for row in rows
+    ]
+
+
+def _most_recent_periodic_deadline(*, fiscal_year_end_month: int, now: date) -> dict[str, object] | None:
+    candidates: list[dict[str, object]] = []
+    for year in range(now.year - 1, now.year + 1):
+        for due_date, label, period_end_iso, _order in _filing_deadlines_for_dashboard(fiscal_year_end_month, year):
+            if due_date <= now:
+                candidates.append(
+                    {
+                        "due_date": due_date,
+                        "label": label,
+                        "period_end": _parse_iso_date(period_end_iso),
+                    }
+                )
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item["due_date"], reverse=True)[0]
+
+
+def _filing_deadlines_for_dashboard(fiscal_year_end_month: int, fiscal_year: int) -> list[tuple[date, str, str, int]]:
+    fiscal_year_end = _month_end(fiscal_year, fiscal_year_end_month)
+    q1_end = _shift_months(fiscal_year_end, -9)
+    h1_end = _shift_months(fiscal_year_end, -6)
+    q3_end = _shift_months(fiscal_year_end, -3)
+    return [
+        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1),
+        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2),
+        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3),
+        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4),
+    ]
+
+
+def _month_end(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def _shift_months(anchor: date, months: int) -> date:
+    month_index = (anchor.year * 12 + (anchor.month - 1)) + months
+    year = month_index // 12
+    month = (month_index % 12) + 1
+    return _month_end(year, month)
 
 
 def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
@@ -895,6 +1022,15 @@ def _parse_iso_datetime(value: object) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _parse_iso_date(value: object) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
     except ValueError:
         return None
 

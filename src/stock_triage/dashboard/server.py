@@ -583,6 +583,7 @@ def _snapshot_payload(cfg: Config, action_history: list[dict[str, object]]) -> d
     return {
         "issuers": snapshot.issuers,
         "market_monitor": snapshot.market_monitor,
+        "source_sync_rows": snapshot.source_sync_rows,
         "documents": snapshot.documents,
         "metrics": snapshot.metrics,
         "findings": snapshot.findings,
