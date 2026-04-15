@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
-from stock_triage.intelligence.pipeline import _derive_stance
+from stock_triage.intelligence.pipeline import _derive_stance, _next_expected_filing_window
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -94,6 +94,8 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["decision_panel"]["must_improve"]
         assert payload["decision_panel"]["thesis_breakers"]
         assert payload["decision_panel"]["next_catalyst"]["label"]
+        assert payload["decision_panel"]["next_catalyst"]["report_type"] in {"quarterly_fs", "interim_fs", "annual_fs", "annual_report"}
+        assert payload["segment_summary"] == []
         assert "revenue increased" in payload["top_card"]["positive_factors"]
         assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
         assert payload["delta_count_by_kind"]["metric_change"] == 3
@@ -247,6 +249,28 @@ def test_stance_mapping_table_rows():
     ]
     for payload, expected in cases:
         assert _derive_stance(**payload) == expected
+
+
+def test_next_expected_filing_window_matches_v3_2_deadline_table():
+    h1 = _next_expected_filing_window(
+        fiscal_year_end_month=12,
+        now=datetime(2026, 7, 10, tzinfo=timezone.utc).date(),
+        latest_period_end=datetime(2026, 3, 31, tzinfo=timezone.utc).date(),
+        latest_document_type="financial_statement",
+    )
+    assert h1 is not None
+    assert h1["label"] == "H1 filing due"
+    assert h1["window_start"] == "2026-08-29"
+
+    annual_report = _next_expected_filing_window(
+        fiscal_year_end_month=12,
+        now=datetime(2026, 3, 1, tzinfo=timezone.utc).date(),
+        latest_period_end=datetime(2025, 12, 31, tzinfo=timezone.utc).date(),
+        latest_document_type="financial_statement",
+    )
+    assert annual_report is not None
+    assert annual_report["report_type"] == "annual_report"
+    assert annual_report["window_start"] == "2026-04-30"
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

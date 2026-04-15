@@ -297,7 +297,18 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
             c.ticker,
             c.issuer_name,
             c.fiscal_year_end_month,
-            MAX(COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)) AS latest_periodic_at
+            MAX(
+                CASE
+                    WHEN d.document_type != 'annual_report'
+                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
+                END
+            ) AS latest_financial_periodic_at,
+            MAX(
+                CASE
+                    WHEN d.document_type = 'annual_report'
+                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
+                END
+            ) AS latest_annual_report_at
         FROM companies c
         LEFT JOIN documents d
           ON d.ticker = c.ticker
@@ -311,25 +322,32 @@ def _load_market_monitor(conn: sqlite3.Connection) -> dict[str, object]:
     ).fetchall()
     late_periodic_rows: list[dict[str, object]] = []
     for row in recent_financial_rows:
-        latest_period_end = _parse_iso_date(row["latest_periodic_at"]) or (
-            _parse_iso_datetime(row["latest_periodic_at"]).date()
-            if _parse_iso_datetime(row["latest_periodic_at"]) is not None
+        latest_financial_period_end = _parse_iso_date(row["latest_financial_periodic_at"]) or (
+            _parse_iso_datetime(row["latest_financial_periodic_at"]).date()
+            if _parse_iso_datetime(row["latest_financial_periodic_at"]) is not None
+            else None
+        )
+        latest_annual_report_period_end = _parse_iso_date(row["latest_annual_report_at"]) or (
+            _parse_iso_datetime(row["latest_annual_report_at"]).date()
+            if _parse_iso_datetime(row["latest_annual_report_at"]) is not None
             else None
         )
         deadline = _most_recent_periodic_deadline(
             fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
             now=now.date(),
+            latest_financial_period_end=latest_financial_period_end,
+            latest_annual_report_period_end=latest_annual_report_period_end,
         )
         if deadline is None:
-            continue
-        if latest_period_end is not None and deadline["period_end"] <= latest_period_end:
             continue
         late_periodic_rows.append(
             {
                 "ticker": row["ticker"],
                 "issuer_name": row["issuer_name"],
-                "latest_periodic_at": row["latest_periodic_at"],
-                "days_since_periodic": (now.date() - latest_period_end).days if latest_period_end is not None else None,
+                "latest_periodic_at": row["latest_financial_periodic_at"] or row["latest_annual_report_at"],
+                "days_since_periodic": (
+                    now.date() - (latest_annual_report_period_end or latest_financial_period_end)
+                ).days if (latest_annual_report_period_end or latest_financial_period_end) is not None else None,
                 "expected_label": deadline["label"],
                 "expected_due_date": deadline["due_date"].isoformat(),
             }
@@ -586,33 +604,50 @@ def _load_source_sync_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
     ]
 
 
-def _most_recent_periodic_deadline(*, fiscal_year_end_month: int, now: date) -> dict[str, object] | None:
+def _most_recent_periodic_deadline(
+    *,
+    fiscal_year_end_month: int,
+    now: date,
+    latest_financial_period_end: date | None,
+    latest_annual_report_period_end: date | None,
+) -> dict[str, object] | None:
     candidates: list[dict[str, object]] = []
     for year in range(now.year - 1, now.year + 1):
-        for due_date, label, period_end_iso, _order in _filing_deadlines_for_dashboard(fiscal_year_end_month, year):
-            if due_date <= now:
-                candidates.append(
-                    {
-                        "due_date": due_date,
-                        "label": label,
-                        "period_end": _parse_iso_date(period_end_iso),
-                    }
-                )
+        for due_date, label, period_end_iso, _order, report_type in _filing_deadlines_for_dashboard(fiscal_year_end_month, year):
+            period_end = _parse_iso_date(period_end_iso)
+            if due_date > now or period_end is None:
+                continue
+            if report_type == "annual_report":
+                if latest_annual_report_period_end is not None and period_end <= latest_annual_report_period_end:
+                    continue
+            else:
+                if latest_financial_period_end is not None and period_end <= latest_financial_period_end:
+                    continue
+            candidates.append(
+                {
+                    "due_date": due_date,
+                    "label": label,
+                    "period_end": period_end,
+                    "report_type": report_type,
+                    "order": _order,
+                }
+            )
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: item["due_date"], reverse=True)[0]
+    return sorted(candidates, key=lambda item: (item["due_date"], item["order"]), reverse=True)[0]
 
 
-def _filing_deadlines_for_dashboard(fiscal_year_end_month: int, fiscal_year: int) -> list[tuple[date, str, str, int]]:
+def _filing_deadlines_for_dashboard(fiscal_year_end_month: int, fiscal_year: int) -> list[tuple[date, str, str, int, str]]:
     fiscal_year_end = _month_end(fiscal_year, fiscal_year_end_month)
     q1_end = _shift_months(fiscal_year_end, -9)
     h1_end = _shift_months(fiscal_year_end, -6)
     q3_end = _shift_months(fiscal_year_end, -3)
     return [
-        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1),
-        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2),
-        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3),
-        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4),
+        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1, "quarterly_fs"),
+        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2, "interim_fs"),
+        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3, "quarterly_fs"),
+        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4, "annual_fs"),
+        (fiscal_year_end + timedelta(days=120), "Annual report due", fiscal_year_end.isoformat(), 5, "annual_report"),
     ]
 
 

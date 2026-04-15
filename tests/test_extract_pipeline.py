@@ -335,6 +335,55 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
         rconn.close()
 
 
+def test_run_extract_captures_segment_metrics(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-segments-1",
+        document_type="annual_report",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025"},
+        title="Annual Report 2024",
+        chunks=[
+            (
+                0,
+                1,
+                "Segment Performance",
+                "Segment Retail revenue 700,000\n"
+                "Segment Retail operating profit 120,000\n"
+                "Segmen Distribusi pendapatan 450,000\n"
+                "Segmen Distribusi laba 75,000\n",
+            ),
+        ],
+    )
+
+    result = run_extract(tmp_config, limit=10, include_extracted=True)
+
+    assert result.selected == 1
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        metrics = rconn.execute(
+            """
+            SELECT metric_name, value_normalized, consolidation_scope
+            FROM metric_items
+            WHERE document_id = ?
+              AND metric_name IN ('segment_revenue', 'segment_profit')
+            ORDER BY metric_name, consolidation_scope
+            """,
+            (document_id,),
+        ).fetchall()
+        assert [dict(row) for row in metrics] == [
+            {"metric_name": "segment_profit", "value_normalized": 75000.0, "consolidation_scope": "segment:Distribusi"},
+            {"metric_name": "segment_profit", "value_normalized": 120000.0, "consolidation_scope": "segment:Retail"},
+            {"metric_name": "segment_revenue", "value_normalized": 450000.0, "consolidation_scope": "segment:Distribusi"},
+            {"metric_name": "segment_revenue", "value_normalized": 700000.0, "consolidation_scope": "segment:Retail"},
+        ]
+    finally:
+        rconn.close()
+
+
 def test_parse_status_counts_extracted_documents_as_parse_complete(tmp_config):
     _insert_parsed_document(
         tmp_config,

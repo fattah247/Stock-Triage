@@ -491,6 +491,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
     language_variant = _language_variant(chunks)
 
     out: dict[str, ExtractedMetric] = {}
+    segment_metrics: list[ExtractedMetric] = []
     for chunk in chunks:
         lower = chunk.text.lower()
         for metric in _extract_financial_highlight_chunk(
@@ -524,6 +525,16 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
         ):
             out.setdefault(metric.metric_name, metric)
 
+        segment_metrics.extend(
+            _extract_segment_metrics(
+                chunk,
+                fiscal_year=fiscal_year,
+                period_end_date=period_end_date,
+                audit_status=audit_status,
+                language_variant=language_variant,
+            )
+        )
+
         if "laba usaha" in lower or "operating profit" in lower:
             metric = _extract_operating_profit_guidance(
                 chunk,
@@ -537,7 +548,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
                 out[metric.metric_name] = metric
     for metric in _derive_financial_metrics(out):
         out.setdefault(metric.metric_name, metric)
-    return list(out.values())
+    return list(out.values()) + segment_metrics
 
 
 def _extract_financial_highlight_chunk(
@@ -722,6 +733,66 @@ def _extract_optional_financial_metrics(
             )
         )
     return out
+
+
+def _extract_segment_metrics(
+    chunk: ChunkText,
+    *,
+    fiscal_year: int | None,
+    period_end_date: str | None,
+    audit_status: str | None,
+    language_variant: str,
+) -> list[ExtractedMetric]:
+    patterns = [
+        (
+            "segment_revenue",
+            r"(?:Segmen|Segment)\s+(?P<segment>[A-Za-z][A-Za-z0-9/&,\- ]{1,40}?)\s+(?:pendapatan|revenue)\s+(?P<value>[\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "segment_revenue",
+            r"(?P<segment>[A-Za-z][A-Za-z0-9/&,\- ]{1,40}?)\s+segment\s+revenue\s+(?P<value>[\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "segment_profit",
+            r"(?:Segmen|Segment)\s+(?P<segment>[A-Za-z][A-Za-z0-9/&,\- ]{1,40}?)\s+(?:laba(?: usaha)?|operating profit|profit)\s+(?P<value>[\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "segment_profit",
+            r"(?P<segment>[A-Za-z][A-Za-z0-9/&,\- ]{1,40}?)\s+segment\s+(?:operating profit|profit)\s+(?P<value>[\(]?\d[\d\.,]*\)?)",
+        ),
+    ]
+    metrics: list[ExtractedMetric] = []
+    seen: set[tuple[str, str, str]] = set()
+    for metric_name, pattern in patterns:
+        for match in re.finditer(pattern, chunk.text, flags=re.IGNORECASE):
+            segment_name = re.sub(r"\s+", " ", match.group("segment")).strip(" -:")
+            if not segment_name:
+                continue
+            raw = match.group("value")
+            dedupe_key = (metric_name, segment_name.lower(), raw)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            metrics.append(
+                ExtractedMetric(
+                    metric_name=metric_name,
+                    value_normalized=_parse_number(raw),
+                    raw_value_text=raw,
+                    currency="USD",
+                    unit_scale="units",
+                    fiscal_year=fiscal_year,
+                    fiscal_period="Annual",
+                    period_end_date=period_end_date,
+                    audit_status=audit_status,
+                    consolidation_scope=f"segment:{segment_name}",
+                    language_variant=language_variant,
+                    chunk=chunk,
+                    excerpt_text=chunk.text[max(0, match.start() - 40): min(len(chunk.text), match.end() + 80)],
+                    char_start=chunk.char_start + match.start("value"),
+                    char_end=chunk.char_start + match.end("value"),
+                )
+            )
+    return metrics
 
 
 def _derive_financial_metrics(metrics: dict[str, ExtractedMetric]) -> list[ExtractedMetric]:

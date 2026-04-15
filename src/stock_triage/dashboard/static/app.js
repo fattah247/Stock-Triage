@@ -907,6 +907,7 @@
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
         const reviewRequired = (payload.review_required || []).slice(0, 6);
+        const segmentSummary = (payload.segment_summary || []).slice(0, 6);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1140,8 +1141,16 @@
             )
             .join("")}</div>`
         : `<div class="emptyState"><strong>No persisted documents yet.</strong> Run discovery and download for this issuer, then the grouped filings will appear here.</div>`;
-      metricList.innerHTML = metrics.length
-        ? `<table class="metricTable"><thead><tr><th>Metric</th><th>Value</th><th>Period</th></tr></thead><tbody>${metrics
+      metricList.innerHTML = (segmentSummary.length || metrics.length)
+        ? `${segmentSummary.length
+            ? `<table class="metricTable"><thead><tr><th>Segment</th><th>Revenue</th><th>Profit</th><th>Period End</th></tr></thead><tbody>${segmentSummary
+                .map(
+                  (item) =>
+                    `<tr><td>${esc(item.segment_name)}</td><td>${esc(item.revenue ?? "")}</td><td>${esc(item.profit ?? "")}</td><td>${esc(item.period_end_date ?? "")}</td></tr>`
+                )
+                .join("")}</tbody></table>`
+            : ""
+          }<table class="metricTable"><thead><tr><th>Metric</th><th>Value</th><th>Period</th></tr></thead><tbody>${metrics
             .slice(0, 80)
             .map(
               (item) =>

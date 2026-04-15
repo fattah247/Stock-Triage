@@ -1141,7 +1141,13 @@ def _build_timeseries(*, ticker: str, metrics: list[MetricPoint]) -> list[Timese
     for metric in metrics:
         series_key = "|".join(
             str(part or "")
-            for part in (metric.metric_name, metric.fiscal_year, metric.fiscal_period, metric.period_end_date)
+            for part in (
+                metric.metric_name,
+                metric.consolidation_scope,
+                metric.fiscal_year,
+                metric.fiscal_period,
+                metric.period_end_date,
+            )
         )
         points.append(
             TimeseriesPoint(
@@ -1247,6 +1253,7 @@ def _build_snapshot_payload_json(
         "decision_panel": decision_panel,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
+        "segment_summary": _build_segment_summary(latest_metrics),
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
         "management_credibility": {
             "total_claims": credibility_summary.total_claims,
@@ -1855,6 +1862,7 @@ def _estimate_next_catalyst(
         fiscal_year_end_month=profile.fiscal_year_end_month,
         now=date.today(),
         latest_period_end=period_end,
+        latest_document_type=latest_document.document_type,
     )
     if schedule is not None:
         return {
@@ -1862,12 +1870,14 @@ def _estimate_next_catalyst(
             "window_start": schedule["window_start"],
             "window_end": schedule["window_end"],
             "reason": schedule["reason"],
+            "report_type": schedule["report_type"],
         }
     return {
         "label": "No catalyst estimate yet",
         "window_start": None,
         "window_end": None,
         "reason": "Insufficient timing metadata exists for this issuer.",
+        "report_type": None,
     }
 
 
@@ -1884,16 +1894,17 @@ def _shift_months(anchor: date, months: int) -> date:
     return _month_end(year, month)
 
 
-def _filing_deadlines(fiscal_year_end_month: int, *, around_year: int) -> list[tuple[date, str, str, int]]:
+def _filing_deadlines(fiscal_year_end_month: int, *, around_year: int) -> list[tuple[date, str, str, int, str]]:
     fiscal_year_end = _month_end(around_year, fiscal_year_end_month)
     q1_end = _shift_months(fiscal_year_end, -9)
     h1_end = _shift_months(fiscal_year_end, -6)
     q3_end = _shift_months(fiscal_year_end, -3)
     return [
-        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1),
-        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2),
-        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3),
-        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4),
+        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1, "quarterly_fs"),
+        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2, "interim_fs"),
+        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3, "quarterly_fs"),
+        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4, "annual_fs"),
+        (fiscal_year_end + timedelta(days=120), "Annual report due", fiscal_year_end.isoformat(), 5, "annual_report"),
     ]
 
 
@@ -1902,24 +1913,79 @@ def _next_expected_filing_window(
     fiscal_year_end_month: int,
     now: date,
     latest_period_end: date | None,
+    latest_document_type: str | None,
 ) -> dict[str, str] | None:
-    candidates: list[tuple[date, str, str, int]] = []
+    candidates: list[tuple[date, str, str, int, str]] = []
     for year in range(now.year - 1, now.year + 3):
         candidates.extend(_filing_deadlines(fiscal_year_end_month, around_year=year))
-    candidates.sort(key=lambda item: (item[0], item[3]))
-    for due_date, label, period_end_iso, _order in candidates:
+
+    def _candidate_priority(item: tuple[date, str, str, int, str]) -> tuple[date, int, int, str]:
+        due_date, _label, period_end_iso, order, report_type = item
+        period_end = _parse_iso_date(period_end_iso)
+        special_rank = 0
+        if (
+            latest_document_type == "financial_statement"
+            and latest_period_end is not None
+            and period_end == latest_period_end
+            and report_type == "annual_report"
+        ):
+            special_rank = -1
+        return (due_date, special_rank, order, report_type)
+
+    candidates.sort(key=_candidate_priority)
+    for due_date, label, period_end_iso, _order, report_type in candidates:
         period_end = _parse_iso_date(period_end_iso)
         if due_date <= now:
             continue
-        if latest_period_end is not None and period_end is not None and period_end <= latest_period_end:
+        if latest_period_end is not None and period_end is not None and period_end < latest_period_end:
+            continue
+        if (
+            latest_document_type == "financial_statement"
+            and report_type == "annual_fs"
+            and latest_period_end is not None
+            and period_end == latest_period_end
+        ):
+            continue
+        if (
+            latest_document_type == "annual_report"
+            and report_type == "annual_report"
+            and latest_period_end is not None
+            and period_end == latest_period_end
+        ):
             continue
         return {
             "label": label,
             "window_start": due_date.isoformat(),
             "window_end": (due_date + timedelta(days=7)).isoformat(),
-            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} and IDX periodic filing heuristics.",
+            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} using the v3.2 filing deadline table.",
+            "report_type": report_type,
         }
     return None
+
+
+def _build_segment_summary(latest_metrics: list[MetricPoint]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for metric in latest_metrics:
+        if metric.metric_name not in {"segment_revenue", "segment_profit"}:
+            continue
+        segment_name = (metric.consolidation_scope or "").removeprefix("segment:").strip() or "Unknown"
+        record = grouped.setdefault(
+            segment_name,
+            {
+                "segment_name": segment_name,
+                "revenue": None,
+                "profit": None,
+                "period_end_date": metric.period_end_date,
+                "fiscal_year": metric.fiscal_year,
+            },
+        )
+        if metric.metric_name == "segment_revenue":
+            record["revenue"] = metric.value_normalized
+        else:
+            record["profit"] = metric.value_normalized
+    rows = list(grouped.values())
+    rows.sort(key=lambda item: (item["revenue"] is None, -(item["revenue"] or 0), item["segment_name"]))
+    return rows[:8]
 
 
 def _evaluate_theses(
