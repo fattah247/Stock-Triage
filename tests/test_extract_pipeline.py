@@ -65,7 +65,7 @@ def test_run_extract_persists_financial_metrics_and_evidence(tmp_config):
         ).fetchone()
         assert doc["process_state"] == "extracted"
         assert doc["process_error_code"] is None
-        assert doc["pipeline_version"] == "phase5-v1"
+        assert doc["pipeline_version"] == "phase5-v2"
 
         metrics = rconn.execute(
             """
@@ -209,7 +209,7 @@ def test_run_extract_detects_extended_event_taxonomy(tmp_config):
             "bond_issuance",
             "commissioner_change",
             "debt_facility",
-            "dividend_notice",
+            "dividend_announcement",
             "shareholder_meeting_summary",
         ]
     finally:
@@ -231,10 +231,18 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
                 1,
                 None,
                 "Cash and cash equivalents 900,000\n"
+                "Pendapatan 5,082,099 Revenue\n"
+                "Gross profit 2,145,824\n"
+                "Operating profit 1,420,000\n"
+                "Net profit 820,000\n"
+                "Total liabilities 1,600,000\n"
+                "Equity 2,400,000\n"
                 "Short-term debt 300,000\n"
                 "Long-term debt 500,000\n"
                 "Shares outstanding 100,000,000\n"
                 "Capital expenditure 200,000\n"
+                "EBITDA 1,900,000\n"
+                "Interest expense 100,000\n"
                 "Arus kas yang digunakan untuk aktivitas operasi pada 2024 tercatat sebesar 1,12 juta USD",
             ),
         ],
@@ -280,6 +288,13 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
         ).fetchall()
         names = {row["metric_name"] for row in metrics}
         assert {
+            "revenue",
+            "gross_profit",
+            "operating_profit",
+            "net_profit",
+            "operating_cash_flow",
+            "equity",
+            "total_liabilities",
             "cash",
             "short_term_debt",
             "long_term_debt",
@@ -287,10 +302,13 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
             "capex",
             "net_debt",
             "free_cash_flow",
+            "ebitda",
+            "interest_coverage",
         }.issubset(names)
         values = {row["metric_name"]: row["value_normalized"] for row in metrics}
         assert values["net_debt"] == -100000.0
         assert values["free_cash_flow"] == -1320000.0
+        assert values["interest_coverage"] == 14.2
 
         disclosure_events = rconn.execute(
             """
@@ -311,7 +329,7 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
             "rights_issue",
             "segment_closure",
             "stock_split",
-            "use_of_proceeds_update",
+            "use_of_proceeds",
         ]
     finally:
         rconn.close()

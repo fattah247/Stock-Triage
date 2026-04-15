@@ -28,7 +28,30 @@ from .claims import (
     extract_claims_for_documents,
 )
 
-DERIVED_VERSION = "phase14-v1"
+DERIVED_VERSION = "v3_2-v1"
+
+CORE_FINANCIAL_METRICS = {
+    "revenue",
+    "gross_profit",
+    "operating_profit",
+    "net_profit",
+    "operating_cash_flow",
+    "capex",
+    "cash",
+    "short_term_debt",
+    "long_term_debt",
+    "equity",
+    "share_count",
+    "net_debt",
+    "free_cash_flow",
+    "total_liabilities",
+}
+STANCE_LEVEL = {
+    "Avoid": 0,
+    "Review manually": 1,
+    "Watch": 2,
+    "Buy": 3,
+}
 
 HIGHER_IS_BETTER_FIELDS = {
     "revenue_growth_pct",
@@ -72,6 +95,7 @@ class CompanyProfile:
     industry: str | None
     listing_board: str | None
     active_status: str | None
+    fiscal_year_end_month: int
 
 
 @dataclass(frozen=True)
@@ -306,6 +330,47 @@ def run_intelligence(
     return result
 
 
+def rederive_intelligence(
+    cfg: Config,
+    *,
+    ticker: str | None = None,
+    limit: int = 1000,
+) -> IntelligenceRunResult:
+    cfg.ensure_dirs()
+
+    result = IntelligenceRunResult()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+        local_theses = load_local_theses(cfg.theses.definition_path)
+        wq.submit(lambda conn, theses=local_theses: sync_local_theses(conn, theses=theses))
+        reader = connect(cfg.paths.db_path, read_only=True)
+        try:
+            configure_pragmas(reader, cfg)
+            tickers = _select_snapshot_tickers(reader, ticker=ticker, limit=limit)
+            result = IntelligenceRunResult(selected_tickers=len(tickers))
+            for ticker_value in tickers:
+                bundle = _build_bundle(reader, ticker_value)
+                if bundle is None:
+                    continue
+                counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
+                result = IntelligenceRunResult(
+                    selected_tickers=result.selected_tickers,
+                    deltas=result.deltas + counts["deltas"],
+                    snapshots=result.snapshots + counts["snapshots"],
+                    timeseries=result.timeseries + counts["timeseries"],
+                    briefs=result.briefs + counts["briefs"],
+                    review_items=result.review_items + counts["review_items"],
+                    peer_sets=result.peer_sets + counts["peer_sets"],
+                    sector_rollups=result.sector_rollups + counts["sector_rollups"],
+                    thesis_evaluations=result.thesis_evaluations + counts["thesis_evaluations"],
+                    claims=result.claims + counts["claims"],
+                    claim_outcomes=result.claim_outcomes + counts["claim_outcomes"],
+                )
+        finally:
+            reader.close()
+    return result
+
+
 def _select_tickers(conn: sqlite3.Connection, *, ticker: str | None, limit: int) -> list[str]:
     params: list[object] = []
     where = "WHERE d.process_state = 'analyzed' AND d.ticker IS NOT NULL"
@@ -322,6 +387,23 @@ def _select_tickers(conn: sqlite3.Connection, *, ticker: str | None, limit: int)
         LIMIT ?
         """,
         tuple(params + [limit]),
+    ).fetchall()
+    return [row["ticker"] for row in rows]
+
+
+def _select_snapshot_tickers(conn: sqlite3.Connection, *, ticker: str | None, limit: int) -> list[str]:
+    if ticker:
+        return [ticker]
+    rows = conn.execute(
+        """
+        SELECT ticker
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+        GROUP BY ticker
+        ORDER BY MAX(updated_at) DESC, ticker ASC
+        LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
     return [row["ticker"] for row in rows]
 
@@ -407,6 +489,11 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         document_id=latest_document.document_id,
         claim_outcomes=claim_outcomes,
     )
+    persisted_review_statuses = _load_review_status_map(conn, ticker=ticker)
+    active_review_items = _filter_active_review_items(
+        conflict_items + thesis_items + claim_items,
+        review_statuses=persisted_review_statuses,
+    )
     peer_set, peer_view = _build_peer_set(conn, profile, current_company_state)
     sector_rollup, sector_view = _build_sector_rollup(conn, profile, current_company_state)
     snapshot_payload_json = _build_snapshot_payload_json(
@@ -418,7 +505,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
-        conflicts=conflict_items + thesis_items + claim_items,
+        review_items=active_review_items,
         claims=claims,
         claim_outcomes=claim_outcomes,
         credibility_summary=credibility_summary,
@@ -473,7 +560,7 @@ def _build_bundle(conn: sqlite3.Connection, ticker: str) -> CompanyIntelligenceB
 def _load_company_profile(conn: sqlite3.Connection, ticker: str) -> CompanyProfile | None:
     row = conn.execute(
         """
-        SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status
+        SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status, fiscal_year_end_month
         FROM companies
         WHERE ticker = ?
         LIMIT 1
@@ -490,6 +577,7 @@ def _load_company_profile(conn: sqlite3.Connection, ticker: str) -> CompanyProfi
         industry=row["industry"],
         listing_board=row["listing_board"],
         active_status=row["active_status"],
+        fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
     )
 
 
@@ -1082,7 +1170,7 @@ def _build_snapshot_payload_json(
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
-    conflicts: list[ReviewQueueItem],
+    review_items: list[ReviewQueueItem],
     claims: list[ClaimRecord],
     claim_outcomes: list[ClaimOutcomeRecord],
     credibility_summary: ClaimCredibilitySummary,
@@ -1092,10 +1180,14 @@ def _build_snapshot_payload_json(
 ) -> str:
     health = _build_health_state(
         baseline=baseline,
+        latest_document=latest_document,
+        latest_metrics=latest_metrics,
+        latest_analysis=latest_analysis,
+        peer_view=peer_view,
         deltas=deltas,
         events=events,
         triggered_rules=triggered_rules,
-        conflicts=conflicts,
+        review_items=review_items,
         credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
     )
@@ -1113,6 +1205,8 @@ def _build_snapshot_payload_json(
         events=events,
         triggered_rules=triggered_rules,
         thesis_evaluations=thesis_evaluations,
+        review_items=review_items,
+        profile=profile,
         top_card=health,
     )
     payload = {
@@ -1151,6 +1245,7 @@ def _build_snapshot_payload_json(
         ),
         "top_card": health,
         "decision_panel": decision_panel,
+        "fiscal_year_end_month": profile.fiscal_year_end_month,
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
         "management_credibility": {
@@ -1248,7 +1343,7 @@ def _build_snapshot_payload_json(
                 "rationale": item.rationale,
                 "payload": json.loads(item.payload_json),
             }
-            for item in conflicts
+            for item in review_items
         ],
         "peer_comparison": peer_view,
         "sector_context": sector_view,
@@ -1397,10 +1492,14 @@ def _build_conflict_review_items(
 def _build_health_state(
     *,
     baseline: BaselineChoice | None,
+    latest_document: CompanyDocument,
+    latest_metrics: list[MetricPoint],
+    latest_analysis: AnalysisSummary | None,
+    peer_view: dict[str, Any],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
-    conflicts: list[ReviewQueueItem],
+    review_items: list[ReviewQueueItem],
     credibility_summary: ClaimCredibilitySummary,
     thesis_evaluations: list[ThesisEvaluationRecord],
 ) -> dict[str, Any]:
@@ -1408,6 +1507,19 @@ def _build_health_state(
     overall_state = "stable"
     comparability_state = "none"
     confidence = "medium"
+    thesis_state = _aggregate_thesis_state(thesis_evaluations)
+    has_critical_rules = any(rule.severity == "critical" for rule in triggered_rules) or any(
+        (event.severity or "") == "critical" for event in events
+    )
+    data_completeness_pct = _data_completeness_pct(
+        baseline=baseline,
+        latest_document=latest_document,
+        latest_metrics=latest_metrics,
+        latest_analysis=latest_analysis,
+        peer_view=peer_view,
+        credibility_summary=credibility_summary,
+    )
+    data_completeness = data_completeness_pct >= 70.0
 
     if baseline is None:
         comparability_state = "not_comparable"
@@ -1425,10 +1537,10 @@ def _build_health_state(
             reasons.append("Snapshot used a weaker source-level baseline.")
             confidence = "medium"
 
-    if conflicts:
+    if review_items:
         overall_state = "review_required"
         confidence = "medium" if confidence == "high" else confidence
-        reasons.append("A revised filing changed tracked metrics and should be reviewed.")
+        reasons.append("One or more review items still require analyst judgment.")
 
     thesis_statuses = {evaluation.status for evaluation in thesis_evaluations}
     if "broken" in thesis_statuses:
@@ -1440,7 +1552,7 @@ def _build_health_state(
     elif overall_state == "stable" and "improving" in thesis_statuses:
         reasons.append("A configured thesis is improving.")
 
-    if any(rule.severity == "critical" for rule in triggered_rules) or any((event.severity or "") == "critical" for event in events):
+    if has_critical_rules:
         overall_state = "critical"
         reasons.append("At least one critical rule or event is active.")
     elif overall_state == "stable" and (
@@ -1473,23 +1585,37 @@ def _build_health_state(
     disclosure_quality = "stable"
     if baseline is None:
         disclosure_quality = "low_context"
-    elif conflicts:
+    elif review_items:
         disclosure_quality = "review"
 
     management_credibility = credibility_summary.credibility_state
     if management_credibility == "deteriorating":
         reasons.append("Management claim delivery deteriorated versus prior expectations.")
 
+    credibility_band = _credibility_band(credibility_summary)
+    stance, stance_confidence = _derive_stance(
+        overall_state=overall_state,
+        thesis_state=thesis_state,
+        credibility_state=credibility_band,
+        has_critical_rules=has_critical_rules,
+        has_open_reviews=bool(review_items),
+        data_completeness=data_completeness,
+    )
+
     return {
         "overall_state": overall_state,
         "comparability_state": comparability_state,
         "confidence": confidence,
+        "data_completeness_pct": data_completeness_pct,
+        "data_completeness": data_completeness,
         "leverage_state": leverage_state,
         "disclosure_quality": disclosure_quality,
         "management_credibility": management_credibility,
-        "thesis_state": _aggregate_thesis_state(thesis_evaluations),
-        "decision_state": _decision_state_for(thesis_evaluations, overall_state, confidence),
-        "watchlist_priority": _watchlist_priority_for(thesis_evaluations, overall_state, conflicts),
+        "credibility_band": credibility_band,
+        "thesis_state": thesis_state,
+        "decision_state": stance,
+        "stance_confidence": stance_confidence,
+        "watchlist_priority": _watchlist_priority_for(thesis_state, overall_state, review_items, stance),
         "positive_factors": positive_factors[:5],
         "negative_factors": negative_factors[:5],
         "reasons": reasons[:8],
@@ -1498,6 +1624,7 @@ def _build_health_state(
 
 def _build_decision_panel(
     *,
+    profile: CompanyProfile,
     latest_document: CompanyDocument,
     latest_metrics: list[MetricPoint],
     latest_analysis: AnalysisSummary | None,
@@ -1505,23 +1632,105 @@ def _build_decision_panel(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     thesis_evaluations: list[ThesisEvaluationRecord],
+    review_items: list[ReviewQueueItem],
     top_card: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "stance": top_card.get("decision_state"),
+        "confidence": top_card.get("stance_confidence") or top_card.get("confidence"),
         "why": list(top_card.get("reasons") or [])[:3],
         "what_changed": _summarize_deltas(deltas, limit=3),
         "what_to_watch": _build_watch_items(
             latest_analysis=latest_analysis,
             events=events,
             triggered_rules=triggered_rules,
+            review_items=review_items,
             top_card=top_card,
         ),
-        "must_improve": _build_improvement_items(thesis_evaluations=thesis_evaluations, top_card=top_card),
+        "must_improve": _build_improvement_items(
+            thesis_evaluations=thesis_evaluations,
+            review_items=review_items,
+            top_card=top_card,
+        ),
         "thesis_breakers": _build_thesis_breakers(thesis_evaluations),
         "quality_flags": _build_quality_flags(deltas=deltas, events=events, triggered_rules=triggered_rules),
-        "next_catalyst": _estimate_next_catalyst(latest_document=latest_document, latest_metrics=latest_metrics),
+        "next_catalyst": _estimate_next_catalyst(
+            profile=profile,
+            latest_document=latest_document,
+            latest_metrics=latest_metrics,
+        ),
     }
+
+
+def _data_completeness_pct(
+    *,
+    baseline: BaselineChoice | None,
+    latest_document: CompanyDocument,
+    latest_metrics: list[MetricPoint],
+    latest_analysis: AnalysisSummary | None,
+    peer_view: dict[str, Any],
+    credibility_summary: ClaimCredibilitySummary,
+) -> float:
+    checks = [
+        baseline is not None,
+        latest_analysis is not None and bool(latest_analysis.summary),
+        bool(peer_view.get("peer_key")),
+        credibility_summary.total_claims > 0 or credibility_summary.unresolved >= 0,
+    ]
+    base_score = sum(1 for item in checks if item) / len(checks) * 60.0
+    metric_score = 0.0
+    if latest_document.source_name == "idx_financial_reports":
+        present = {metric.metric_name for metric in latest_metrics}
+        metric_score = (len(present & CORE_FINANCIAL_METRICS) / len(CORE_FINANCIAL_METRICS)) * 40.0
+    else:
+        metric_score = 40.0 if latest_metrics else 0.0
+    return round(base_score + metric_score, 1)
+
+
+def _credibility_band(summary: ClaimCredibilitySummary) -> str:
+    if summary.total_claims == 0:
+        return "unknown"
+    if summary.contradicted or summary.missed:
+        return "poor"
+    if summary.achieved_rate >= 0.6 and summary.contradicted == 0:
+        return "high"
+    if summary.achieved or summary.partially_supported:
+        return "acceptable"
+    return "unknown"
+
+
+def _derive_stance(
+    *,
+    overall_state: str,
+    thesis_state: str,
+    credibility_state: str,
+    has_critical_rules: bool,
+    has_open_reviews: bool,
+    data_completeness: bool,
+) -> tuple[str, str]:
+    if thesis_state == "broken":
+        return "Avoid", "high"
+    if overall_state == "critical" and has_critical_rules:
+        return "Review manually", "high"
+    if overall_state == "critical" and thesis_state != "broken":
+        return "Review manually", "medium"
+    if credibility_state == "poor" and has_open_reviews:
+        return "Avoid", "medium"
+    if thesis_state == "weakening" and has_critical_rules:
+        return "Review manually", "medium"
+    if thesis_state == "weakening" and not has_critical_rules:
+        return "Watch", "medium"
+    if thesis_state == "improving" and overall_state == "stable" and not has_critical_rules:
+        return "Buy", "high"
+    if thesis_state == "holding" and overall_state == "stable" and not has_critical_rules:
+        return "Watch", "high"
+    if thesis_state == "holding" and overall_state == "watch":
+        return "Watch", "medium"
+    if thesis_state in {"none", "unsupported"}:
+        return "Watch", "low"
+    if not data_completeness:
+        return "Review manually", "low"
+    return "Watch", "low"
 
 
 def _summarize_deltas(deltas: list[DeltaRecord], *, limit: int) -> list[str]:
@@ -1553,11 +1762,15 @@ def _build_watch_items(
     latest_analysis: AnalysisSummary | None,
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
+    review_items: list[ReviewQueueItem],
     top_card: dict[str, Any],
 ) -> list[str]:
     items: list[str] = []
     if latest_analysis is not None:
         items.extend(str(item) for item in latest_analysis.what_to_verify[:3])
+    for review_item in review_items:
+        if review_item.rationale:
+            items.append(review_item.rationale)
     for rule in triggered_rules:
         if rule.severity in {"warning", "critical"}:
             items.append(rule.rationale or f"Watch active rule {rule.rule_name}.")
@@ -1572,6 +1785,7 @@ def _build_watch_items(
 def _build_improvement_items(
     *,
     thesis_evaluations: list[ThesisEvaluationRecord],
+    review_items: list[ReviewQueueItem],
     top_card: dict[str, Any],
 ) -> list[str]:
     items: list[str] = []
@@ -1584,6 +1798,9 @@ def _build_improvement_items(
             items.append(_condition_to_improvement_text(record))
         for record in details.get("matched_warning", []):
             items.append(_condition_to_resolution_text(record))
+    for item in review_items:
+        if item.priority == "high":
+            items.append(item.rationale or f"Resolve {item.item_type.replace('_', ' ')} before upgrading.")
     if top_card.get("overall_state") == "critical":
         items.append("Clear critical rules or events before upgrading the stance.")
     return _dedupe_keep_order(items)[:4]
@@ -1628,34 +1845,23 @@ def _build_quality_flags(
 
 def _estimate_next_catalyst(
     *,
+    profile: CompanyProfile,
     latest_document: CompanyDocument,
     latest_metrics: list[MetricPoint],
 ) -> dict[str, Any]:
-    as_of = _parse_iso_datetime(latest_document.source_modified_at or latest_document.updated_at)
     anchor = _anchor_metric(latest_metrics)
     period_end = _parse_iso_date(anchor.period_end_date) if anchor is not None else None
-    if latest_document.source_name == "idx_financial_reports" and period_end is not None:
-        window_start = period_end + timedelta(days=75)
-        window_end = period_end + timedelta(days=120)
+    schedule = _next_expected_filing_window(
+        fiscal_year_end_month=profile.fiscal_year_end_month,
+        now=date.today(),
+        latest_period_end=period_end,
+    )
+    if schedule is not None:
         return {
-            "label": "Next periodic filing window (estimate)",
-            "window_start": window_start.isoformat(),
-            "window_end": window_end.isoformat(),
-            "reason": "Estimated from the latest reported period end and the normal IDX financial-report cadence.",
-        }
-    if latest_document.source_name == "idx_disclosures" and as_of is not None:
-        return {
-            "label": "Monitor for follow-up disclosure",
-            "window_start": (as_of + timedelta(days=1)).date().isoformat(),
-            "window_end": (as_of + timedelta(days=14)).date().isoformat(),
-            "reason": "Material events tend to generate related follow-up disclosures or management clarification.",
-        }
-    if as_of is not None:
-        return {
-            "label": "Refresh this issuer soon",
-            "window_start": (as_of + timedelta(days=30)).date().isoformat(),
-            "window_end": (as_of + timedelta(days=90)).date().isoformat(),
-            "reason": "No cleaner filing cadence is available from the latest document metadata.",
+            "label": schedule["label"],
+            "window_start": schedule["window_start"],
+            "window_end": schedule["window_end"],
+            "reason": schedule["reason"],
         }
     return {
         "label": "No catalyst estimate yet",
@@ -1663,6 +1869,57 @@ def _estimate_next_catalyst(
         "window_end": None,
         "reason": "Insufficient timing metadata exists for this issuer.",
     }
+
+
+def _month_end(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def _shift_months(anchor: date, months: int) -> date:
+    month_index = (anchor.year * 12 + (anchor.month - 1)) + months
+    year = month_index // 12
+    month = (month_index % 12) + 1
+    return _month_end(year, month)
+
+
+def _filing_deadlines(fiscal_year_end_month: int, *, around_year: int) -> list[tuple[date, str, str, int]]:
+    fiscal_year_end = _month_end(around_year, fiscal_year_end_month)
+    q1_end = _shift_months(fiscal_year_end, -9)
+    h1_end = _shift_months(fiscal_year_end, -6)
+    q3_end = _shift_months(fiscal_year_end, -3)
+    return [
+        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1),
+        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2),
+        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3),
+        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4),
+    ]
+
+
+def _next_expected_filing_window(
+    *,
+    fiscal_year_end_month: int,
+    now: date,
+    latest_period_end: date | None,
+) -> dict[str, str] | None:
+    candidates: list[tuple[date, str, str, int]] = []
+    for year in range(now.year - 1, now.year + 3):
+        candidates.extend(_filing_deadlines(fiscal_year_end_month, around_year=year))
+    candidates.sort(key=lambda item: (item[0], item[3]))
+    for due_date, label, period_end_iso, _order in candidates:
+        period_end = _parse_iso_date(period_end_iso)
+        if due_date <= now:
+            continue
+        if latest_period_end is not None and period_end is not None and period_end <= latest_period_end:
+            continue
+        return {
+            "label": label,
+            "window_start": due_date.isoformat(),
+            "window_end": (due_date + timedelta(days=7)).isoformat(),
+            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} and IDX periodic filing heuristics.",
+        }
+    return None
 
 
 def _evaluate_theses(
@@ -1804,7 +2061,7 @@ def _status_for_thesis(
         return "improving", 0.8, "Positive thesis conditions are currently satisfied."
     if unsupported and not (matched_positive or matched_warning or matched_stop):
         return "unsupported", 0.2, "The thesis cannot be fully evaluated from current derived inputs."
-    return "intact", 0.6, "No warning or stop conditions are currently active."
+    return "holding", 0.6, "No warning or stop conditions are currently active."
 
 
 def _build_thesis_review_items(
@@ -1869,39 +2126,18 @@ def _aggregate_thesis_state(evaluations: list[ThesisEvaluationRecord]) -> str:
         return "improving"
     if "unsupported" in statuses:
         return "unsupported"
-    return "intact"
-
-
-def _decision_state_for(
-    thesis_evaluations: list[ThesisEvaluationRecord],
-    overall_state: str,
-    confidence: str,
-) -> str:
-    thesis_state = _aggregate_thesis_state(thesis_evaluations)
-    if thesis_state == "broken":
-        return "Avoid"
-    if overall_state in {"critical", "review_required"}:
-        return "Review manually"
-    if thesis_state == "improving" and confidence != "low":
-        return "Buy"
-    if thesis_state in {"weakening", "unsupported"}:
-        return "Watch"
-    if confidence == "low":
-        return "Review manually"
-    return "Watch"
+    return "holding"
 
 
 def _watchlist_priority_for(
-    thesis_evaluations: list[ThesisEvaluationRecord],
+    thesis_state: str,
     overall_state: str,
-    conflicts: list[ReviewQueueItem],
+    review_items: list[ReviewQueueItem],
+    decision_state: str,
 ) -> str:
-    thesis_state = _aggregate_thesis_state(thesis_evaluations)
-    if thesis_state == "broken" or overall_state == "critical":
+    if decision_state in {"Avoid", "Review manually"} or thesis_state == "broken" or overall_state == "critical":
         return "high"
-    if conflicts or thesis_state == "weakening" or overall_state == "review_required":
-        return "medium"
-    if thesis_state == "improving":
+    if review_items or thesis_state in {"weakening", "improving"} or overall_state in {"review_required", "watch"}:
         return "medium"
     return "low"
 
@@ -2223,7 +2459,7 @@ def _load_sector_profiles(
         params.append(exclude_ticker)
     rows = conn.execute(
         f"""
-        SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status
+        SELECT ticker, issuer_name, sector, subsector, industry, listing_board, active_status, fiscal_year_end_month
         FROM companies
         {where}
         ORDER BY CASE WHEN active_status = 'listed' THEN 0 ELSE 1 END, ticker ASC
@@ -2239,8 +2475,33 @@ def _load_sector_profiles(
             industry=row["industry"],
             listing_board=row["listing_board"],
             active_status=row["active_status"],
+            fiscal_year_end_month=int(row["fiscal_year_end_month"] or 12),
         )
         for row in rows
+    ]
+
+
+def _load_review_status_map(conn: sqlite3.Connection, *, ticker: str) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT source_key, status
+        FROM review_queue_items
+        WHERE ticker = ?
+        """,
+        (ticker,),
+    ).fetchall()
+    return {str(row["source_key"]): str(row["status"]) for row in rows}
+
+
+def _filter_active_review_items(
+    items: list[ReviewQueueItem],
+    *,
+    review_statuses: dict[str, str],
+) -> list[ReviewQueueItem]:
+    return [
+        item
+        for item in items
+        if review_statuses.get(item.source_key, "open") == "open"
     ]
 
 

@@ -7,7 +7,7 @@ import json
 from datetime import date
 
 from ..config import load_config
-from ..intelligence import DERIVED_VERSION, run_intelligence
+from ..intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
 from ..intelligence.review import (
     load_intelligence_kpis,
     load_review_queue,
@@ -126,6 +126,34 @@ def cmd_intelligence_kpis(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intelligence_rederive(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = rederive_intelligence(
+        cfg,
+        ticker=args.ticker,
+        limit=args.limit,
+    )
+    print(
+        "intelligence-rederive: "
+        f"derived_version={DERIVED_VERSION} "
+        f"selected_tickers={result.selected_tickers} "
+        f"deltas={result.deltas} "
+        f"snapshots={result.snapshots} "
+        f"timeseries={result.timeseries} "
+        f"briefs={result.briefs} "
+        f"review_items={result.review_items} "
+        f"peer_sets={result.peer_sets} "
+        f"sector_rollups={result.sector_rollups} "
+        f"thesis_evaluations={result.thesis_evaluations} "
+        f"claims={result.claims} "
+        f"claim_outcomes={result.claim_outcomes}"
+    )
+    return 0
+
+
 def register(sub) -> None:
     p_intelligence = sub.add_parser(
         "intelligence-run",
@@ -134,6 +162,14 @@ def register(sub) -> None:
     p_intelligence.add_argument("--ticker", help="Optional ticker filter for derived intelligence")
     p_intelligence.add_argument("--limit", type=int, default=25, help="Maximum number of tickers to derive per run")
     p_intelligence.set_defaults(func=cmd_intelligence_run)
+
+    p_rederive = sub.add_parser(
+        "intelligence-rederive",
+        help="Rebuild current derived snapshots for existing tickers",
+    )
+    p_rederive.add_argument("--ticker", help="Optional ticker filter for a single issuer")
+    p_rederive.add_argument("--limit", type=int, default=1000, help="Maximum number of existing snapshot tickers to rebuild")
+    p_rederive.set_defaults(func=cmd_intelligence_rederive)
 
     p_digest = sub.add_parser("digest-run", help="Build and persist a Phase 15 daily digest")
     p_digest.add_argument("--scope", choices=["watchlist", "all"], default="watchlist", help="Digest scope")

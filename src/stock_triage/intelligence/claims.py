@@ -61,71 +61,78 @@ class ClaimCredibilitySummary:
     credibility_state: str
 
 
-_CLAIM_PATTERNS: list[tuple[str, str, str | None, float, tuple[re.Pattern[str], ...]]] = [
+_CLAIM_PATTERNS: list[tuple[str, str, str | None, float, bool, tuple[re.Pattern[str], ...]]] = [
     (
-        "revenue_growth_claim",
+        "revenue_growth",
         "growth",
         "revenue",
         0.85,
+        False,
         (
             re.compile(r"\b(?:expect|expects|target|targets|aim|plan|plans|will)\b.{0,40}\b(?:revenue|sales)\b.{0,20}\b(?:grow|growth|increase)\b", re.I),
             re.compile(r"\b(?:grow|increase|improve)\b.{0,20}\b(?:revenue|sales)\b", re.I),
         ),
     ),
     (
-        "debt_reduction_claim",
+        "debt_reduction",
         "balance_sheet",
         "debt",
         0.9,
+        False,
         (
             re.compile(r"\b(?:reduce|reducing|reduction|lower|decrease|repay|deleverag\w*)\b.{0,30}\b(?:debt|borrowings|liabilities|leverage)\b", re.I),
         ),
     ),
     (
-        "margin_improvement_claim",
+        "margin_improvement",
         "profitability",
         "operating_profit",
         0.8,
+        False,
         (
             re.compile(r"\b(?:improve|improving|expand|expanding|restore)\b.{0,30}\b(?:margin|margins|profitability|operating profit)\b", re.I),
             re.compile(r"\b(?:margin|margins|profitability|operating profit)\b.{0,30}\b(?:improve|improving|expand|expanding|restore)\b", re.I),
         ),
     ),
     (
-        "capex_plan_claim",
+        "capex_expansion",
         "capital_allocation",
         "capex",
         0.75,
+        False,
         (
             re.compile(r"\b(?:plan|plans|intend|intends|target|targets|akan)\b.{0,40}\b(?:capex|capital expenditure|belanja modal)\b", re.I),
             re.compile(r"\b(?:capex|capital expenditure|belanja modal)\b.{0,40}\b(?:plan|target|202\d)\b", re.I),
         ),
     ),
     (
-        "funding_use_claim",
+        "funding_use",
         "capital_allocation",
         "use_of_proceeds",
         0.7,
+        False,
         (
             re.compile(r"\b(?:use of proceeds|penggunaan dana)\b.{0,60}\b(?:for|to|untuk)\b", re.I),
             re.compile(r"\b(?:proceeds|dana hasil penawaran)\b.{0,60}\b(?:used|allocated|dialokasikan)\b", re.I),
         ),
     ),
     (
-        "outlook_claim",
+        "outlook_guidance",
         "outlook",
         "outlook",
         0.65,
+        True,
         (
             re.compile(r"\b(?:guidance|outlook|prospek)\b.{0,60}\b(?:202\d|next year|tahun depan)\b", re.I),
             re.compile(r"\b(?:expects|target|aims|memproyeksikan|menargetkan)\b.{0,50}\b(?:202\d|tahun)\b", re.I),
         ),
     ),
     (
-        "risk_statement_claim",
+        "risk_explanation",
         "risk",
         "risk",
         0.6,
+        True,
         (
             re.compile(r"\b(?:risk|risiko)\b.{0,60}\b(?:may|could|dapat|berpotensi)\b", re.I),
             re.compile(r"\b(?:headwind|tantangan|uncertainty|ketidakpastian)\b", re.I),
@@ -146,7 +153,7 @@ def extract_claims_for_documents(
     for document in documents:
         chunks = _load_claim_source_chunks(conn, document.document_id)
         for chunk in chunks:
-            for claim_type, claim_topic, claim_subject, confidence, patterns in _CLAIM_PATTERNS:
+            for claim_type, claim_topic, claim_subject, confidence, qualitative_only, patterns in _CLAIM_PATTERNS:
                 match = _first_match(patterns, chunk.text)
                 if match is None:
                     continue
@@ -172,6 +179,8 @@ def extract_claims_for_documents(
                         payload_json=json.dumps(
                             {
                                 "chunk_id": chunk.chunk_id,
+                                "classification_source": "regex",
+                                "qualitative_only": qualitative_only,
                                 "section_label": chunk.section_label,
                                 "source_text": chunk.text[:400],
                             },
@@ -198,15 +207,27 @@ def evaluate_claim_outcomes(
         "Open": 0,
         "Not Yet Testable": 0,
         "Expired": 0,
+        "Qualitative": 0,
     }
     signatures: dict[tuple[str, str | None], int] = {}
+    evaluable_total = 0
     for claim in claims:
         signatures[(claim.claim_type, claim.claim_subject)] = signatures.get((claim.claim_type, claim.claim_subject), 0) + 1
-        status, rationale, evidence_span_id, payload = _evaluate_claim(
-            conn,
-            claim=claim,
-            latest_document_id=latest_document_id,
-        )
+        qualitative_only = _claim_is_qualitative(claim)
+        if qualitative_only:
+            status, rationale, evidence_span_id, payload = (
+                "Qualitative",
+                "Claim is narrative and stored for cross-document pattern tracking, not credibility scoring.",
+                claim.evidence_span_id,
+                {"support_links": [], "contradiction_links": [], "qualitative_only": True},
+            )
+        else:
+            evaluable_total += 1
+            status, rationale, evidence_span_id, payload = _evaluate_claim(
+                conn,
+                claim=claim,
+                latest_document_id=latest_document_id,
+            )
         counts[status] = counts.get(status, 0) + 1
         outcomes.append(
             ClaimOutcomeRecord(
@@ -219,7 +240,7 @@ def evaluate_claim_outcomes(
                 payload_json=json.dumps(payload, sort_keys=True),
             )
         )
-    total = len(claims)
+    total = evaluable_total
     achieved = counts["Achieved"]
     partially_supported = counts["Partially Supported"]
     missed = counts["Missed"]
@@ -265,11 +286,14 @@ def _evaluate_claim(
             {"support_links": [], "contradiction_links": []},
         )
     mapping = {
-        "revenue_growth_claim": ("revenue", "up"),
-        "debt_reduction_claim": ("total_liabilities", "down"),
-        "margin_improvement_claim": ("operating_profit", "up"),
+        "revenue_growth": ("revenue", "up"),
+        "debt_reduction": ("total_liabilities", "down"),
+        "margin_improvement": ("operating_profit", "up"),
+        "capex_expansion": ("capex", "up"),
     }
     metric_name, favorable_direction = mapping.get(claim.claim_type, (None, None))
+    if claim.claim_type == "funding_use":
+        return _evaluate_funding_use_claim(conn, claim=claim, latest_document_id=latest_document_id)
     if metric_name is None:
         return (
             "Open",
@@ -330,6 +354,38 @@ def _evaluate_metric_direction_claim(
     return ("Contradicted", f"{metric_name} moved against the claimed direction versus the originating filing.", evidence_span_id, payload)
 
 
+def _evaluate_funding_use_claim(
+    conn: sqlite3.Connection,
+    *,
+    claim: ClaimRecord,
+    latest_document_id: str,
+) -> tuple[str, str, str | None, dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT evidence_span_id, event_type
+        FROM events
+        WHERE document_id = ?
+          AND event_type IN ('use_of_proceeds', 'use_of_proceeds_update')
+        ORDER BY detected_at DESC, event_id DESC
+        LIMIT 1
+        """,
+        (latest_document_id,),
+    ).fetchone()
+    if row is None:
+        return (
+            "Open",
+            "No later use-of-proceeds disclosure was found yet.",
+            None,
+            {"support_links": [], "contradiction_links": []},
+        )
+    return (
+        "Partially Supported",
+        "A later use-of-proceeds disclosure exists, but the deployment quality still needs human judgment.",
+        row["evidence_span_id"],
+        {"support_links": [row["evidence_span_id"]] if row["evidence_span_id"] else [], "contradiction_links": []},
+    )
+
+
 def _load_claim_source_chunks(conn: sqlite3.Connection, document_id: str) -> list[ClaimSourceChunk]:
     rows = conn.execute(
         """
@@ -371,6 +427,14 @@ def _load_metric(conn: sqlite3.Connection, document_id: str, metric_name: str):
         """,
         (document_id, metric_name),
     ).fetchone()
+
+
+def _claim_is_qualitative(claim: ClaimRecord) -> bool:
+    try:
+        payload = json.loads(claim.payload_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    return bool(payload.get("qualitative_only")) or claim.claim_type in {"outlook_guidance", "risk_explanation"}
 
 
 def _first_match(patterns: tuple[re.Pattern[str], ...], text: str):

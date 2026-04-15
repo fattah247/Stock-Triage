@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
-from stock_triage.intelligence import DERIVED_VERSION, run_intelligence
+from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
+from stock_triage.intelligence.pipeline import _derive_stance
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -22,7 +23,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
     assert result.snapshots == 1
     assert result.timeseries == 7
     assert result.briefs == 1
-    assert result.review_items == 6
+    assert result.review_items == 5
     assert result.peer_sets == 1
     assert result.sector_rollups == 1
     assert result.thesis_evaluations == 1
@@ -82,10 +83,12 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["top_card"]["overall_state"] == "critical"
         assert payload["top_card"]["leverage_state"] == "warning"
         assert payload["top_card"]["management_credibility"] == "deteriorating"
+        assert payload["top_card"]["credibility_band"] == "poor"
         assert payload["top_card"]["thesis_state"] == "broken"
         assert payload["top_card"]["decision_state"] == "Avoid"
         assert payload["top_card"]["watchlist_priority"] == "high"
         assert payload["decision_panel"]["stance"] == "Avoid"
+        assert payload["decision_panel"]["confidence"] == "high"
         assert payload["decision_panel"]["what_changed"]
         assert payload["decision_panel"]["what_to_watch"]
         assert payload["decision_panel"]["must_improve"]
@@ -99,15 +102,15 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["management_credibility"]["contradicted"] == 1
         assert payload["management_credibility"]["credibility_state"] == "deteriorating"
         assert {claim["claim_type"] for claim in payload["claims"]} == {
-            "debt_reduction_claim",
-            "margin_improvement_claim",
-            "outlook_claim",
-            "revenue_growth_claim",
+            "debt_reduction",
+            "margin_improvement",
+            "outlook_guidance",
+            "revenue_growth",
         }
         assert {outcome["outcome_status"] for outcome in payload["claim_outcomes"]} == {
             "Achieved",
             "Contradicted",
-            "Open",
+            "Qualitative",
         }
         assert payload["thesis_evaluations"][0]["status"] == "broken"
         assert payload["thesis_evaluations"][0]["details"]["matched_stop"][0]["kind"] == "rule_present"
@@ -137,7 +140,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert counts == {
             "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 6,
+            "review_queue_items": 5,
             "peer_sets": 1,
             "sector_rollups": 1,
             "management_claims": 4,
@@ -183,7 +186,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
             "company_snapshots": 1,
             "company_timeseries": 7,
             "decision_briefs": 1,
-            "review_queue_items": 6,
+            "review_queue_items": 5,
             "peer_sets": 1,
             "sector_rollups": 1,
             "management_claims": 4,
@@ -208,11 +211,42 @@ def test_intelligence_cli_uses_phase10_runner(tmp_config, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "intelligence-run:" in captured
-    assert "derived_version=phase14-v1" in captured
+    assert f"derived_version={DERIVED_VERSION}" in captured
     assert "selected_tickers=1" in captured
     assert "thesis_evaluations=1" in captured
     assert "claims=4" in captured
     assert "claim_outcomes=4" in captured
+
+
+def test_rederive_intelligence_rebuilds_existing_snapshot_tickers(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+
+    run_intelligence(tmp_config, ticker="TAMU")
+    result = rederive_intelligence(tmp_config, limit=10)
+
+    assert result.selected_tickers == 1
+    assert result.snapshots == 1
+    assert result.briefs == 1
+
+
+def test_stance_mapping_table_rows():
+    cases = [
+        (dict(overall_state="stable", thesis_state="broken", credibility_state="high", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Avoid", "high")),
+        (dict(overall_state="critical", thesis_state="holding", credibility_state="acceptable", has_critical_rules=True, has_open_reviews=False, data_completeness=True), ("Review manually", "high")),
+        (dict(overall_state="critical", thesis_state="holding", credibility_state="acceptable", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Review manually", "medium")),
+        (dict(overall_state="watch", thesis_state="holding", credibility_state="poor", has_critical_rules=False, has_open_reviews=True, data_completeness=True), ("Avoid", "medium")),
+        (dict(overall_state="watch", thesis_state="weakening", credibility_state="acceptable", has_critical_rules=True, has_open_reviews=False, data_completeness=True), ("Review manually", "medium")),
+        (dict(overall_state="watch", thesis_state="weakening", credibility_state="acceptable", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Watch", "medium")),
+        (dict(overall_state="stable", thesis_state="improving", credibility_state="high", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Buy", "high")),
+        (dict(overall_state="stable", thesis_state="holding", credibility_state="acceptable", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Watch", "high")),
+        (dict(overall_state="watch", thesis_state="holding", credibility_state="acceptable", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Watch", "medium")),
+        (dict(overall_state="stable", thesis_state="none", credibility_state="unknown", has_critical_rules=False, has_open_reviews=False, data_completeness=True), ("Watch", "low")),
+        (dict(overall_state="stable", thesis_state="unsupported", credibility_state="unknown", has_critical_rules=False, has_open_reviews=False, data_completeness=False), ("Watch", "low")),
+        (dict(overall_state="stable", thesis_state="holding", credibility_state="acceptable", has_critical_rules=True, has_open_reviews=False, data_completeness=False), ("Review manually", "low")),
+    ]
+    for payload, expected in cases:
+        assert _derive_stance(**payload) == expected
 
 
 def _seed_phase10_inputs(tmp_config) -> None:
@@ -273,7 +307,7 @@ def _seed_phase10_inputs(tmp_config) -> None:
                     "bilingual",
                     "analyzed",
                     "phase4-v1",
-                    "phase5-v1",
+                    "phase5-v2",
                     "phase6-v1",
                     "phase7-v2",
                     "gemma2:9b",
@@ -633,7 +667,7 @@ def _seed_phase10_inputs(tmp_config) -> None:
                             "bilingual",
                             "analyzed",
                             "phase4-v1",
-                            "phase5-v1",
+                            "phase5-v2",
                             "phase6-v1",
                             "phase7-v2",
                             "gemma2:9b",

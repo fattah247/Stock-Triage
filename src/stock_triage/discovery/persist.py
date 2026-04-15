@@ -35,6 +35,7 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
         subsector = candidate.raw_metadata.get("sub_sector") or "unknown"
         industry = candidate.raw_metadata.get("industry") or "unknown"
         listing_board = candidate.raw_metadata.get("listing_board") or ""
+        fiscal_year_end_month = int(candidate.raw_metadata.get("fiscal_year_end_month") or 12)
 
         existing = conn.execute(
             "SELECT ticker FROM companies WHERE ticker = ?",
@@ -45,9 +46,9 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                 """
                 INSERT INTO companies (
                     ticker, issuer_name, listing_date, source_urls, raw_metadata,
-                    sector, subsector, industry, listing_board,
+                    sector, subsector, industry, listing_board, fiscal_year_end_month,
                     first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate.ticker,
@@ -59,6 +60,7 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     subsector,
                     industry,
                     listing_board,
+                    fiscal_year_end_month,
                     now,
                     now,
                 ),
@@ -73,7 +75,8 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     sector = CASE WHEN sector IN ('unknown', '') THEN ? ELSE sector END,
                     subsector = CASE WHEN subsector IN ('unknown', '') THEN ? ELSE subsector END,
                     industry = CASE WHEN industry IN ('unknown', '') THEN ? ELSE industry END,
-                    listing_board = CASE WHEN listing_board = '' THEN ? ELSE listing_board END
+                    listing_board = CASE WHEN listing_board = '' THEN ? ELSE listing_board END,
+                    fiscal_year_end_month = COALESCE(fiscal_year_end_month, ?)
                 WHERE ticker = ?
                 """,
                 (
@@ -86,6 +89,7 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     subsector,
                     industry,
                     listing_board,
+                    fiscal_year_end_month,
                     candidate.ticker,
                 ),
             )

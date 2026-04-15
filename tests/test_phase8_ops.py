@@ -276,7 +276,7 @@ def _seed_phase8_data(tmp_config) -> None:
                         "bilingual",
                         "analyzed",
                         "phase4-v1",
-                        "phase5-v1",
+                        "phase5-v2",
                         "phase6-v1",
                         "phase7-v2",
                         "gemma2:9b",

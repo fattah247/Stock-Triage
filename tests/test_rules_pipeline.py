@@ -305,7 +305,7 @@ def _insert_extracted_document(
                     "bilingual",
                     "extracted",
                     "phase4-v1",
-                    "phase5-v1",
+                    "phase5-v2",
                     ticker,
                     now,
                     now,

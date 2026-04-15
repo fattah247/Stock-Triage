@@ -236,7 +236,7 @@ def _insert_analyzed_document(tmp_config) -> tuple[str, str]:
                     "bilingual",
                     "analyzed",
                     "phase4-v1",
-                    "phase5-v1",
+                    "phase5-v2",
                     "phase6-v1",
                     "TAMU",
                     now,

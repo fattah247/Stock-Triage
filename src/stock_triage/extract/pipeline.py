@@ -13,7 +13,7 @@ from typing import Any
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 
-EXTRACTOR_VERSION = "phase5-v1"
+EXTRACTOR_VERSION = "phase5-v2"
 FINANCIAL_REQUIRED_METRICS = {
     "revenue",
     "gross_profit",
@@ -23,6 +23,21 @@ FINANCIAL_REQUIRED_METRICS = {
     "total_liabilities",
     "equity",
     "operating_cash_flow",
+}
+FINANCIAL_CORE_METRICS = FINANCIAL_REQUIRED_METRICS | {
+    "capex",
+    "cash",
+    "short_term_debt",
+    "long_term_debt",
+    "share_count",
+    "net_debt",
+    "free_cash_flow",
+}
+FINANCIAL_STRETCH_METRICS = {
+    "ebitda",
+    "interest_coverage",
+    "segment_revenue",
+    "segment_profit",
 }
 
 
@@ -535,11 +550,18 @@ def _extract_financial_highlight_chunk(
     language_variant: str,
 ) -> list[ExtractedMetric]:
     patterns = [
-        ("revenue", r"Pendapatan\s+([\(]?\d[\d\.,]*\)?)"),
-        ("gross_profit", r"(?:Laba Bruto|Gross Profit)\s+([\(]?\d[\d\.,]*\)?)"),
-        ("net_profit", r"(?:RUGI TAHUN BERJALAN|Laba Bersih|Net Pro[fi][tﬁ]t?)\s+([\(]?\d[\d\.,]*\)?)"),
-        ("total_assets", r"(?:JUMLAH ASET|Total Asset In USD|Aset \| Assets)\s+([\(]?\d[\d\.,]*\)?)"),
-        ("total_liabilities", r"(?:JUMLAH LIABILITAS|Total Liabilities In USD)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("revenue", r"(?:Pendapatan|Revenue)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("gross_profit", r"(?:Laba Bruto|Gross Profit|Gross profit)\s+([\(]?\d[\d\.,]*\)?)"),
+        (
+            "operating_profit",
+            r"(?:Laba Usaha|Operating Profit|Operating profit|Operating income)\s+([\(]?\d[\d\.,]*\)?)",
+        ),
+        (
+            "net_profit",
+            r"(?:RUGI TAHUN BERJALAN|Laba Bersih|Net Profit|Net profit|Profit for the year)\s+([\(]?\d[\d\.,]*\)?)",
+        ),
+        ("total_assets", r"(?:JUMLAH ASET|Total Asset In USD|Total Assets|Total assets|Aset \| Assets)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("total_liabilities", r"(?:JUMLAH LIABILITAS|Total Liabilities In USD|Total Liabilities|Total liabilities)\s+([\(]?\d[\d\.,]*\)?)"),
         ("equity", r"(?:Ekuitas|Equity In USD|Equity)\s+([\(]?\d[\d\.,]*\)?)"),
     ]
     out: list[ExtractedMetric] = []
@@ -671,6 +693,8 @@ def _extract_optional_financial_metrics(
             r"(?:Jumlah saham beredar|Shares outstanding|Weighted average shares outstanding)\s+([\(]?\d[\d\.,]*\)?)",
         ),
         ("capex", r"(?:Belanja modal|Capital expenditure|Capex)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("ebitda", r"(?:EBITDA)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("interest_expense", r"(?:Beban bunga|Interest expense)\s+([\(]?\d[\d\.,]*\)?)"),
     ]
     out: list[ExtractedMetric] = []
     for metric_name, pattern in patterns:
@@ -707,6 +731,8 @@ def _derive_financial_metrics(metrics: dict[str, ExtractedMetric]) -> list[Extra
     long_term_debt = metrics.get("long_term_debt")
     operating_cash_flow = metrics.get("operating_cash_flow")
     capex = metrics.get("capex")
+    operating_profit = metrics.get("operating_profit")
+    interest_expense = metrics.get("interest_expense")
     debt_total = None
     debt_source = short_term_debt or long_term_debt
     if short_term_debt is not None or long_term_debt is not None:
@@ -751,6 +777,28 @@ def _derive_financial_metrics(metrics: dict[str, ExtractedMetric]) -> list[Extra
                 char_end=capex.char_end,
             )
         )
+    if operating_profit is not None and interest_expense is not None:
+        denominator = abs(interest_expense.value_normalized or 0.0)
+        if denominator:
+            derived.append(
+                ExtractedMetric(
+                    metric_name="interest_coverage",
+                    value_normalized=(operating_profit.value_normalized or 0.0) / denominator,
+                    raw_value_text=f"{operating_profit.raw_value_text} / {interest_expense.raw_value_text}",
+                    currency=operating_profit.currency,
+                    unit_scale="ratio",
+                    fiscal_year=operating_profit.fiscal_year,
+                    fiscal_period=operating_profit.fiscal_period,
+                    period_end_date=operating_profit.period_end_date,
+                    audit_status=operating_profit.audit_status,
+                    consolidation_scope=operating_profit.consolidation_scope,
+                    language_variant=operating_profit.language_variant,
+                    chunk=interest_expense.chunk,
+                    excerpt_text=interest_expense.excerpt_text,
+                    char_start=interest_expense.char_start,
+                    char_end=interest_expense.char_end,
+                )
+            )
     return derived
 
 
@@ -793,7 +841,7 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             [r"rapat umum pemegang saham", r"general meeting of shareholders", r"ringkasan risalah"],
         ),
         (
-            "dividend_notice",
+            "dividend_announcement",
             "dividen tunai",
             "info",
             "Document discloses a dividend decision or explicit no-dividend outcome.",
@@ -919,7 +967,7 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             [r"revisi proyeksi", r"guidance revision", r"projection miss", r"guidance miss", r"target .* tidak tercapai"],
         ),
         (
-            "use_of_proceeds_update",
+            "use_of_proceeds",
             "penggunaan dana",
             "info",
             "Document updates or revises use-of-proceeds disclosures.",
