@@ -42,7 +42,7 @@
     activeView: "home",       // current view tab
     subviews: {
       home: "board",
-      company: "current",
+      company: "summary",
       ops: "run",
     },
   };
@@ -485,10 +485,9 @@
     if (hint) {
       const hints = {
         home: "Start with the decision board, then open one issuer.",
-        watchlist: "Stay inside starred names and work urgency from the top.",
-        company: "Use local company modes to move from current view to filings, signals, and context.",
+        company: "Use local company modes to move from summary to filings, signals, and context.",
         review: "Resolve or snooze grouped issue families here.",
-        ops: "Run actions, monitor system health, and audit golden checks in separate modes.",
+        ops: "Run actions, inspect health, and audit golden checks in separate modes.",
       };
       hint.textContent = hints[view] || "";
     }
@@ -497,16 +496,11 @@
         home: {
           eyebrow: "Decision Flow",
           title: "Start from ranked market decisions, not from raw documents.",
-          lead: "Use Home in three passes: Decision Board for picks and risks, Inbox for recent changes, then Digest and KPI health when you need context.",
-        },
-        watchlist: {
-          eyebrow: "Watchlist Mode",
-          title: "Stay inside the names you already care about.",
-          lead: "Watchlist is for urgency triage across starred issuers only. Use it when you want a narrow operating list instead of the full market.",
+          lead: "Use Home in three passes: Decision Board for ranked names, Watchlist for your narrow list, then Recent Changes for feed and digest context.",
         },
         company: {
           eyebrow: "Company Workspace",
-          title: "Work one issuer through current view, filings, signals, and context.",
+          title: "Work one issuer through Summary, Filings, Signals, and Context.",
           lead: "The company screen is now split into local modes so you can inspect one layer at a time instead of scrolling through the whole research stack.",
         },
         review: {
@@ -516,8 +510,8 @@
         },
         ops: {
           eyebrow: "Operations",
-          title: "Run, monitor, and audit the system in separate modes.",
-          lead: "Ops is now split so you can trigger actions, inspect health, and run audits without mixing them into one long control page.",
+          title: "Run, inspect health, and audit the system in separate modes.",
+          lead: "Ops is split so you can trigger actions, inspect health, and run audits without mixing them into one long control page.",
         },
       };
       const current = copy[view] || copy.home;
@@ -526,7 +520,7 @@
       viewLead.textContent = current.lead;
     }
     // Trigger lazy-load for sections relevant to the new view.
-    if (view === "home" || view === "watchlist") {
+    if (view === "home") {
       fetchSectionDetail("inbox");
       fetchSectionDetail("digest");
     }
@@ -546,7 +540,7 @@
     const q = (search?.value || "").trim().toLowerCase();
     const watchlist = new Set((data.watchlist || []).map((t) => t.toUpperCase()));
     const issuers = data.issuers.filter((item) => {
-      if (state.activeView === "watchlist" && !watchlist.has(item.ticker.toUpperCase())) return false;
+      if (state.activeView === "home" && state.subviews.home === "watchlist" && !watchlist.has(item.ticker.toUpperCase())) return false;
       return !q || [item.ticker, item.issuer_name, item.sector, item.subsector].join(" ").toLowerCase().includes(q);
     });
     ensureSelection(issuers);
@@ -1890,7 +1884,7 @@
     const issuerTarget = event.target.closest("[data-ticker]");
     if (issuerTarget) {
       state.selectedTicker = issuerTarget.dataset.ticker || null;
-      state.subviews.company = "current";
+      state.subviews.company = "summary";
       render();
       if (state.selectedTicker) {
         fetchCompanyDetail(state.selectedTicker);
@@ -1902,7 +1896,7 @@
     const focusTarget = event.target.closest("[data-focus-ticker]");
     if (focusTarget) {
       state.selectedTicker = focusTarget.dataset.focusTicker || null;
-      state.subviews.company = "current";
+      state.subviews.company = "summary";
       render();
       if (state.selectedTicker) {
         fetchCompanyDetail(state.selectedTicker);

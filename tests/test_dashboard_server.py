@@ -71,7 +71,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Daily Digest" in html
         assert "Open Review Queue" in html
         assert "Decision board" in html
-        assert "Decision Snapshot" in html
+        assert "Summary" in html
         assert "Claims and Thesis" in html
         assert "Context and Comparison" in html
         assert "Observability" in html

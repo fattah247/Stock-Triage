@@ -318,6 +318,16 @@ section[data-views].viewVisible[data-subpanels].subPanelVisible {
   align-items: start;
 }
 
+body[data-active-view="review"] .workspace,
+body[data-active-view="ops"] .workspace {
+  grid-template-columns: 1fr;
+}
+
+body[data-active-view="review"] [data-shell="rail"],
+body[data-active-view="ops"] [data-shell="rail"] {
+  display: none;
+}
+
 .sidebar {
   position: sticky;
   top: 18px;
