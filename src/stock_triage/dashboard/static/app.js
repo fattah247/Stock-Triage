@@ -549,6 +549,8 @@
 
     if (marketMonitor) {
       const counts = marketData.counts || {};
+      const pickRows = marketData.stock_pick_candidates || [];
+      const avoidRows = marketData.avoid_candidates || [];
       const riskRows = marketData.highest_risk_changes || [];
       const improvedRows = marketData.most_improved || [];
       const sectorRows = marketData.sector_heatmap || [];
@@ -564,11 +566,69 @@
           <div class="stat"><div class="summaryLabel">New since last sync</div><strong>${esc(counts.new_disclosures_since_sync || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Material events since sync</div><strong>${esc(counts.material_event_filings_since_sync || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Potential late periodic</div><strong>${esc(counts.late_periodic_filings || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Stock-pick candidates</div><strong>${esc(counts.stock_pick_candidates || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Avoid candidates</div><strong>${esc(counts.avoid_candidates || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Auditor changes 7d</div><strong>${esc(counts.auditor_changes_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Management changes 7d</div><strong>${esc(counts.management_changes_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Debt restructurings 7d</div><strong>${esc(counts.debt_restructurings_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Rights issues 7d</div><strong>${esc(counts.rights_issues_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Legal / regulatory 7d</div><strong>${esc(counts.lawsuits_regulatory_7d || 0)}</strong></div>
+        </div>
+        <div class="docGroups">
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Stock-pick candidates</h3>
+                <div class="meta">Deterministic Buy candidates only. Requires high-confidence Buy stance, improving thesis, no open review queue, and evidence-backed reasons.</div>
+              </div>
+            </div>
+            ${
+              pickRows.length
+                ? `<div class="findingStack">${pickRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-ok ${item.ticker ? "clickableCard" : ""}" ${
+                          item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                        }>
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.decision_state || "Buy")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
+                          <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No deterministic reasons captured."}</div>
+                          <div class="meta">${(item.decision_constraints || []).map(esc).join(" · ") || "No immediate constraints."}</div>
+                          <div class="meta">${renderTimestamp(item.as_of_date)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No stock-pick candidates right now.</strong> The list only populates when the deterministic eligibility gates are met.</div>`
+            }
+          </section>
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Avoid candidates</h3>
+                <div class="meta">Deterministic avoid calls only. Requires an Avoid stance with evidence-backed stress such as broken theses, critical signals, or poor credibility.</div>
+              </div>
+            </div>
+            ${
+              avoidRows.length
+                ? `<div class="findingStack">${avoidRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-critical ${item.ticker ? "clickableCard" : ""}" ${
+                          item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                        }>
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.decision_state || "Avoid")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
+                          <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No deterministic reasons captured."}</div>
+                          <div class="meta">${(item.decision_constraints || []).map(esc).join(" · ") || "No decision constraints captured."}</div>
+                          <div class="meta">${renderTimestamp(item.as_of_date)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No avoid candidates right now.</strong> The list only populates when the deterministic avoid gates are met.</div>`
+            }
+          </section>
         </div>
         <div class="docGroups">
           <section class="docGroup">

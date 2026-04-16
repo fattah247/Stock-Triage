@@ -425,10 +425,14 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             (week_start.isoformat(),),
         ).fetchall()
     ]
+    stock_pick_candidates: list[dict[str, object]] = []
+    avoid_candidates: list[dict[str, object]] = []
     most_improved: list[dict[str, object]] = []
     for row in snapshot_rows:
         payload = json.loads(row["payload_json"] or "{}")
         top_card = payload.get("top_card", {})
+        decision_panel = payload.get("decision_panel", {})
+        recommendation = decision_panel.get("recommendation") or payload.get("recommendation") or {}
         ticker = str(row["ticker"])
         peer_anomalies = len(payload.get("peer_comparison", {}).get("anomalies") or [])
         open_reviews = review_counts.get(ticker, 0)
@@ -449,6 +453,22 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             + (8 * len(positive_factors))
             - (10 if top_card.get("overall_state") in {"critical", "review_required"} else 0)
         )
+        candidate_row = {
+            "ticker": ticker,
+            "issuer_name": payload.get("issuer_name"),
+            "decision_state": top_card.get("decision_state"),
+            "confidence": decision_panel.get("confidence") or top_card.get("stance_confidence") or top_card.get("confidence"),
+            "score": recommendation.get("score", 0),
+            "reasons": recommendation.get("reasons") or [],
+            "decision_constraints": recommendation.get("decision_constraints") or [],
+            "evidence_ref_count": recommendation.get("evidence_ref_count", 0),
+            "as_of_document_id": recommendation.get("as_of_document_id") or row["ticker"],
+            "as_of_date": row["as_of_date"] or row["updated_at"],
+        }
+        if recommendation.get("bucket") == "stock_pick_candidate":
+            stock_pick_candidates.append(candidate_row)
+        elif recommendation.get("bucket") == "avoid_candidate":
+            avoid_candidates.append(candidate_row)
         if improvement_score > 0 and top_card.get("overall_state") != "critical":
             most_improved.append(
                 {
@@ -489,11 +509,21 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             "new_disclosures_since_sync": new_disclosures_since_sync,
             "material_event_filings_since_sync": material_event_filings_today,
             "late_periodic_filings": len(late_periodic_rows),
+            "stock_pick_candidates": len(stock_pick_candidates),
+            "avoid_candidates": len(avoid_candidates),
             **major_event_counts,
         },
         "source_syncs": list(source_syncs.values()),
         "staleness_warning": any(bool(row.get("stale")) for row in source_syncs.values()),
         "sector_heatmap": sector_heatmap,
+        "stock_pick_candidates": sorted(
+            stock_pick_candidates,
+            key=lambda item: (-int(item["score"]), str(item["ticker"])),
+        )[:10],
+        "avoid_candidates": sorted(
+            avoid_candidates,
+            key=lambda item: (-int(item["score"]), str(item["ticker"])),
+        )[:10],
         "highest_risk_changes": sorted(
             highest_risk_changes,
             key=lambda item: (-int(item["risk_score"]), str(item["ticker"])),

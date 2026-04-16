@@ -79,11 +79,15 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "re-parse" in app_js
         assert "re-extract" in app_js
         assert "run rules" in app_js
+        assert "Stock-pick candidates" in app_js
+        assert "Avoid candidates" in app_js
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"
         assert "market_monitor" in snapshot
         assert "counts" in snapshot["market_monitor"]
+        assert "stock_pick_candidates" in snapshot["market_monitor"]
+        assert "avoid_candidates" in snapshot["market_monitor"]
         assert snapshot["inbox_rows"][0]["ticker"] == "TAMU"
         assert snapshot["inbox_rows"][0]["kind"] in {"document", "rule", "summary", "event"}
         assert snapshot["backlog_rows"][0]["source_name"] == "idx_financial_reports"
