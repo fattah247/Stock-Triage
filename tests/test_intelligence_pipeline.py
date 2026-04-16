@@ -8,10 +8,16 @@ from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.fiscal_year import save_fiscal_year_override
 from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
+from stock_triage.intelligence.claims import ClaimCredibilitySummary, ClaimRecord
 from stock_triage.intelligence.pipeline import (
+    AnalysisSummary,
+    EventSignal,
+    MetricPoint,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
+    _build_narrative_signals,
     _build_recommendation_summary,
+    _build_segment_summary,
     _derive_stance,
     _next_expected_filing_window,
 )
@@ -419,6 +425,269 @@ def test_next_expected_filing_window_matches_v3_2_deadline_table():
     assert annual_report is not None
     assert annual_report["report_type"] == "annual_report"
     assert annual_report["window_start"] == "2026-03-31"
+
+
+def test_build_segment_summary_tracks_trend_and_concentration():
+    latest_metrics = [
+        MetricPoint(
+            metric_id="m1",
+            document_id="doc-current",
+            metric_name="revenue",
+            value_normalized=1000.0,
+            raw_value_text="1000",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2025,
+            fiscal_period="Annual",
+            period_end_date="2025-12-31",
+            audit_status="audited",
+            consolidation_scope="consolidated",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m2",
+            document_id="doc-current",
+            metric_name="segment_revenue",
+            value_normalized=700.0,
+            raw_value_text="700",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2025,
+            fiscal_period="Annual",
+            period_end_date="2025-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Retail",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m3",
+            document_id="doc-current",
+            metric_name="segment_profit",
+            value_normalized=105.0,
+            raw_value_text="105",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2025,
+            fiscal_period="Annual",
+            period_end_date="2025-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Retail",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m4",
+            document_id="doc-current",
+            metric_name="segment_revenue",
+            value_normalized=300.0,
+            raw_value_text="300",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2025,
+            fiscal_period="Annual",
+            period_end_date="2025-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Wholesale",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m5",
+            document_id="doc-current",
+            metric_name="segment_profit",
+            value_normalized=30.0,
+            raw_value_text="30",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2025,
+            fiscal_period="Annual",
+            period_end_date="2025-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Wholesale",
+            evidence_span_id=None,
+        ),
+    ]
+    all_metrics = latest_metrics + [
+        MetricPoint(
+            metric_id="m6",
+            document_id="doc-previous",
+            metric_name="segment_revenue",
+            value_normalized=500.0,
+            raw_value_text="500",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2024,
+            fiscal_period="Annual",
+            period_end_date="2024-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Retail",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m7",
+            document_id="doc-previous",
+            metric_name="segment_profit",
+            value_normalized=80.0,
+            raw_value_text="80",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2024,
+            fiscal_period="Annual",
+            period_end_date="2024-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Retail",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m8",
+            document_id="doc-previous",
+            metric_name="segment_revenue",
+            value_normalized=450.0,
+            raw_value_text="450",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2024,
+            fiscal_period="Annual",
+            period_end_date="2024-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Wholesale",
+            evidence_span_id=None,
+        ),
+        MetricPoint(
+            metric_id="m9",
+            document_id="doc-previous",
+            metric_name="segment_profit",
+            value_normalized=60.0,
+            raw_value_text="60",
+            currency="USD",
+            unit_scale="units",
+            fiscal_year=2024,
+            fiscal_period="Annual",
+            period_end_date="2024-12-31",
+            audit_status="audited",
+            consolidation_scope="segment:Wholesale",
+            evidence_span_id=None,
+        ),
+    ]
+
+    rows = _build_segment_summary(
+        latest_document_id="doc-current",
+        latest_metrics=latest_metrics,
+        all_metrics=all_metrics,
+    )
+
+    assert rows[0]["segment_name"] == "Retail"
+    assert rows[0]["revenue_share_pct"] == 70.0
+    assert rows[0]["trend"] == "improving"
+    assert rows[0]["dominant"] is True
+    assert rows[0]["concentration_risk"] == "high"
+    assert rows[1]["segment_name"] == "Wholesale"
+    assert rows[1]["trend"] == "deteriorating"
+
+
+def test_build_narrative_signals_is_deterministic_and_deduped():
+    latest_analysis = AnalysisSummary(
+        analysis_run_id="analysis-1",
+        summary="Management expects performance to remain stable and still emphasizes the same turnaround plan.",
+        what_to_verify=["Watch covenant headroom."],
+        finished_at="2026-04-16T00:00:00+00:00",
+    )
+    events = [
+        EventSignal(
+            event_id="event-1",
+            event_type="guidance_change",
+            severity="warning",
+            impact_direction="negative",
+            confidence=0.8,
+            rationale="Guidance was revised downward.",
+            evidence_span_id=None,
+            payload_json=json.dumps({"matched_regex": "guidance revision"}),
+            detected_at="2026-04-16T00:00:00+00:00",
+        ),
+        EventSignal(
+            event_id="event-2",
+            event_type="use_of_proceeds",
+            severity="info",
+            impact_direction="mixed",
+            confidence=0.75,
+            rationale="Issuer updated proceeds deployment.",
+            evidence_span_id=None,
+            payload_json=json.dumps({"matched_regex": "use of proceeds"}),
+            detected_at="2026-04-16T00:00:00+00:00",
+        ),
+    ]
+    claims = [
+        ClaimRecord(
+            claim_id="claim-1",
+            ticker="TAMU",
+            source_document_id="doc-1",
+            claim_text="Management expects guidance to improve.",
+            claim_type="outlook_guidance",
+            claim_topic="guidance",
+            claim_subject="guidance",
+            claim_date=None,
+            claim_time_horizon="12m",
+            claim_confidence=0.8,
+            evidence_span_id=None,
+            status="open",
+            payload_json="{}",
+        ),
+        ClaimRecord(
+            claim_id="claim-2",
+            ticker="TAMU",
+            source_document_id="doc-1",
+            claim_text="Use of proceeds will fund fleet upgrades.",
+            claim_type="funding_use",
+            claim_topic="capital_allocation",
+            claim_subject="use_of_proceeds",
+            claim_date=None,
+            claim_time_horizon="12m",
+            claim_confidence=0.7,
+            evidence_span_id=None,
+            status="open",
+            payload_json="{}",
+        ),
+        ClaimRecord(
+            claim_id="claim-3",
+            ticker="TAMU",
+            source_document_id="doc-1",
+            claim_text="Management explained downside risks.",
+            claim_type="risk_explanation",
+            claim_topic="risk",
+            claim_subject="risk",
+            claim_date=None,
+            claim_time_horizon=None,
+            claim_confidence=0.7,
+            evidence_span_id=None,
+            status="open",
+            payload_json="{}",
+        ),
+    ]
+    credibility_summary = ClaimCredibilitySummary(
+        total_claims=3,
+        achieved=1,
+        partially_supported=0,
+        missed=0,
+        contradicted=1,
+        unresolved=1,
+        achieved_rate=0.33,
+        missed_rate=0.0,
+        unresolved_rate=0.33,
+        recycled_claim_count=2,
+        credibility_state="mixed",
+    )
+
+    signals = _build_narrative_signals(
+        latest_analysis=latest_analysis,
+        events=events,
+        claims=claims,
+        credibility_summary=credibility_summary,
+    )
+
+    assert signals == [
+        "Management guidance was later revised or missed.",
+        "Funding-use claims now have matching proceeds disclosures.",
+        "Management explicitly framed downside risks in the latest narrative.",
+        "Management repeated similar claims across filings, which may indicate boilerplate narrative reuse.",
+    ]
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

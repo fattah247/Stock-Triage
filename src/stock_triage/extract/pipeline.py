@@ -36,6 +36,8 @@ FINANCIAL_CORE_METRICS = FINANCIAL_REQUIRED_METRICS | {
 FINANCIAL_STRETCH_METRICS = {
     "ebitda",
     "interest_coverage",
+    "receivables",
+    "inventory",
     "segment_revenue",
     "segment_profit",
 }
@@ -89,7 +91,10 @@ class ExtractedEvent:
     event_type: str
     matched_pattern: str
     severity: str
+    impact_direction: str | None
+    confidence: float | None
     rationale: str
+    payload_json: str
     chunk: ChunkText
     excerpt_text: str
     char_start: int
@@ -706,6 +711,8 @@ def _extract_optional_financial_metrics(
         ("capex", r"(?:Belanja modal|Capital expenditure|Capex)\s+([\(]?\d[\d\.,]*\)?)"),
         ("ebitda", r"(?:EBITDA)\s+([\(]?\d[\d\.,]*\)?)"),
         ("interest_expense", r"(?:Beban bunga|Interest expense)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("receivables", r"(?:Piutang usaha|Trade receivables|Accounts receivable)\s+([\(]?\d[\d\.,]*\)?)"),
+        ("inventory", r"(?:Persediaan|Inventory)\s+([\(]?\d[\d\.,]*\)?)"),
     ]
     out: list[ExtractedMetric] = []
     for metric_name, pattern in patterns:
@@ -880,6 +887,8 @@ def _extract_financial_events(document: ExtractDocument, chunks: list[ChunkText]
             "debt_refinancing",
             "restrukturisasi kredit",
             "info",
+            "mixed",
+            0.7,
             "Annual report notes a credit restructuring or refinancing action.",
             [r"restrukturisasi kredit", r"credit restructuring", r"\brefinancing\b"],
         ),
@@ -887,6 +896,8 @@ def _extract_financial_events(document: ExtractDocument, chunks: list[ChunkText]
             "suspension_related_notice",
             "penghentian sementara perdagangan saham",
             "warning",
+            "negative",
+            0.9,
             "Annual report references suspension, delisting, or relisting status.",
             [r"penghentian sementara perdagangan saham", r"\bsuspension\b", r"lifted the temporary suspension"],
         ),
@@ -894,6 +905,8 @@ def _extract_financial_events(document: ExtractDocument, chunks: list[ChunkText]
             "material_transaction",
             "penjualan kapal",
             "info",
+            "mixed",
+            0.6,
             "Annual report discloses a vessel sale or other material transaction.",
             [r"penjualan\s+1\s+unit\s+kapal", r"sale of\s+1\s+unit\s+of\s+the company.?s vessel"],
         ),
@@ -908,6 +921,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "shareholder_meeting_summary",
             "rapat umum pemegang saham",
             "info",
+            "neutral",
+            0.95,
             "Document contains a shareholder meeting summary or meeting minutes notice.",
             [r"rapat umum pemegang saham", r"general meeting of shareholders", r"ringkasan risalah"],
         ),
@@ -915,6 +930,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "dividend_announcement",
             "dividen tunai",
             "info",
+            "positive",
+            0.8,
             "Document discloses a dividend decision or explicit no-dividend outcome.",
             [r"dividen tunai", r"cash dividend", r"tidak ada dividen"],
         ),
@@ -922,6 +939,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "auditor_change",
             "kantor akuntan publik",
             "info",
+            "mixed",
+            0.75,
             "Document appoints or reappoints the external auditor.",
             [r"kantor akuntan publik", r"akuntan publik"],
         ),
@@ -929,6 +948,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "bond_issuance",
             "penerbitan obligasi",
             "info",
+            "negative",
+            0.8,
             "Document announces a bond issuance plan or approval.",
             [r"penerbitan obligasi", r"obligasi perseroan", r"bond issuance"],
         ),
@@ -936,6 +957,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "debt_facility",
             "fasilitas pembiayaan",
             "warning",
+            "negative",
+            0.85,
             "Document discusses new debt or external financing facilities.",
             [r"fasilitas pembiayaan", r"bank luar negeri", r"debt facility"],
         ),
@@ -943,6 +966,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "governance_appointment",
             "perubahan susunan pengurus",
             "info",
+            "neutral",
+            0.75,
             "Document records an appointment or reappointment of governance personnel.",
             [r"perubahan susunan pengurus", r"appointment", r"reappointment of management", r"perubahan pengurus"],
         ),
@@ -950,6 +975,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "director_change",
             "direksi",
             "warning",
+            "mixed",
+            0.8,
             "Document records a director or executive management change.",
             [r"perubahan direksi", r"anggota direksi", r"director change", r"chief executive officer", r"chief financial officer"],
         ),
@@ -957,6 +984,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "commissioner_change",
             "dewan komisaris",
             "warning",
+            "mixed",
+            0.8,
             "Document records a commissioner or supervisory-board change.",
             [r"perubahan dewan komisaris", r"anggota dewan komisaris", r"commissioner change"],
         ),
@@ -964,6 +993,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "rights_issue",
             "hmetd",
             "warning",
+            "negative",
+            0.95,
             "Document announces a rights issue or pre-emptive offering.",
             [r"\bhmetd\b", r"hak memesan efek terlebih dahulu", r"rights issue"],
         ),
@@ -971,6 +1002,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "private_placement",
             "pmthmetd",
             "warning",
+            "negative",
+            0.95,
             "Document announces a private placement or non-preemptive capital raise.",
             [r"\bpmthmetd\b", r"private placement", r"penambahan modal tanpa hak memesan efek terlebih dahulu"],
         ),
@@ -978,6 +1011,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "stock_split",
             "pemecahan saham",
             "info",
+            "neutral",
+            0.9,
             "Document announces a stock split.",
             [r"pemecahan saham", r"stock split"],
         ),
@@ -985,6 +1020,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "reverse_split",
             "reverse stock split",
             "warning",
+            "negative",
+            0.9,
             "Document announces a reverse stock split or nominal share consolidation.",
             [r"reverse stock split", r"penggabungan nilai nominal saham", r"reverse split"],
         ),
@@ -992,6 +1029,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "buyback",
             "pembelian kembali saham",
             "info",
+            "positive",
+            0.8,
             "Document announces a share buyback or treasury share action.",
             [r"pembelian kembali saham", r"buyback", r"treasury share"],
         ),
@@ -999,6 +1038,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "major_contract_win",
             "perolehan kontrak",
             "info",
+            "positive",
+            0.9,
             "Document announces a major contract win.",
             [r"perolehan kontrak", r"memperoleh kontrak", r"contract win", r"new material contract"],
         ),
@@ -1006,6 +1047,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "major_contract_loss",
             "pemutusan kontrak",
             "warning",
+            "negative",
+            0.95,
             "Document announces a major contract loss or termination.",
             [r"pemutusan kontrak", r"kehilangan kontrak", r"contract termination", r"major contract loss"],
         ),
@@ -1013,6 +1056,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "lawsuit",
             "gugatan hukum",
             "critical",
+            "negative",
+            0.95,
             "Document discloses a lawsuit, legal dispute, or litigation matter.",
             [r"gugatan hukum", r"sengketa hukum", r"lawsuit", r"litigation", r"legal dispute"],
         ),
@@ -1020,6 +1065,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "regulatory_action",
             "sanksi",
             "critical",
+            "negative",
+            0.95,
             "Document discloses a regulatory sanction, supervision, or restriction.",
             [r"sanksi", r"otoritas jasa keuangan", r"regulatory action", r"regulatory sanction", r"special supervision", r"pembatasan kegiatan usaha"],
         ),
@@ -1027,6 +1074,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "segment_closure",
             "penutupan segmen",
             "warning",
+            "negative",
+            0.85,
             "Document discloses a segment shutdown or closure.",
             [r"penutupan segmen", r"menghentikan segmen", r"segment closure", r"shutdown of .* segment"],
         ),
@@ -1034,6 +1083,8 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "guidance_change",
             "revisi proyeksi",
             "warning",
+            "negative",
+            0.8,
             "Document revises guidance or discloses a projection miss.",
             [r"revisi proyeksi", r"guidance revision", r"projection miss", r"guidance miss", r"target .* tidak tercapai"],
         ),
@@ -1041,23 +1092,25 @@ def _extract_disclosure_events(document: ExtractDocument, chunks: list[ChunkText
             "use_of_proceeds",
             "penggunaan dana",
             "info",
+            "mixed",
+            0.75,
             "Document updates or revises use-of-proceeds disclosures.",
             [r"penggunaan dana", r"use of proceeds", r"realisasi penggunaan dana"],
         ),
     ]
     if "treatise summary" in title:
-        patterns[0][4].append(r".")
+        patterns[0][6].append(r".")
     return _match_event_patterns(chunks, patterns)
 
 
 def _match_event_patterns(
     chunks: list[ChunkText],
-    patterns: list[tuple[str, str, str, str, list[str]]],
+    patterns: list[tuple[str, str, str, str | None, float | None, str, list[str]]],
 ) -> list[ExtractedEvent]:
     out: list[ExtractedEvent] = []
     seen: set[str] = set()
     for chunk in chunks:
-        for event_type, matched_pattern, severity, rationale, regexes in patterns:
+        for event_type, matched_pattern, severity, impact_direction, confidence, rationale, regexes in patterns:
             if event_type in seen:
                 continue
             for regex in regexes:
@@ -1070,7 +1123,18 @@ def _match_event_patterns(
                         event_type=event_type,
                         matched_pattern=matched_pattern,
                         severity=severity,
+                        impact_direction=impact_direction,
+                        confidence=confidence,
                         rationale=rationale,
+                        payload_json=json.dumps(
+                            {
+                                "impact_direction": impact_direction,
+                                "confidence": confidence,
+                                "matched_regex": regex,
+                                "section_label": chunk.section_label,
+                            },
+                            sort_keys=True,
+                        ),
                         chunk=chunk,
                         excerpt_text=excerpt,
                         char_start=chunk.char_start + match.start(),
@@ -1154,8 +1218,8 @@ def _persist_extraction_success(
             """
             INSERT INTO events (
                 event_id, document_id, ticker, event_type, matched_pattern,
-                severity, rationale, evidence_span_id, detected_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                severity, impact_direction, confidence, rationale, evidence_span_id, payload_json, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -1164,8 +1228,11 @@ def _persist_extraction_success(
                 event.event_type,
                 event.matched_pattern,
                 event.severity,
+                event.impact_direction,
+                event.confidence,
                 event.rationale,
                 span_id,
+                event.payload_json,
                 now,
             ),
         )

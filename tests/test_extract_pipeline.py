@@ -150,7 +150,7 @@ def test_run_extract_persists_disclosure_events(tmp_config):
         configure_pragmas(rconn, tmp_config)
         event = rconn.execute(
             """
-            SELECT event_type, severity, evidence_span_id
+            SELECT event_type, severity, impact_direction, confidence, payload_json, evidence_span_id
             FROM events
             WHERE document_id = ?
             """,
@@ -158,6 +158,9 @@ def test_run_extract_persists_disclosure_events(tmp_config):
         ).fetchone()
         assert event["event_type"] == "shareholder_meeting_summary"
         assert event["severity"] == "info"
+        assert event["impact_direction"] == "neutral"
+        assert event["confidence"] == 0.95
+        assert json.loads(event["payload_json"])["matched_regex"] == "rapat umum pemegang saham"
         assert event["evidence_span_id"] is not None
     finally:
         rconn.close()
@@ -201,7 +204,7 @@ def test_run_extract_detects_extended_event_taxonomy(tmp_config):
     try:
         configure_pragmas(rconn, tmp_config)
         events = rconn.execute(
-            "SELECT event_type FROM events WHERE document_id = ? ORDER BY event_type",
+            "SELECT event_type, impact_direction, confidence, payload_json FROM events WHERE document_id = ? ORDER BY event_type",
             (document_id,),
         ).fetchall()
         assert [row["event_type"] for row in events] == [
@@ -212,6 +215,9 @@ def test_run_extract_detects_extended_event_taxonomy(tmp_config):
             "dividend_announcement",
             "shareholder_meeting_summary",
         ]
+        assert {row["impact_direction"] for row in events} == {"mixed", "negative", "neutral", "positive"}
+        assert all(row["confidence"] is not None for row in events)
+        assert all("matched_regex" in json.loads(row["payload_json"]) for row in events)
     finally:
         rconn.close()
 
@@ -237,6 +243,8 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
                 "Net profit 820,000\n"
                 "Total liabilities 1,600,000\n"
                 "Equity 2,400,000\n"
+                "Trade receivables 450,000\n"
+                "Inventory 320,000\n"
                 "Short-term debt 300,000\n"
                 "Long-term debt 500,000\n"
                 "Shares outstanding 100,000,000\n"
@@ -295,6 +303,8 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
             "operating_cash_flow",
             "equity",
             "total_liabilities",
+            "receivables",
+            "inventory",
             "cash",
             "short_term_debt",
             "long_term_debt",
@@ -306,13 +316,15 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
             "interest_coverage",
         }.issubset(names)
         values = {row["metric_name"]: row["value_normalized"] for row in metrics}
+        assert values["receivables"] == 450000.0
+        assert values["inventory"] == 320000.0
         assert values["net_debt"] == -100000.0
         assert values["free_cash_flow"] == -1320000.0
         assert values["interest_coverage"] == 14.2
 
         disclosure_events = rconn.execute(
             """
-            SELECT event_type
+            SELECT event_type, impact_direction, confidence, payload_json
             FROM events
             WHERE document_id = 'doc-disc-new-taxonomy-1'
             ORDER BY event_type
@@ -331,6 +343,10 @@ def test_run_extract_derives_optional_financial_metrics_and_new_event_types(tmp_
             "stock_split",
             "use_of_proceeds",
         ]
+        event_map = {row["event_type"]: dict(row) for row in disclosure_events}
+        assert event_map["lawsuit"]["impact_direction"] == "negative"
+        assert event_map["regulatory_action"]["confidence"] == 0.95
+        assert "section_label" in json.loads(event_map["rights_issue"]["payload_json"])
     finally:
         rconn.close()
 

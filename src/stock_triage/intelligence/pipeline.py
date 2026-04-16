@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -29,7 +30,7 @@ from .claims import (
     extract_claims_for_documents,
 )
 
-DERIVED_VERSION = "v3_2-v1"
+DERIVED_VERSION = "v3_3-v1"
 
 CORE_FINANCIAL_METRICS = {
     "revenue",
@@ -145,8 +146,11 @@ class EventSignal:
     event_id: str
     event_type: str
     severity: str | None
+    impact_direction: str | None
+    confidence: float | None
     rationale: str | None
     evidence_span_id: str | None
+    payload_json: str | None
     detected_at: str
 
 
@@ -446,6 +450,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         return None
     latest_document = documents[0]
     baseline = _select_baseline(latest_document, documents[1:])
+    all_metrics = _load_ticker_metrics(conn, ticker)
     latest_metrics = _load_document_metrics(conn, latest_document.document_id)
     if not latest_metrics:
         return None
@@ -484,7 +489,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         previous_analysis=previous_analysis,
         current_analysis=latest_analysis,
     )
-    timeseries = _build_timeseries(ticker=ticker, metrics=_load_ticker_metrics(conn, ticker))
+    timeseries = _build_timeseries(ticker=ticker, metrics=all_metrics)
     claims = extract_claims_for_documents(
         conn,
         ticker=ticker,
@@ -537,6 +542,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         filing_expectations=filing_expectations,
         latest_analysis=latest_analysis,
         latest_metrics=latest_metrics,
+        all_metrics=all_metrics,
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
@@ -852,7 +858,7 @@ def _load_ticker_metrics(conn: sqlite3.Connection, ticker: str) -> list[MetricPo
 def _load_document_events(conn: sqlite3.Connection, document_id: str) -> list[EventSignal]:
     rows = conn.execute(
         """
-        SELECT event_id, event_type, severity, rationale, evidence_span_id, detected_at
+        SELECT event_id, event_type, severity, impact_direction, confidence, rationale, evidence_span_id, payload_json, detected_at
         FROM events
         WHERE document_id = ?
         ORDER BY detected_at DESC, event_id ASC
@@ -864,8 +870,11 @@ def _load_document_events(conn: sqlite3.Connection, document_id: str) -> list[Ev
             event_id=row["event_id"],
             event_type=row["event_type"],
             severity=row["severity"],
+            impact_direction=row["impact_direction"],
+            confidence=row["confidence"],
             rationale=row["rationale"],
             evidence_span_id=row["evidence_span_id"],
+            payload_json=row["payload_json"],
             detected_at=row["detected_at"],
         )
         for row in rows
@@ -1263,6 +1272,7 @@ def _build_snapshot_payload_json(
     filing_expectations: list[FilingExpectationRecord],
     latest_analysis: AnalysisSummary | None,
     latest_metrics: list[MetricPoint],
+    all_metrics: list[MetricPoint],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
@@ -1362,7 +1372,17 @@ def _build_snapshot_payload_json(
             for expectation in filing_expectations[:10]
         ],
         "latest_summary": latest_analysis.summary if latest_analysis else None,
-        "segment_summary": _build_segment_summary(latest_metrics),
+        "segment_summary": _build_segment_summary(
+            latest_document_id=latest_document.document_id,
+            latest_metrics=latest_metrics,
+            all_metrics=all_metrics,
+        ),
+        "narrative_signals": _build_narrative_signals(
+            latest_analysis=latest_analysis,
+            events=events,
+            claims=claims,
+            credibility_summary=credibility_summary,
+        ),
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
         "management_credibility": {
             "total_claims": credibility_summary.total_claims,
@@ -1439,7 +1459,10 @@ def _build_snapshot_payload_json(
             {
                 "event_type": event.event_type,
                 "severity": event.severity,
+                "impact_direction": event.impact_direction,
+                "confidence": event.confidence,
                 "rationale": event.rationale,
+                "details": json.loads(event.payload_json or "{}"),
             }
             for event in events[:10]
         ],
@@ -2430,16 +2453,31 @@ def _next_expected_filing_window(
     return None
 
 
-def _build_segment_summary(latest_metrics: list[MetricPoint]) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = {}
+def _build_segment_summary(
+    *,
+    latest_document_id: str,
+    latest_metrics: list[MetricPoint],
+    all_metrics: list[MetricPoint],
+) -> list[dict[str, Any]]:
+    total_revenue = next(
+        (
+            metric.value_normalized
+            for metric in latest_metrics
+            if metric.metric_name == "revenue" and metric.value_normalized is not None
+        ),
+        None,
+    )
+    latest_grouped: dict[str, dict[str, Any]] = {}
     for metric in latest_metrics:
         if metric.metric_name not in {"segment_revenue", "segment_profit"}:
             continue
         segment_name = (metric.consolidation_scope or "").removeprefix("segment:").strip() or "Unknown"
-        record = grouped.setdefault(
-            segment_name,
+        normalized_key = _normalize_segment_name(segment_name)
+        record = latest_grouped.setdefault(
+            normalized_key,
             {
                 "segment_name": segment_name,
+                "normalized_key": normalized_key,
                 "revenue": None,
                 "profit": None,
                 "period_end_date": metric.period_end_date,
@@ -2450,9 +2488,111 @@ def _build_segment_summary(latest_metrics: list[MetricPoint]) -> list[dict[str, 
             record["revenue"] = metric.value_normalized
         else:
             record["profit"] = metric.value_normalized
-    rows = list(grouped.values())
+
+    historical_grouped: dict[str, list[MetricPoint]] = {}
+    for metric in all_metrics:
+        if metric.metric_name not in {"segment_revenue", "segment_profit"}:
+            continue
+        if metric.document_id == latest_document_id:
+            continue
+        segment_name = (metric.consolidation_scope or "").removeprefix("segment:").strip() or "Unknown"
+        historical_grouped.setdefault(_normalize_segment_name(segment_name), []).append(metric)
+
+    rows = list(latest_grouped.values())
+    dominant_share = 0.0
+    for row in rows:
+        previous_revenue = _latest_historical_segment_value(historical_grouped.get(row["normalized_key"], []), "segment_revenue")
+        previous_profit = _latest_historical_segment_value(historical_grouped.get(row["normalized_key"], []), "segment_profit")
+        revenue = row["revenue"]
+        profit = row["profit"]
+        revenue_share_pct = round((revenue / total_revenue) * 100.0, 1) if revenue is not None and total_revenue not in {None, 0} else None
+        revenue_change_pct = _pct_change(previous_revenue, revenue)
+        profit_change_pct = _pct_change(previous_profit, profit)
+        profit_margin_pct = round((profit / revenue) * 100.0, 1) if profit is not None and revenue not in {None, 0} else None
+        row.update(
+            {
+                "previous_revenue": previous_revenue,
+                "previous_profit": previous_profit,
+                "revenue_change_pct": revenue_change_pct,
+                "profit_change_pct": profit_change_pct,
+                "revenue_share_pct": revenue_share_pct,
+                "profit_margin_pct": profit_margin_pct,
+                "trend": _segment_trend(
+                    revenue_change_pct=revenue_change_pct,
+                    profit_change_pct=profit_change_pct,
+                ),
+            }
+        )
+        dominant_share = max(dominant_share, revenue_share_pct or 0.0)
+    for row in rows:
+        row["dominant"] = (row.get("revenue_share_pct") or 0.0) == dominant_share and dominant_share > 0
+        row["concentration_risk"] = _segment_concentration_risk(dominant_share)
     rows.sort(key=lambda item: (item["revenue"] is None, -(item["revenue"] or 0), item["segment_name"]))
     return rows[:8]
+
+
+def _normalize_segment_name(segment_name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", segment_name.lower()).strip()
+    return normalized or "unknown"
+
+
+def _latest_historical_segment_value(metrics: list[MetricPoint], metric_name: str) -> float | None:
+    filtered = [metric for metric in metrics if metric.metric_name == metric_name and metric.value_normalized is not None]
+    if not filtered:
+        return None
+    filtered.sort(key=lambda metric: (metric.period_end_date or "", metric.fiscal_year or 0, metric.document_id))
+    return filtered[-1].value_normalized
+
+
+def _segment_trend(*, revenue_change_pct: float | None, profit_change_pct: float | None) -> str:
+    positives = sum(1 for value in (revenue_change_pct, profit_change_pct) if value is not None and value > 5)
+    negatives = sum(1 for value in (revenue_change_pct, profit_change_pct) if value is not None and value < -5)
+    if positives and not negatives:
+        return "improving"
+    if negatives and not positives:
+        return "deteriorating"
+    if positives and negatives:
+        return "mixed"
+    return "stable"
+
+
+def _segment_concentration_risk(max_share_pct: float) -> str:
+    if max_share_pct >= 60.0:
+        return "high"
+    if max_share_pct >= 40.0:
+        return "medium"
+    return "low"
+
+
+def _pct_change(previous_value: float | None, current_value: float | None) -> float | None:
+    if previous_value in {None, 0} or current_value is None:
+        return None
+    return round(((current_value - previous_value) / abs(previous_value)) * 100.0, 1)
+
+
+def _build_narrative_signals(
+    *,
+    latest_analysis: AnalysisSummary | None,
+    events: list[EventSignal],
+    claims: list[ClaimRecord],
+    credibility_summary: ClaimCredibilitySummary,
+) -> list[str]:
+    signals: list[str] = []
+    claim_types = {claim.claim_type for claim in claims}
+    event_types = {event.event_type for event in events}
+    if "outlook_guidance" in claim_types and "guidance_change" in event_types:
+        signals.append("Management guidance was later revised or missed.")
+    if "funding_use" in claim_types and "use_of_proceeds" in event_types:
+        signals.append("Funding-use claims now have matching proceeds disclosures.")
+    if "risk_explanation" in claim_types:
+        signals.append("Management explicitly framed downside risks in the latest narrative.")
+    if credibility_summary.recycled_claim_count > 0:
+        signals.append("Management repeated similar claims across filings, which may indicate boilerplate narrative reuse.")
+    if latest_analysis is not None and latest_analysis.summary:
+        lowered = latest_analysis.summary.lower()
+        if any(token in lowered for token in ("unchanged", "remain", "continued", "still")) and credibility_summary.recycled_claim_count > 0:
+            signals.append("Narrative wording remains sticky across filings; verify whether the story changed more slowly than the business.")
+    return _dedupe_keep_order(signals)[:4]
 
 
 def _evaluate_theses(

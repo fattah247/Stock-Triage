@@ -175,6 +175,16 @@
     return `<span class="timeLabel" title="${esc(absoluteTime(value))}">${esc(relativeTime(value))}</span>`;
   }
 
+  function formatNumber(value, digits = 1) {
+    if (value == null || Number.isNaN(Number(value))) return "—";
+    return Number(value).toFixed(digits);
+  }
+
+  function formatPct(value, digits = 1) {
+    if (value == null || Number.isNaN(Number(value))) return "—";
+    return `${Number(value).toFixed(digits)}%`;
+  }
+
   function monthLabel(month) {
     const names = [
       "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -992,6 +1002,8 @@
         const reviewRequired = (payload.review_required || []).slice(0, 6);
         const filingExpectations = (payload.filing_expectations || []).slice(0, 6);
         const segmentSummary = (payload.segment_summary || []).slice(0, 6);
+        const narrativeSignals = (payload.narrative_signals || []).slice(0, 4);
+        const recentEvents = (payload.events || []).slice(0, 6);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1019,6 +1031,7 @@
                   : ""
               }</div>
               <div class="meta"><strong>Quality flags:</strong> ${(decisionPanel.quality_flags || []).map(esc).join(" · ") || "No explicit quality flags right now."}</div>
+              <div class="meta"><strong>Narrative signals:</strong> ${narrativeSignals.map(esc).join(" · ") || "No stronger narrative cues extracted yet."}</div>
             </article>
           </div>
           ${
@@ -1040,6 +1053,18 @@
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No filing calendar yet.</strong> Run or rerun intelligence for this issuer to materialize explicit filing expectations.</div>`
+          }
+          ${
+            recentEvents.length
+              ? `<table class="metricTable"><thead><tr><th>Event</th><th>Severity</th><th>Impact</th><th>Confidence</th><th>Rationale</th></tr></thead><tbody>${recentEvents
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.event_type || "")}</td><td>${esc(item.severity || "info")}</td><td>${esc(item.impact_direction || "unknown")}</td><td>${esc(
+                        formatPct(item.confidence != null ? Number(item.confidence) * 100 : null, 0)
+                      )}</td><td>${esc(item.rationale || "")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No recent event signals in the current snapshot.</strong></div>`
           }
         `;
         claimsList.innerHTML = `
@@ -1237,10 +1262,16 @@
         : `<div class="emptyState"><strong>No persisted documents yet.</strong> Run discovery and download for this issuer, then the grouped filings will appear here.</div>`;
       metricList.innerHTML = (segmentSummary.length || metrics.length)
         ? `${segmentSummary.length
-            ? `<table class="metricTable"><thead><tr><th>Segment</th><th>Revenue</th><th>Profit</th><th>Period End</th></tr></thead><tbody>${segmentSummary
+            ? `<table class="metricTable"><thead><tr><th>Segment</th><th>Revenue</th><th>Revenue share</th><th>Profit</th><th>Revenue Δ</th><th>Profit Δ</th><th>Trend</th><th>Concentration</th></tr></thead><tbody>${segmentSummary
                 .map(
                   (item) =>
-                    `<tr><td>${esc(item.segment_name)}</td><td>${esc(item.revenue ?? "")}</td><td>${esc(item.profit ?? "")}</td><td>${esc(item.period_end_date ?? "")}</td></tr>`
+                    `<tr><td>${esc(item.segment_name)}${item.dominant ? `<div class="meta">dominant segment</div>` : ""}</td><td>${esc(
+                      formatNumber(item.revenue, 0)
+                    )}</td><td>${esc(formatPct(item.revenue_share_pct))}</td><td>${esc(formatNumber(item.profit, 0))}</td><td>${esc(
+                      formatPct(item.revenue_change_pct)
+                    )}</td><td>${esc(formatPct(item.profit_change_pct))}</td><td>${esc(item.trend || "stable")}</td><td>${esc(
+                      item.concentration_risk || "low"
+                    )}</td></tr>`
                 )
                 .join("")}</tbody></table>`
             : ""
