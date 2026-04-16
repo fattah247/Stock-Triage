@@ -398,25 +398,33 @@ def _handler_factory():
                 for key, values in parse_qs(body.decode("utf-8")).items()
             }
             review_item_id = params.get("review_item_id", "").strip()
+            review_item_ids = [item.strip() for item in params.get("review_item_ids", "").split(",") if item.strip()]
             status = params.get("status", "").strip()
             note = params.get("note", "").strip() or None
-            if not review_item_id or not status:
+            if (not review_item_id and not review_item_ids) or not status:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_review_item_id_or_status"})
                 return
             try:
-                result = update_review_status(
-                    self.server.cfg,
-                    review_item_id=review_item_id,
-                    status=status,
-                    note=note,
-                )
+                targets = review_item_ids or [review_item_id]
+                results = [
+                    update_review_status(
+                        self.server.cfg,
+                        review_item_id=target,
+                        status=status,
+                        note=note,
+                    )
+                    for target in targets
+                ]
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
+            result = results[0]
             self._write_json(
                 HTTPStatus.OK,
                 {
                     "review_item_id": result.review_item_id,
+                    "review_item_ids": targets,
+                    "updated_count": len(targets),
                     "from_status": result.previous_status,
                     "to_status": result.current_status,
                     "note": result.note,

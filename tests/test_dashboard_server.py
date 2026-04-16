@@ -159,6 +159,44 @@ def test_dashboard_server_updates_review_status(tmp_config) -> None:
         thread.join(timeout=5)
 
 
+def test_dashboard_server_updates_grouped_review_status(tmp_config) -> None:
+    from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
+    from stock_triage.intelligence import run_intelligence
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        grouped = next((row for row in snapshot["review_rows"] if len(row.get("review_item_ids") or []) > 1), None)
+        assert grouped is not None
+        request = Request(
+            f"{handle.url}/api/review",
+            data=urlencode({"review_item_ids": ",".join(grouped["review_item_ids"]), "status": "resolved"}).encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            method="POST",
+        )
+        payload = json.loads(urlopen(request).read().decode("utf-8"))
+        assert payload["updated_count"] == len(grouped["review_item_ids"])
+
+        snapshot_after = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        remaining_ids = {
+            item_id
+            for row in snapshot_after["review_rows"]
+            for item_id in (row.get("review_item_ids") or [row["review_item_id"]])
+        }
+        for item_id in grouped["review_item_ids"]:
+            assert item_id not in remaining_ids
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_parse_range_header_handles_common_range_forms() -> None:
     # Full file when no header is supplied.
     assert _parse_range_header(None, 100) == (0, 99)

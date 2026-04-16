@@ -901,16 +901,16 @@
             .map(
               (item) => `
                 <article class="findingCard sev-${statusTag(item.priority)}">
-                  <div class="findingClaim">${esc(item.ticker || "-")} · ${esc(item.item_type)}</div>
-                  <div class="meta">${esc(item.priority)} priority · ${esc(item.status)} · ${esc(item.decision_state || "-")}</div>
-                  <div class="meta">${esc(item.rationale || "")}</div>
+                  <div class="findingClaim">${esc(item.ticker || "-")} · ${esc(item.issue_family || item.item_type)}</div>
+                  <div class="meta">${esc(item.priority)} priority · ${esc(item.status)} · ${esc(item.decision_state || "-")} · grouped ${esc(item.group_count || 1)} · score ${esc(item.rank_score || 0)}</div>
+                  <div class="meta">${(item.reasons || [item.rationale || ""]).map(esc).join(" · ")}</div>
                   <div class="heroBar">
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">artifact</a>` : ""}
-                    <button class="miniButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="resolved">resolve</button>
-                    <button class="miniButton ghostButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="snoozed">snooze</button>
+                    <button class="miniButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="resolved">resolve group</button>
+                    <button class="miniButton ghostButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="snoozed">snooze group</button>
                     ${
                       item.status !== "open"
-                        ? `<button class="miniButton ghostButton" type="button" data-review-id="${esc(item.review_item_id)}" data-review-status="open">reopen</button>`
+                        ? `<button class="miniButton ghostButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="open">reopen group</button>`
                         : ""
                     }
                   </div>
@@ -1489,12 +1489,14 @@
     connectJobStream(action, result.stream_url, options);
   }
 
-  async function updateReviewStatus(reviewItemId, status) {
+  async function updateReviewStatus(reviewItemIds, status) {
+    const ids = Array.isArray(reviewItemIds) ? reviewItemIds.filter(Boolean) : [reviewItemIds].filter(Boolean);
     const response = await fetch(reviewEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body: new URLSearchParams({
-        review_item_id: reviewItemId,
+        review_item_id: ids[0] || "",
+        review_item_ids: ids.join(","),
         status,
       }).toString(),
     });
@@ -1504,7 +1506,7 @@
     }
     await refreshSnapshot();
     if (actionStatus) {
-      actionStatus.textContent = `Review item ${reviewItemId} moved to ${status}.`;
+      actionStatus.textContent = `Updated ${result.updated_count || ids.length} review item(s) to ${status}.`;
     }
   }
 
@@ -1771,9 +1773,9 @@
       return;
     }
 
-    const reviewTarget = event.target.closest("[data-review-id]");
+    const reviewTarget = event.target.closest("[data-review-ids]");
     if (reviewTarget) {
-      updateReviewStatus(reviewTarget.dataset.reviewId || "", reviewTarget.dataset.reviewStatus || "").catch((error) => {
+      updateReviewStatus((reviewTarget.dataset.reviewIds || "").split(",").filter(Boolean), reviewTarget.dataset.reviewStatus || "").catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       });
     }
