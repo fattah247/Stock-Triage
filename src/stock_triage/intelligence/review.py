@@ -268,6 +268,11 @@ def _persist_digest(conn, payload: dict[str, object], *, digest_date: str, scope
 
 
 def _load_review_rows(conn, *, status: str, limit: int, ticker: str | None) -> list[dict[str, object]]:
+    rows = _load_review_rows_raw(conn, status=status, limit=max(limit * 4, 100), ticker=ticker)
+    return _group_review_rows(rows, limit=limit)
+
+
+def _load_review_rows_raw(conn, *, status: str, limit: int, ticker: str | None) -> list[dict[str, object]]:
     where = []
     params: list[object] = [DERIVED_VERSION]
     if status != "all":
@@ -334,6 +339,200 @@ def _load_review_rows(conn, *, status: str, limit: int, ticker: str | None) -> l
                 "overall_state": snapshot.get("top_card", {}).get("overall_state"),
             }
         )
+    return result
+
+
+_REVIEW_PRIORITY_SCORE = {"high": 3, "medium": 2, "low": 1}
+_DECISION_STATE_PENALTY = {"Avoid": 35, "Review manually": 25, "Watch": 10, "Buy": 0}
+
+
+def _group_review_rows(rows: list[dict[str, object]], *, limit: int) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        family = _review_issue_family(row)
+        group_key = f"{row.get('ticker') or '-'}:{family}"
+        entry = grouped.setdefault(
+            group_key,
+            {
+                "group_key": group_key,
+                "issue_family": family,
+                "review_item_ids": [],
+                "rows": [],
+                "reasons": [],
+                "source_names": set(),
+                "local_path": None,
+                "decision_state": row.get("decision_state"),
+                "overall_state": row.get("overall_state"),
+                "updated_at": row.get("updated_at"),
+                "as_of_date": row.get("as_of_date"),
+            },
+        )
+        entry["review_item_ids"].append(str(row["review_item_id"]))
+        entry["rows"].append(row)
+        if row.get("rationale"):
+            entry["reasons"].append(str(row["rationale"]))
+        if row.get("source_name"):
+            entry["source_names"].add(str(row["source_name"]))
+        if not entry.get("local_path") and row.get("local_path"):
+            entry["local_path"] = row["local_path"]
+        entry["decision_state"] = _pick_decision_state(entry.get("decision_state"), row.get("decision_state"))
+        entry["overall_state"] = _pick_overall_state(entry.get("overall_state"), row.get("overall_state"))
+        if str(row.get("updated_at") or "") > str(entry.get("updated_at") or ""):
+            entry["updated_at"] = row.get("updated_at")
+            entry["as_of_date"] = row.get("as_of_date")
+
+    grouped_rows: list[dict[str, object]] = []
+    for entry in grouped.values():
+        members = list(entry["rows"])
+        members.sort(
+            key=lambda item: (
+                -_REVIEW_PRIORITY_SCORE.get(str(item.get("priority") or "low"), 0),
+                str(item.get("updated_at") or ""),
+                str(item.get("review_item_id") or ""),
+            ),
+            reverse=False,
+        )
+        primary = members[0]
+        high_count = sum(1 for item in members if item.get("priority") == "high")
+        medium_count = sum(1 for item in members if item.get("priority") == "medium")
+        low_count = sum(1 for item in members if item.get("priority") == "low")
+        ranking_inputs = {
+            "high_priority_count": high_count,
+            "medium_priority_count": medium_count,
+            "low_priority_count": low_count,
+            "member_count": len(members),
+            "decision_state_penalty": _DECISION_STATE_PENALTY.get(str(entry.get("decision_state") or "Watch"), 0),
+        }
+        rank_score = (
+            high_count * 100
+            + medium_count * 40
+            + low_count * 10
+            + len(members) * 8
+            + _DECISION_STATE_PENALTY.get(str(entry.get("decision_state") or "Watch"), 0)
+        )
+        grouped_rows.append(
+            {
+                "review_item_id": primary["review_item_id"],
+                "review_item_ids": list(entry["review_item_ids"]),
+                "group_key": entry["group_key"],
+                "item_type": primary["item_type"],
+                "item_types": sorted({str(item.get("item_type") or "") for item in members}),
+                "issue_family": entry["issue_family"],
+                "ticker": primary["ticker"],
+                "document_id": primary["document_id"],
+                "source_key": primary["source_key"],
+                "priority": _highest_priority(members),
+                "status": primary["status"],
+                "rationale": _dedupe_strings(entry["reasons"])[0] if entry["reasons"] else primary.get("rationale"),
+                "reasons": _dedupe_strings(entry["reasons"])[:3],
+                "payload": primary["payload"],
+                "created_at": min(str(item.get("created_at") or "") for item in members),
+                "updated_at": entry["updated_at"],
+                "source_name": ", ".join(sorted(entry["source_names"])) if entry["source_names"] else primary.get("source_name"),
+                "local_path": entry.get("local_path"),
+                "as_of_date": entry.get("as_of_date"),
+                "decision_state": entry.get("decision_state"),
+                "overall_state": entry.get("overall_state"),
+                "group_count": len(members),
+                "rank_score": rank_score,
+                "ranking_inputs": ranking_inputs,
+            }
+        )
+    grouped_rows.sort(
+        key=lambda item: (
+            -int(item.get("rank_score") or 0),
+            str(item.get("updated_at") or ""),
+            str(item.get("ticker") or ""),
+        ),
+        reverse=False,
+    )
+    return grouped_rows[:limit]
+
+
+def _highest_priority(rows: list[dict[str, object]]) -> str:
+    return min(
+        (str(item.get("priority") or "low") for item in rows),
+        key=lambda value: {"high": 0, "medium": 1, "low": 2}.get(value, 3),
+    )
+
+
+def _pick_decision_state(current: object, candidate: object) -> str | None:
+    order = {"Avoid": 0, "Review manually": 1, "Watch": 2, "Buy": 3}
+    current_value = str(current) if current else None
+    candidate_value = str(candidate) if candidate else None
+    if current_value is None:
+        return candidate_value
+    if candidate_value is None:
+        return current_value
+    return current_value if order.get(current_value, 99) <= order.get(candidate_value, 99) else candidate_value
+
+
+def _pick_overall_state(current: object, candidate: object) -> str | None:
+    order = {"critical": 0, "review_required": 1, "watch": 2, "stable": 3}
+    current_value = str(current) if current else None
+    candidate_value = str(candidate) if candidate else None
+    if current_value is None:
+        return candidate_value
+    if candidate_value is None:
+        return current_value
+    return current_value if order.get(current_value, 99) <= order.get(candidate_value, 99) else candidate_value
+
+
+def _review_issue_family(row: dict[str, object]) -> str:
+    item_type = str(row.get("item_type") or "")
+    payload = row.get("payload") or {}
+    if item_type == "rule_trigger":
+        return _issue_family_from_signal(str(payload.get("rule_name") or "rule"), signal_type="rule")
+    if item_type == "event_signal":
+        return _issue_family_from_signal(str(payload.get("event_type") or "event"), signal_type="event")
+    if item_type.startswith("thesis_"):
+        thesis_name = str(payload.get("thesis_name") or payload.get("thesis_id") or "thesis")
+        return f"thesis:{thesis_name.lower()}"
+    if item_type.startswith("claim_"):
+        claim_type = str(payload.get("claim_type") or payload.get("claim_subject") or item_type)
+        return f"claim:{claim_type.lower()}"
+    if item_type == "revision_change":
+        changed_metrics = payload.get("changed_metrics") or []
+        if any("debt" in str(metric) or "liabil" in str(metric) for metric in changed_metrics):
+            return "revision:balance_sheet"
+        if any("cash" in str(metric) for metric in changed_metrics):
+            return "revision:cash_flow"
+        return "revision:filing_change"
+    return item_type or "review"
+
+
+def _issue_family_from_signal(name: str, *, signal_type: str) -> str:
+    normalized = name.lower()
+    if any(token in normalized for token in ("debt", "liabil", "refinanc", "leverage", "covenant")):
+        return "debt_stress"
+    if any(token in normalized for token in ("cash", "cfo", "working_capital", "burn")):
+        return "cash_flow"
+    if any(token in normalized for token in ("auditor", "governance", "director", "commissioner", "management", "board")):
+        return "governance"
+    if any(token in normalized for token in ("rights", "placement", "buyback", "capital", "share", "warrant", "dilution")):
+        return "capital_actions"
+    if any(token in normalized for token in ("lawsuit", "regulator", "regulatory", "restriction", "supervision")):
+        return "legal_regulatory"
+    if any(token in normalized for token in ("contract",)):
+        return "contracts"
+    if any(token in normalized for token in ("segment",)):
+        return "segment"
+    if any(token in normalized for token in ("guidance", "projection", "outlook")):
+        return "guidance"
+    return f"{signal_type}:{normalized}"
+
+
+def _dedupe_strings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        normalized = " ".join(str(item).strip().split())
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
     return result
 
 

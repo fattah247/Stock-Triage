@@ -31,6 +31,7 @@ def test_phase15_digest_review_and_kpis(tmp_config):
 
     report = load_review_queue(tmp_config, status="open", limit=20)
     assert report.rows
+    assert any((row.get("group_count") or 0) > 1 for row in report.rows)
     first = report.rows[0]
     update = update_review_status(tmp_config, review_item_id=first["review_item_id"], status="resolved", note="verified")
     assert update.previous_status == "open"
