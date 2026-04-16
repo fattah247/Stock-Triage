@@ -283,6 +283,12 @@ def _handler_factory():
                 detail = load_company_detail(self.server.cfg, ticker)
                 self._write_json(HTTPStatus.OK, detail, emit_body=emit_body)
                 return
+            if parsed.path == "/api/rerun-preview":
+                params = parse_qs(parsed.query)
+                ticker = params.get("ticker", [""])[0].strip()
+                preview = _load_rerun_preview(self.server.cfg, ticker=ticker or None)
+                self._write_json(HTTPStatus.OK, preview, emit_body=emit_body)
+                return
             if parsed.path == "/api/detail":
                 params = parse_qs(parsed.query)
                 section = params.get("section", [""])[0].strip()
@@ -696,6 +702,7 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
     limit = _int_arg(params.get("limit", ""), default=5, minimum=1)
     year = _int_arg(params.get("year", ""), default=datetime.now().year, minimum=2000)
     document_id = params.get("document_id", "").strip()
+    ticker = params.get("ticker", "").strip().upper()
     mapping = {
         "discover_company": ["discover", "company_universe"],
         "discover_disclosure": ["discover", "disclosure"],
@@ -709,7 +716,13 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
         "canary": ["canary-run", "--source", "all"],
         "export": ["dashboard-export"],
         "digest": ["digest-run"],
+        "golden": ["intelligence-golden", "--limit", str(limit)],
+        "rederive_all": ["intelligence-rederive", "--limit", str(limit)],
     }
+    if action == "rederive_company":
+        if not ticker:
+            raise ValueError("ticker is required for company rerun")
+        return ["intelligence-rederive", "--ticker", ticker, "--limit", "1"]
     if action == "summary":
         if not document_id:
             raise ValueError("document_id is required for summary generation")
@@ -729,6 +742,30 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
     if action not in mapping:
         raise ValueError(f"unknown action: {action}")
     return mapping[action]
+
+
+def _load_rerun_preview(cfg: Config, *, ticker: str | None) -> dict[str, object]:
+    snapshot = load_dashboard_snapshot(cfg)
+    if ticker:
+        ticker_upper = ticker.upper()
+        documents = [row for row in snapshot.documents if row.get("ticker") == ticker_upper]
+        company_snapshot = next((row for row in snapshot.company_snapshots if row.get("ticker") == ticker_upper), None)
+        review_rows = [row for row in snapshot.review_rows if row.get("ticker") == ticker_upper]
+        return {
+            "scope": "ticker",
+            "ticker": ticker_upper,
+            "document_count": len(documents),
+            "open_review_count": len(review_rows),
+            "snapshot_updated_at": company_snapshot.get("updated_at") if company_snapshot else None,
+            "actions": ["rederive_company", "golden"],
+        }
+    return {
+        "scope": "global",
+        "snapshot_count": len(snapshot.company_snapshots),
+        "open_review_count": len(snapshot.review_rows),
+        "late_filing_companies": int(snapshot.intelligence_kpis.get("late_filing_companies") or 0),
+        "actions": ["rederive_all", "golden", "digest"],
+    }
 
 
 def _int_arg(raw: str, *, default: int, minimum: int) -> int:

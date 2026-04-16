@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from ..alerts.pipeline import _SEVERITY_ORDER
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..fiscal_year import load_fiscal_year_overrides
 from .pipeline import DERIVED_VERSION
 
 
@@ -36,6 +37,17 @@ class ReviewUpdateResult:
     previous_status: str
     current_status: str
     note: str | None
+
+
+@dataclass(frozen=True)
+class GoldenSetRunResult:
+    golden_run_id: str
+    scope: str
+    target_ticker: str | None
+    case_count: int
+    passed_count: int
+    failed_count: int
+    warning_count: int
 
 
 def run_daily_digest(
@@ -113,6 +125,73 @@ def load_intelligence_kpis(cfg: Config) -> dict[str, object]:
     try:
         configure_pragmas(conn, cfg)
         return _load_kpis(conn)
+    finally:
+        conn.close()
+
+
+def run_golden_set(
+    cfg: Config,
+    *,
+    ticker: str | None = None,
+    limit: int = 25,
+) -> GoldenSetRunResult:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+        reader = connect(cfg.paths.db_path, read_only=True)
+        try:
+            configure_pragmas(reader, cfg)
+            payload = _build_golden_set_payload(reader, ticker=ticker, limit=limit)
+        finally:
+            reader.close()
+        return wq.submit(lambda conn, p=payload, t=ticker: _persist_golden_set_run(conn, payload=p, ticker=t))
+
+
+def load_latest_golden_runs(cfg: Config, *, limit: int = 10) -> list[dict[str, object]]:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        rows = conn.execute(
+            """
+            SELECT golden_run_id, scope, target_ticker, case_count, passed_count, failed_count, warning_count,
+                   payload_json, derived_version, created_at
+            FROM golden_set_runs
+            WHERE derived_version = ?
+            ORDER BY created_at DESC, golden_run_id DESC
+            LIMIT ?
+            """,
+            (DERIVED_VERSION, limit),
+        ).fetchall()
+        return [
+            {
+                "golden_run_id": row["golden_run_id"],
+                "scope": row["scope"],
+                "target_ticker": row["target_ticker"],
+                "case_count": row["case_count"],
+                "passed_count": row["passed_count"],
+                "failed_count": row["failed_count"],
+                "warning_count": row["warning_count"],
+                "payload": json.loads(row["payload_json"] or "{}"),
+                "derived_version": row["derived_version"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def load_intelligence_observability(cfg: Config) -> dict[str, object]:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        return _load_observability(conn, cfg)
     finally:
         conn.close()
 
@@ -602,6 +681,8 @@ def _load_kpis(conn) -> dict[str, object]:
     stale_snapshots = 0
     total_peer_anomalies = 0
     complete_snapshots = 0
+    late_filing_companies = 0
+    missing_recommendations = 0
     for row in snapshot_rows:
         payload = json.loads(row["payload_json"])
         top_card = payload.get("top_card", {})
@@ -612,6 +693,10 @@ def _load_kpis(conn) -> dict[str, object]:
         thesis_state_counts[thesis] = thesis_state_counts.get(thesis, 0) + 1
         credibility_counts[credibility] = credibility_counts.get(credibility, 0) + 1
         total_peer_anomalies += len(payload.get("peer_comparison", {}).get("anomalies", []) or [])
+        if any(item.get("state") == "late" for item in (payload.get("filing_expectations") or [])):
+            late_filing_companies += 1
+        if not (payload.get("recommendation") or {}).get("bucket"):
+            missing_recommendations += 1
         updated_at = row["updated_at"] or row["as_of_date"]
         if updated_at:
             dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
@@ -701,12 +786,236 @@ def _load_kpis(conn) -> dict[str, object]:
         "open_review_items": sum(row["count"] for row in review_counts if row["status"] == "open"),
         "review_status_counts": {row["status"]: row["count"] for row in review_counts},
         "peer_anomaly_count": total_peer_anomalies,
+        "late_filing_companies": late_filing_companies,
+        "missing_recommendations": missing_recommendations,
         "snapshot_freshness_pct": freshness_pct,
         "snapshot_completeness_pct": completeness_pct,
         "digest_validity_pct": digest_validity_pct,
         "digest_card_count": digest_card_count,
         "digest_card_with_reason": digest_card_with_reason,
         "kpi_targets": kpi_targets,
+    }
+
+
+def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[str, object]:
+    params: list[object] = [DERIVED_VERSION]
+    where_sql = ""
+    if ticker:
+        where_sql = "AND ticker = ?"
+        params.append(ticker.upper())
+    rows = conn.execute(
+        f"""
+        SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+          AND derived_version = ?
+          {where_sql}
+        ORDER BY updated_at DESC, ticker ASC
+        LIMIT ?
+        """,
+        tuple(params + [limit]),
+    ).fetchall()
+
+    cases: list[dict[str, object]] = []
+    passed = 0
+    failed = 0
+    warning = 0
+    for row in rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        ticker_value = str(row["ticker"])
+        events = payload.get("events") or []
+        segment_summary = payload.get("segment_summary") or []
+        narrative_signals = payload.get("narrative_signals") or []
+        recommendation = payload.get("recommendation") or {}
+        decision_panel = payload.get("decision_panel") or {}
+        review_required = payload.get("review_required") or []
+
+        def add_case(name: str, status: str, detail: str) -> None:
+            nonlocal passed, failed, warning
+            cases.append({"ticker": ticker_value, "case_name": name, "status": status, "detail": detail})
+            if status == "pass":
+                passed += 1
+            elif status == "fail":
+                failed += 1
+            else:
+                warning += 1
+
+        stance = str(decision_panel.get("stance") or "")
+        confidence = str(decision_panel.get("confidence") or "")
+        if payload.get("top_card", {}).get("overall_state") and stance:
+            add_case("decision_surface_present", "pass", f"stance={stance} confidence={confidence or '-'}")
+        else:
+            add_case("decision_surface_present", "fail", "Snapshot is missing top-card decision fields.")
+
+        if payload.get("filing_expectations"):
+            add_case("filing_expectations_materialized", "pass", f"{len(payload.get('filing_expectations') or [])} expectation rows present.")
+        else:
+            add_case("filing_expectations_materialized", "fail", "No filing expectation rows were materialized.")
+
+        rec_status = "pass"
+        rec_detail = f"bucket={recommendation.get('bucket') or 'none'}"
+        bucket = recommendation.get("bucket")
+        if bucket == "stock_pick_candidate":
+            valid = (
+                stance == "Buy"
+                and confidence == "high"
+                and len(review_required) == 0
+                and int(recommendation.get("evidence_ref_count") or 0) >= 3
+            )
+            rec_status = "pass" if valid else "fail"
+            rec_detail = f"stock pick gating {'ok' if valid else 'mismatch'}"
+        elif bucket == "avoid_candidate":
+            valid = (
+                stance == "Avoid"
+                and confidence in {"high", "medium"}
+                and int(recommendation.get("evidence_ref_count") or 0) >= 2
+            )
+            rec_status = "pass" if valid else "fail"
+            rec_detail = f"avoid gating {'ok' if valid else 'mismatch'}"
+        else:
+            rec_status = "warning"
+            rec_detail = "No recommendation bucket was assigned."
+        add_case("recommendation_consistency", rec_status, rec_detail)
+
+        if not events:
+            add_case("event_signal_quality", "warning", "No event signals in the current snapshot.")
+        elif all(
+            event.get("impact_direction") is not None
+            and event.get("confidence") is not None
+            and isinstance(event.get("details"), dict)
+            for event in events
+        ):
+            add_case("event_signal_quality", "pass", f"{len(events)} event rows carry impact/confidence/details.")
+        else:
+            add_case("event_signal_quality", "fail", "One or more event rows are missing impact/confidence/details.")
+
+        if not segment_summary:
+            add_case("segment_signal_quality", "warning", "No segment summary exists for this company.")
+        elif all(
+            row.get("trend")
+            and row.get("concentration_risk")
+            and ("revenue_share_pct" in row)
+            for row in segment_summary
+        ):
+            add_case("segment_signal_quality", "pass", f"{len(segment_summary)} segment rows include trend/share/risk fields.")
+        else:
+            add_case("segment_signal_quality", "fail", "Segment summary rows are missing trend/share/risk fields.")
+
+        deduped = list(dict.fromkeys(str(item) for item in narrative_signals))
+        if len(narrative_signals) <= 4 and deduped == list(narrative_signals):
+            add_case("narrative_signal_quality", "pass", f"{len(narrative_signals)} deterministic narrative signals.")
+        else:
+            add_case("narrative_signal_quality", "fail", "Narrative signals exceed cap or are not deduplicated.")
+
+    return {
+        "scope": "ticker" if ticker else "snapshot_sample",
+        "target_ticker": ticker.upper() if ticker else None,
+        "sample_size": len(rows),
+        "case_count": len(cases),
+        "passed_count": passed,
+        "failed_count": failed,
+        "warning_count": warning,
+        "cases": cases,
+    }
+
+
+def _persist_golden_set_run(conn, *, payload: dict[str, object], ticker: str | None) -> GoldenSetRunResult:
+    now = datetime.now(timezone.utc).isoformat()
+    scope = str(payload.get("scope") or ("ticker" if ticker else "snapshot_sample"))
+    target_ticker = ticker.upper() if ticker else None
+    golden_run_id = _stable_id("golden-run", scope, target_ticker or "-", now, DERIVED_VERSION)
+    conn.execute(
+        """
+        INSERT INTO golden_set_runs (
+            golden_run_id, scope, target_ticker, case_count, passed_count, failed_count, warning_count,
+            payload_json, derived_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            golden_run_id,
+            scope,
+            target_ticker,
+            int(payload.get("case_count") or 0),
+            int(payload.get("passed_count") or 0),
+            int(payload.get("failed_count") or 0),
+            int(payload.get("warning_count") or 0),
+            json.dumps(payload, sort_keys=True),
+            DERIVED_VERSION,
+            now,
+        ),
+    )
+    return GoldenSetRunResult(
+        golden_run_id=golden_run_id,
+        scope=scope,
+        target_ticker=target_ticker,
+        case_count=int(payload.get("case_count") or 0),
+        passed_count=int(payload.get("passed_count") or 0),
+        failed_count=int(payload.get("failed_count") or 0),
+        warning_count=int(payload.get("warning_count") or 0),
+    )
+
+
+def _load_observability(conn, cfg: Config) -> dict[str, object]:
+    snapshot_rows = conn.execute(
+        """
+        SELECT ticker, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+          AND derived_version = ?
+        ORDER BY updated_at DESC, ticker ASC
+        """,
+        (DERIVED_VERSION,),
+    ).fetchall()
+    low_confidence_events = 0
+    missing_recommendations = 0
+    late_filing_companies = 0
+    recommendation_buckets: dict[str, int] = {}
+    for row in snapshot_rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        recommendation = payload.get("recommendation") or {}
+        bucket = str(recommendation.get("bucket") or "none")
+        recommendation_buckets[bucket] = recommendation_buckets.get(bucket, 0) + 1
+        if not recommendation.get("bucket"):
+            missing_recommendations += 1
+        if any((event.get("confidence") or 0.0) < 0.8 for event in (payload.get("events") or [])):
+            low_confidence_events += 1
+        if any(item.get("state") == "late" for item in (payload.get("filing_expectations") or [])):
+            late_filing_companies += 1
+
+    latest_golden = conn.execute(
+        """
+        SELECT golden_run_id, scope, target_ticker, case_count, passed_count, failed_count, warning_count, created_at
+        FROM golden_set_runs
+        WHERE derived_version = ?
+        ORDER BY created_at DESC, golden_run_id DESC
+        LIMIT 1
+        """,
+        (DERIVED_VERSION,),
+    ).fetchone()
+    overrides = load_fiscal_year_overrides(cfg.company_overrides.definition_path)
+    return {
+        "summary": {
+            "snapshot_count": len(snapshot_rows),
+            "missing_recommendations": missing_recommendations,
+            "late_filing_companies": late_filing_companies,
+            "low_confidence_event_companies": low_confidence_events,
+            "fiscal_year_override_count": len(overrides),
+        },
+        "recommendation_buckets": recommendation_buckets,
+        "latest_golden_run": (
+            {
+                "golden_run_id": latest_golden["golden_run_id"],
+                "scope": latest_golden["scope"],
+                "target_ticker": latest_golden["target_ticker"],
+                "case_count": latest_golden["case_count"],
+                "passed_count": latest_golden["passed_count"],
+                "failed_count": latest_golden["failed_count"],
+                "warning_count": latest_golden["warning_count"],
+                "created_at": latest_golden["created_at"],
+            }
+            if latest_golden
+            else None
+        ),
     }
 
 

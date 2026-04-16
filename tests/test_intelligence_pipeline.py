@@ -21,6 +21,7 @@ from stock_triage.intelligence.pipeline import (
     _derive_stance,
     _next_expected_filing_window,
 )
+from stock_triage.intelligence.review import load_intelligence_observability, run_golden_set
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -254,6 +255,25 @@ def test_rederive_intelligence_rebuilds_existing_snapshot_tickers(tmp_config):
     assert result.selected_tickers == 1
     assert result.snapshots == 1
     assert result.briefs == 1
+
+
+def test_run_golden_set_persists_audit_run_and_updates_observability(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    result = run_golden_set(tmp_config, ticker="TAMU", limit=5)
+
+    assert result.scope == "ticker"
+    assert result.target_ticker == "TAMU"
+    assert result.case_count >= 5
+    assert result.passed_count >= 1
+
+    observability = load_intelligence_observability(tmp_config)
+    latest = observability["latest_golden_run"]
+    assert latest is not None
+    assert latest["golden_run_id"] == result.golden_run_id
+    assert latest["target_ticker"] == "TAMU"
 
 
 def test_run_intelligence_prefers_local_fiscal_year_override(tmp_config):

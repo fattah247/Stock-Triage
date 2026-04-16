@@ -13,6 +13,8 @@
     digest_rows: [],
     review_rows: [],
     intelligence_kpis: {},
+    observability: {},
+    golden_rows: [],
     backlog_rows: [],
     canary_rows: [],
     source_sync_rows: [],
@@ -67,6 +69,8 @@
   const backlogList = document.getElementById("backlogList");
   const canaryList = document.getElementById("canaryList");
   const syncStatusList = document.getElementById("syncStatusList");
+  const observabilityList = document.getElementById("observabilityList");
+  const goldenList = document.getElementById("goldenList");
   const inboxList = document.getElementById("inboxList");
   const actionStatus = document.getElementById("actionStatus");
   const actionOutput = document.getElementById("actionOutput");
@@ -100,6 +104,9 @@
     rules: "Run rules",
     alerts: "Alerts",
     digest: "Build digest",
+    rederive_all: "Rebuild current intelligence",
+    rederive_company: "Rebuild company intelligence",
+    golden: "Run golden checks",
     canary: "Canary",
     export: "Export snapshot",
     summary: "Summarize",
@@ -986,6 +993,10 @@
               </div>`
             : ""
         }
+        <div class="heroBar">
+          <button class="ghostButton miniButton" type="button" data-company-action="rederive_company" data-company-ticker="${esc(selectedIssuer.ticker)}">rebuild company intelligence</button>
+          <button class="ghostButton miniButton" type="button" data-company-action="golden" data-company-ticker="${esc(selectedIssuer.ticker)}">golden checks</button>
+        </div>
       `;
       companyStats.innerHTML = `
         <div class="stat"><div class="summaryLabel">Documents</div><strong>${docs.length}</strong></div>
@@ -1348,6 +1359,38 @@
           })
           .join("")}</tbody></table>`
       : `<div class="emptyState"><strong>No canary checks yet.</strong> Run canary from the control panel when you want a fresh source-health readout.</div>`;
+    if (observabilityList) {
+      const observability = data.observability || {};
+      const summary = observability.summary || {};
+      const recommendationBuckets = observability.recommendation_buckets || {};
+      const latestGolden = observability.latest_golden_run || null;
+      observabilityList.innerHTML = `
+        <div class="statsGrid">
+          <div class="stat"><div class="summaryLabel">Snapshots</div><strong>${esc(summary.snapshot_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Missing recs</div><strong>${esc(summary.missing_recommendations || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Late filings</div><strong>${esc(summary.late_filing_companies || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Low-conf event cos</div><strong>${esc(summary.low_confidence_event_companies || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">FY overrides</div><strong>${esc(summary.fiscal_year_override_count || 0)}</strong></div>
+        </div>
+        <div class="meta">Recommendation buckets: ${Object.entries(recommendationBuckets).map(([name, count]) => `${name}=${count}`).join(" · ") || "none"}</div>
+        <div class="meta">Latest golden run: ${
+          latestGolden
+            ? `${esc(latestGolden.scope)} · ${esc(latestGolden.passed_count)}/${esc(latestGolden.case_count)} passed · ${renderTimestamp(latestGolden.created_at)}`
+            : "No persisted golden-set audit yet."
+        }</div>
+      `;
+    }
+    if (goldenList) {
+      const rows = data.golden_rows || [];
+      goldenList.innerHTML = rows.length
+        ? `<table class="systemTable"><thead><tr><th>Run</th><th>Scope</th><th>Passed</th><th>Failed</th><th>Warnings</th><th>When</th></tr></thead><tbody>${rows
+            .map(
+              (item) =>
+                `<tr><td>${esc(item.golden_run_id)}</td><td>${esc(item.target_ticker || item.scope)}</td><td>${esc(item.passed_count)}</td><td>${esc(item.failed_count)}</td><td>${esc(item.warning_count)}</td><td>${renderTimestamp(item.created_at)}</td></tr>`
+            )
+            .join("")}</tbody></table>`
+        : `<div class="emptyState"><strong>No golden checks run yet.</strong> Use Run Golden Checks from Ops or from a company workspace.</div>`;
+    }
     renderHistory();
   }
 
@@ -1413,6 +1456,8 @@
       if (detail.backlog_rows) data.backlog_rows = detail.backlog_rows;
       if (detail.canary_rows) data.canary_rows = detail.canary_rows;
       if (detail.source_sync_rows) data.source_sync_rows = detail.source_sync_rows;
+      if (detail.observability) data.observability = detail.observability;
+      if (detail.golden_rows) data.golden_rows = detail.golden_rows;
       state._sectionLoaded[section] = true;
       render();
     } catch (_) {
@@ -1765,6 +1810,15 @@
     if (target) {
       const documentId = target.dataset.documentId || "";
       runAction(target.dataset.inlineAction, { document_id: documentId }).catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+      return;
+    }
+
+    const companyActionTarget = event.target.closest("[data-company-action]");
+    if (companyActionTarget) {
+      const ticker = companyActionTarget.dataset.companyTicker || state.selectedTicker || "";
+      runAction(companyActionTarget.dataset.companyAction, { ticker }).catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       });
       return;

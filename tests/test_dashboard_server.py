@@ -37,6 +37,9 @@ def test_build_cli_command_maps_dashboard_actions() -> None:
         "7",
     ]
     assert _build_cli_command("digest", {}) == ["digest-run"]
+    assert _build_cli_command("golden", {"limit": "9"}) == ["intelligence-golden", "--limit", "9"]
+    assert _build_cli_command("rederive_all", {"limit": "8"}) == ["intelligence-rederive", "--limit", "8"]
+    assert _build_cli_command("rederive_company", {"ticker": "TAMU"}) == ["intelligence-rederive", "--ticker", "TAMU", "--limit", "1"]
     assert _build_cli_command("summary", {"document_id": "doc-123"}) == ["summary-generate", "doc-123"]
     assert _build_cli_command("parse_one", {"document_id": "doc-123"}) == ["parse", "--document-id", "doc-123"]
     assert _build_cli_command("extract_one", {"document_id": "doc-123"}) == ["extract", "--document-id", "doc-123"]
@@ -69,6 +72,8 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Decision Snapshot" in html
         assert "Claims and Thesis" in html
         assert "Sector and Peer Explorer" in html
+        assert "Observability" in html
+        assert "Golden Checks" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
@@ -81,6 +86,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "run rules" in app_js
         assert "Stock-pick candidates" in app_js
         assert "Avoid candidates" in app_js
+        assert "rebuild company intelligence" in app_js
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"
@@ -318,7 +324,14 @@ def test_dashboard_server_watchlist_add_remove(tmp_config) -> None:
 
 
 def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
-    _seed_phase8_data(tmp_config)
+    from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
+    from stock_triage.intelligence import run_intelligence
+    from stock_triage.intelligence.review import run_golden_set
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+    run_golden_set(tmp_config, ticker="TAMU")
     handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
     thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
     thread.start()
@@ -335,6 +348,10 @@ def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
                 urlopen(f"{handle.url}/api/detail?section={section}").read().decode("utf-8")
             )
             assert isinstance(detail, dict)
+        ops = json.loads(urlopen(f"{handle.url}/api/detail?section=ops").read().decode("utf-8"))
+        assert "observability" in ops
+        assert "golden_rows" in ops
+        assert ops["golden_rows"]
 
         # Invalid section returns 400.
         with pytest.raises(HTTPError) as excinfo:
@@ -348,6 +365,13 @@ def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
         assert company["ticker"] == "TAMU"
         assert "documents" in company
         assert "metrics" in company
+
+        preview = json.loads(
+            urlopen(f"{handle.url}/api/rerun-preview?ticker=TAMU").read().decode("utf-8")
+        )
+        assert preview["scope"] == "ticker"
+        assert preview["ticker"] == "TAMU"
+        assert "rederive_company" in preview["actions"]
     finally:
         handle.server.shutdown()
         handle.server.server_close()

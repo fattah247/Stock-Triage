@@ -13,7 +13,13 @@ from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
 from ..intelligence.pipeline import DERIVED_VERSION
-from ..intelligence.review import load_intelligence_kpis, load_latest_digests, load_review_queue
+from ..intelligence.review import (
+    load_intelligence_kpis,
+    load_intelligence_observability,
+    load_latest_digests,
+    load_latest_golden_runs,
+    load_review_queue,
+)
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,8 @@ def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
             "backlog_rows": [row.__dict__ for row in backlog.rows],
             "canary_rows": [row.__dict__ for row in canary.rows],
             "source_sync_rows": _load_source_sync_rows_from_cfg(cfg),
+            "observability": load_intelligence_observability(cfg),
+            "golden_rows": load_latest_golden_runs(cfg, limit=5),
         }
 
     return {}

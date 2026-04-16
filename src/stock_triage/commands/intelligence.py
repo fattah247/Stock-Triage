@@ -10,8 +10,10 @@ from ..config import load_config
 from ..fiscal_year import save_fiscal_year_override
 from ..intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
 from ..intelligence.review import (
+    load_intelligence_observability,
     load_intelligence_kpis,
     load_review_queue,
+    run_golden_set,
     run_daily_digest,
     update_review_status,
 )
@@ -127,6 +129,40 @@ def cmd_intelligence_kpis(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intelligence_observability(_args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    report = load_intelligence_observability(cfg)
+    print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+def cmd_intelligence_golden(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    result = run_golden_set(
+        cfg,
+        ticker=args.ticker,
+        limit=args.limit,
+    )
+    print(
+        "intelligence-golden: "
+        f"derived_version={DERIVED_VERSION} "
+        f"golden_run_id={result.golden_run_id} "
+        f"scope={result.scope} "
+        f"target_ticker={result.target_ticker or '-'} "
+        f"case_count={result.case_count} "
+        f"passed_count={result.passed_count} "
+        f"failed_count={result.failed_count} "
+        f"warning_count={result.warning_count}"
+    )
+    return 0
+
+
 def cmd_intelligence_rederive(args: argparse.Namespace) -> int:
     cfg = load_config()
     cfg.ensure_dirs()
@@ -213,6 +249,20 @@ def register(sub) -> None:
 
     p_intelligence_kpis = sub.add_parser("intelligence-kpis", help="Show v3 derived-layer KPI counts")
     p_intelligence_kpis.set_defaults(func=cmd_intelligence_kpis)
+
+    p_intelligence_observability = sub.add_parser(
+        "intelligence-observability",
+        help="Show v3 intelligence QA and observability summary",
+    )
+    p_intelligence_observability.set_defaults(func=cmd_intelligence_observability)
+
+    p_intelligence_golden = sub.add_parser(
+        "intelligence-golden",
+        help="Run deterministic golden-set checks against current company snapshots",
+    )
+    p_intelligence_golden.add_argument("--ticker", help="Optional ticker filter for a single issuer")
+    p_intelligence_golden.add_argument("--limit", type=int, default=25, help="Maximum number of snapshot rows to audit")
+    p_intelligence_golden.set_defaults(func=cmd_intelligence_golden)
 
     p_fye = sub.add_parser(
         "fiscal-year-override",

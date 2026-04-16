@@ -178,6 +178,8 @@
                 <button class="actionButton" data-action="extract" type="button">Extract</button>
                 <button class="actionButton" data-action="rules" type="button">Run Rules</button>
                 <button class="actionButton" data-action="digest" type="button">Build Digest</button>
+                <button class="actionButton" data-action="rederive_all" type="button">Rebuild Current Intelligence</button>
+                <button class="actionButton" data-action="golden" type="button">Run Golden Checks</button>
                 <button class="actionButton" data-action="alerts" type="button">Alerts</button>
                 <button class="actionButton" data-action="canary" type="button">Canary</button>
                 <button class="actionButton" data-action="export" type="button">Export Snapshot</button>
@@ -249,6 +251,16 @@
         </section>
 
         <section class="companyStack" data-views="ops">
+          <article class="panel">
+            <div class="sectionEyebrow">Derived QA</div>
+            <h2>Observability</h2>
+            <div id="observabilityList"></div>
+          </article>
+          <article class="panel">
+            <div class="sectionEyebrow">Audit</div>
+            <h2>Golden Checks</h2>
+            <div id="goldenList"></div>
+          </article>
           <article class="panel">
             <div class="sectionEyebrow">Discovery Sync</div>
             <h2>Last Sync By Source</h2>
