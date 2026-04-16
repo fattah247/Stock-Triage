@@ -15,6 +15,8 @@
     intelligence_kpis: {},
     observability: {},
     golden_rows: [],
+    rerun_preview: null,
+    company_rerun_preview: null,
     backlog_rows: [],
     canary_rows: [],
     source_sync_rows: [],
@@ -71,6 +73,8 @@
   const syncStatusList = document.getElementById("syncStatusList");
   const observabilityList = document.getElementById("observabilityList");
   const goldenList = document.getElementById("goldenList");
+  const rerunPreviewList = document.getElementById("rerunPreviewList");
+  const companyRerunPreview = document.getElementById("companyRerunPreview");
   const inboxList = document.getElementById("inboxList");
   const actionStatus = document.getElementById("actionStatus");
   const actionOutput = document.getElementById("actionOutput");
@@ -199,6 +203,34 @@
     ];
     const idx = Number(month) - 1;
     return Number.isInteger(idx) && idx >= 0 && idx < names.length ? names[idx] : String(month || "12");
+  }
+
+  function renderRerunPreview(preview, emptyMessage) {
+    if (!preview) {
+      return `<div class="emptyState"><strong>${esc(emptyMessage)}</strong></div>`;
+    }
+    if (preview.scope === "ticker") {
+      return `
+        <div class="findingStack">
+          <article class="findingCard">
+            <div class="findingClaim">Rerun impact for ${esc(preview.ticker || "selected issuer")}</div>
+            <div class="meta">Documents in scope: ${esc(preview.document_count ?? 0)} · open review groups: ${esc(preview.open_review_count ?? 0)}</div>
+            <div class="meta">Current snapshot: ${preview.snapshot_updated_at ? renderTimestamp(preview.snapshot_updated_at) : "No derived snapshot yet."}</div>
+            <div class="meta">Available actions: ${(preview.actions || []).map(actionLabel).join(" · ") || "none"}</div>
+          </article>
+        </div>
+      `;
+    }
+    return `
+      <div class="findingStack">
+        <article class="findingCard">
+          <div class="findingClaim">Global rerun impact</div>
+          <div class="meta">Current snapshots: ${esc(preview.snapshot_count ?? 0)} · open review groups: ${esc(preview.open_review_count ?? 0)}</div>
+          <div class="meta">Late filing companies: ${esc(preview.late_filing_companies ?? 0)}</div>
+          <div class="meta">Available actions: ${(preview.actions || []).map(actionLabel).join(" · ") || "none"}</div>
+        </article>
+      </div>
+    `;
   }
 
   function updateHighlights(previous, next) {
@@ -487,7 +519,10 @@
       fetchSectionDetail("digest");
     }
     if (view === "review") fetchSectionDetail("review");
-    if (view === "ops") fetchSectionDetail("ops");
+    if (view === "ops") {
+      fetchSectionDetail("ops");
+      fetchRerunPreview();
+    }
   }
 
   function render() {
@@ -941,6 +976,9 @@
     if (!selectedIssuer) {
       companyOverview.innerHTML =
         `<div class="emptyState"><strong>Select a company.</strong> Use the left rail or click "focus issuer" from the inbox to move the workspace onto one company.</div>`;
+      if (companyRerunPreview) {
+        companyRerunPreview.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Pick one issuer to see rerun scope before rebuilding intelligence.</div>`;
+      }
       companyStats.innerHTML = "";
       snapshotList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Decision-state, baseline context, and v3 rationale appear here once an issuer is focused.</div>`;
       claimsList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Claim outcomes and thesis discipline are shown per issuer.</div>`;
@@ -1006,6 +1044,12 @@
         <div class="stat"><div class="summaryLabel">Latest filing type</div><strong>${esc(latestFiling?.document_type || payload.latest_document?.document_type || "unknown")}</strong></div>
         <div class="stat"><div class="summaryLabel">Priority</div><strong>${esc(topCard.watchlist_priority || "low")}</strong></div>
       `;
+      if (companyRerunPreview) {
+        companyRerunPreview.innerHTML = renderRerunPreview(
+          data.company_rerun_preview,
+          "No rerun preview yet. Wait for the company scope to load."
+        );
+      }
       if (companySnapshot) {
         const baseline = payload.baseline || {};
         const management = payload.management_credibility || {};
@@ -1391,6 +1435,12 @@
             .join("")}</tbody></table>`
         : `<div class="emptyState"><strong>No golden checks run yet.</strong> Use Run Golden Checks from Ops or from a company workspace.</div>`;
     }
+    if (rerunPreviewList) {
+      rerunPreviewList.innerHTML = renderRerunPreview(
+        data.rerun_preview,
+        "No rerun preview yet. Open Ops or wait for the preview query to load."
+      );
+    }
     renderHistory();
   }
 
@@ -1410,13 +1460,19 @@
     data.action_history = lite.action_history || data.action_history;
     // Invalidate company cache so next selection re-fetches.
     state._companyCache = {};
+    data.company_rerun_preview = null;
     render();
   }
 
   async function fetchCompanyDetail(ticker) {
     if (!ticker) return;
     const cached = state._companyCache[ticker];
-    if (cached && Date.now() - cached.fetchedAt < 30000) return;
+    if (cached && Date.now() - cached.fetchedAt < 30000) {
+      if (!data.company_rerun_preview || data.company_rerun_preview.ticker !== ticker) {
+        fetchRerunPreview(ticker);
+      }
+      return;
+    }
     try {
       const response = await fetch(`/api/company?ticker=${encodeURIComponent(ticker)}`);
       if (!response.ok) return;
@@ -1437,9 +1493,32 @@
           .concat([detail.sector_rollup]);
       }
       state._companyCache[ticker] = { data: detail, fetchedAt: Date.now() };
+      fetchRerunPreview(ticker);
       render();
     } catch (_) {
       // Silently fail — data stays stale until next poll.
+    }
+  }
+
+  async function fetchRerunPreview(ticker) {
+    const url = ticker
+      ? `/api/rerun-preview?ticker=${encodeURIComponent(ticker)}`
+      : "/api/rerun-preview";
+    try {
+      const response = await fetch(url);
+      if (!response.ok) return;
+      const preview = await response.json();
+      if (ticker) {
+        if (state.selectedTicker === ticker) {
+          data.company_rerun_preview = preview;
+          render();
+        }
+      } else {
+        data.rerun_preview = preview;
+        render();
+      }
+    } catch (_) {
+      // Silently fail.
     }
   }
 
@@ -1458,6 +1537,7 @@
       if (detail.source_sync_rows) data.source_sync_rows = detail.source_sync_rows;
       if (detail.observability) data.observability = detail.observability;
       if (detail.golden_rows) data.golden_rows = detail.golden_rows;
+      if (section === "ops") fetchRerunPreview();
       state._sectionLoaded[section] = true;
       render();
     } catch (_) {

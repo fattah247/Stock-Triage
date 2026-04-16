@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from ..config import Config
 from ..fiscal_year import load_fiscal_year_overrides, save_fiscal_year_override
 from ..intelligence import rederive_intelligence
-from ..intelligence.review import update_review_status
+from ..intelligence.review import load_review_queue, update_review_status
 from ..logging_setup import get_logger
 from .assets import read_static_asset
 from .pipeline import load_dashboard_snapshot, render_dashboard_html
@@ -716,9 +716,12 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
         "canary": ["canary-run", "--source", "all"],
         "export": ["dashboard-export"],
         "digest": ["digest-run"],
-        "golden": ["intelligence-golden", "--limit", str(limit)],
         "rederive_all": ["intelligence-rederive", "--limit", str(limit)],
     }
+    if action == "golden":
+        if ticker:
+            return ["intelligence-golden", "--ticker", ticker, "--limit", "1"]
+        return ["intelligence-golden", "--limit", str(limit)]
     if action == "rederive_company":
         if not ticker:
             raise ValueError("ticker is required for company rerun")
@@ -745,20 +748,20 @@ def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
 
 
 def _load_rerun_preview(cfg: Config, *, ticker: str | None) -> dict[str, object]:
-    snapshot = load_dashboard_snapshot(cfg)
     if ticker:
         ticker_upper = ticker.upper()
-        documents = [row for row in snapshot.documents if row.get("ticker") == ticker_upper]
-        company_snapshot = next((row for row in snapshot.company_snapshots if row.get("ticker") == ticker_upper), None)
-        review_rows = [row for row in snapshot.review_rows if row.get("ticker") == ticker_upper]
+        company_detail = load_company_detail(cfg, ticker_upper)
+        review_rows = load_review_queue(cfg, status="open", limit=100, ticker=ticker_upper).rows
+        company_snapshot = company_detail.get("company_snapshot")
         return {
             "scope": "ticker",
             "ticker": ticker_upper,
-            "document_count": len(documents),
+            "document_count": len(company_detail.get("documents") or []),
             "open_review_count": len(review_rows),
             "snapshot_updated_at": company_snapshot.get("updated_at") if company_snapshot else None,
             "actions": ["rederive_company", "golden"],
         }
+    snapshot = load_dashboard_snapshot(cfg)
     return {
         "scope": "global",
         "snapshot_count": len(snapshot.company_snapshots),

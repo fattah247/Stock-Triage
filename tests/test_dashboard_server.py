@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from stock_triage.__main__ import main
+from stock_triage.db import WriterQueue, run_migrations
 from stock_triage.dashboard.server import (
     DashboardJobState,
     _build_cli_command,
@@ -38,6 +39,7 @@ def test_build_cli_command_maps_dashboard_actions() -> None:
     ]
     assert _build_cli_command("digest", {}) == ["digest-run"]
     assert _build_cli_command("golden", {"limit": "9"}) == ["intelligence-golden", "--limit", "9"]
+    assert _build_cli_command("golden", {"ticker": "TAMU"}) == ["intelligence-golden", "--ticker", "TAMU", "--limit", "1"]
     assert _build_cli_command("rederive_all", {"limit": "8"}) == ["intelligence-rederive", "--limit", "8"]
     assert _build_cli_command("rederive_company", {"ticker": "TAMU"}) == ["intelligence-rederive", "--ticker", "TAMU", "--limit", "1"]
     assert _build_cli_command("summary", {"document_id": "doc-123"}) == ["summary-generate", "doc-123"]
@@ -74,6 +76,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Sector and Peer Explorer" in html
         assert "Observability" in html
         assert "Golden Checks" in html
+        assert "Rerun Preview" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
@@ -87,6 +90,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Stock-pick candidates" in app_js
         assert "Avoid candidates" in app_js
         assert "rebuild company intelligence" in app_js
+        assert "fetchRerunPreview" in app_js
 
         snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
         assert snapshot["issuers"][0]["ticker"] == "TAMU"
@@ -371,7 +375,92 @@ def test_dashboard_server_lazy_load_endpoints(tmp_config) -> None:
         )
         assert preview["scope"] == "ticker"
         assert preview["ticker"] == "TAMU"
+        assert preview["document_count"] >= 1
         assert "rederive_company" in preview["actions"]
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
+def test_company_detail_uses_ticker_scoped_queries_not_global_caps(tmp_config) -> None:
+    _seed_phase8_data(tmp_config)
+    old_ts = "2024-01-01T00:00:00+00:00"
+    new_ts = "2026-01-01T00:00:00+00:00"
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+
+        def _seed_many_other_documents(conn):
+            conn.execute(
+                """
+                INSERT INTO companies (
+                    ticker, issuer_name, listing_date, active_status, sector, subsector, industry,
+                    listing_board, source_urls, raw_metadata, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ZZZZ",
+                    "PT Overflow Testing Tbk",
+                    "2020-01-01",
+                    "listed",
+                    "Testing",
+                    "Overflow",
+                    "Synthetic",
+                    "main",
+                    json.dumps(["https://www.idx.co.id"]),
+                    json.dumps({}),
+                    new_ts,
+                    new_ts,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE documents
+                SET updated_at = ?, retrieved_at = ?, created_at = ?
+                WHERE ticker = 'TAMU'
+                """,
+                (old_ts, old_ts, old_ts),
+            )
+            for idx in range(220):
+                conn.execute(
+                    """
+                    INSERT INTO documents (
+                        document_id, source_name, source_record_id, source_file_id, retrieved_at, original_url,
+                        local_path, sha256, mime_type, document_type, language_variant, process_state,
+                        created_at, updated_at, ticker, version_group_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            f"doc-zzzz-{idx}",
+                            "idx_disclosures",
+                            f"zzzz-{idx}",
+                            f"zzzz-file-{idx}",
+                            new_ts,
+                            f"https://example.com/zzzz/{idx}",
+                            str(tmp_config.paths.data_dir / f"zzzz-{idx}.pdf"),
+                            f"sha-zzzz-{idx}",
+                            "application/pdf",
+                        "material_information",
+                        "id",
+                        "analyzed",
+                        new_ts,
+                        new_ts,
+                        "ZZZZ",
+                        None,
+                    ),
+                )
+
+        wq.submit(_seed_many_other_documents)
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        company = json.loads(urlopen(f"{handle.url}/api/company?ticker=TAMU").read().decode("utf-8"))
+        assert company["ticker"] == "TAMU"
+        assert company["documents"]
+        assert all(item["ticker"] == "TAMU" for item in company["documents"])
     finally:
         handle.server.shutdown()
         handle.server.server_close()

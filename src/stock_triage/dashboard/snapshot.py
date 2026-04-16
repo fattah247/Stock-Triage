@@ -134,43 +134,24 @@ def load_company_detail(cfg: Config, ticker: str) -> dict[str, object]:
     conn = connect(cfg.paths.db_path, read_only=True)
     try:
         configure_pragmas(conn, cfg)
-        documents = _load_latest_documents(conn, limit=200)
-        metrics = _load_metric_snapshot(conn)
-        findings = _load_findings(conn, limit=100)
-        revisions = _load_revision_history(conn, limit=50)
-        company_snapshots = _load_company_snapshots(conn)
-        sector_rollups = _load_sector_rollups(conn)
+        ticker_upper = ticker.upper()
+        documents = _load_documents_for_ticker(conn, ticker=ticker_upper, limit=200)
+        metrics = _load_metrics_for_ticker(conn, ticker=ticker_upper)
+        findings = _load_findings_for_ticker(conn, ticker=ticker_upper, limit=100)
+        revisions = _load_revision_history_for_ticker(conn, ticker=ticker_upper, limit=50)
+        company_snapshot = _load_company_snapshot_for_ticker(conn, ticker=ticker_upper)
+        sector_rollup = _load_sector_rollup_for_ticker(conn, ticker=ticker_upper, company_snapshot=company_snapshot)
     finally:
         conn.close()
 
-    ticker_upper = ticker.upper()
     return {
         "ticker": ticker_upper,
-        "documents": [d for d in documents if d.get("ticker") == ticker_upper],
-        "metrics": [m for m in metrics if m.get("ticker") == ticker_upper],
-        "findings": [f for f in findings if f.get("ticker") == ticker_upper],
-        "revisions": [r for r in revisions if r.get("ticker") == ticker_upper],
-        "company_snapshot": next(
-            (s for s in company_snapshots if s.get("ticker") == ticker_upper),
-            None,
-        ),
-        "sector_rollup": next(
-            (
-                s
-                for s in sector_rollups
-                if s.get("rollup_key") == "peer_intelligence"
-                and s.get("sector")
-                == next(
-                    (
-                        cs.get("payload", {}).get("sector")
-                        for cs in company_snapshots
-                        if cs.get("ticker") == ticker_upper
-                    ),
-                    None,
-                )
-            ),
-            None,
-        ),
+        "documents": documents,
+        "metrics": metrics,
+        "findings": findings,
+        "revisions": revisions,
+        "company_snapshot": company_snapshot,
+        "sector_rollup": sector_rollup,
     }
 
 
@@ -257,6 +238,41 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
         LIMIT ?
         """,
         (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _load_documents_for_ticker(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+            d.document_id,
+            d.source_name,
+            d.source_record_id,
+            d.ticker,
+            d.document_type,
+            d.process_state,
+            d.retrieved_at,
+            d.updated_at,
+            d.local_path,
+            d.original_url,
+            d.version_group_id,
+            COALESCE((
+                SELECT COUNT(*)
+                FROM rule_runs rr
+                WHERE rr.document_id = d.document_id AND rr.triggered = 1
+            ), 0) AS triggered_rules
+        FROM documents d
+        WHERE d.ticker = ?
+        ORDER BY d.updated_at DESC, d.document_id DESC
+        LIMIT ?
+        """,
+        (ticker, limit),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -782,6 +798,31 @@ def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
     return sorted(latest.values(), key=lambda item: (str(item["ticker"]), str(item["metric_name"])))
 
 
+def _load_metrics_for_ticker(conn: sqlite3.Connection, *, ticker: str) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+            mi.ticker,
+            mi.metric_name,
+            mi.value_normalized,
+            mi.currency,
+            mi.fiscal_year,
+            mi.fiscal_period,
+            mi.period_end_date,
+            mi.document_id
+        FROM metric_items mi
+        JOIN documents d ON d.document_id = mi.document_id
+        WHERE mi.ticker = ?
+        ORDER BY COALESCE(mi.period_end_date, '') DESC, mi.fiscal_year DESC, d.updated_at DESC
+        """,
+        (ticker,),
+    ).fetchall()
+    latest: dict[str, dict[str, object]] = {}
+    for row in rows:
+        latest.setdefault(str(row["metric_name"]), dict(row))
+    return sorted(latest.values(), key=lambda item: str(item["metric_name"]))
+
+
 def _load_findings(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:
     rows = conn.execute(
         """
@@ -800,7 +841,41 @@ def _load_findings(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, ob
         """,
         (limit,),
     ).fetchall()
+    return _findings_from_analysis_rows(rows, limit=limit)
 
+
+def _load_findings_for_ticker(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+            ar.document_id,
+            d.ticker,
+            d.source_name,
+            d.local_path,
+            d.original_url,
+            ar.output_json,
+            ar.finished_at
+        FROM analysis_runs ar
+        JOIN documents d ON d.document_id = ar.document_id
+        WHERE d.ticker = ?
+        ORDER BY ar.finished_at DESC, ar.analysis_run_id DESC
+        LIMIT ?
+        """,
+        (ticker, limit),
+    ).fetchall()
+    return _findings_from_analysis_rows(rows, limit=limit)
+
+
+def _findings_from_analysis_rows(
+    rows: list[sqlite3.Row],
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for row in rows:
         payload = json.loads(row["output_json"])
@@ -881,6 +956,33 @@ def _load_revision_history(conn: sqlite3.Connection, *, limit: int) -> list[dict
     return [dict(row) for row in rows]
 
 
+def _load_revision_history_for_ticker(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+            version_group_id,
+            source_name,
+            source_record_id,
+            ticker,
+            COUNT(*) AS revision_count,
+            MAX(updated_at) AS latest_revision_at
+        FROM documents
+        WHERE version_group_id IS NOT NULL
+          AND ticker = ?
+        GROUP BY version_group_id, source_name, source_record_id, ticker
+        ORDER BY latest_revision_at DESC, version_group_id ASC
+        LIMIT ?
+        """,
+        (ticker, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """
@@ -905,6 +1007,33 @@ def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]
     return snapshots
 
 
+def _load_company_snapshot_for_ticker(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+          AND ticker = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "ticker": row["ticker"],
+        "as_of_document_id": row["as_of_document_id"],
+        "as_of_date": row["as_of_date"],
+        "updated_at": row["updated_at"],
+        "payload": json.loads(row["payload_json"] or "{}"),
+    }
+
+
 def _load_sector_rollups(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """
@@ -923,6 +1052,50 @@ def _load_sector_rollups(conn: sqlite3.Connection) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+def _load_sector_rollup_for_ticker(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    company_snapshot: dict[str, object] | None,
+) -> dict[str, object] | None:
+    sector = None
+    if company_snapshot is not None:
+        sector = (company_snapshot.get("payload") or {}).get("sector")
+    if not sector:
+        row = conn.execute(
+            """
+            SELECT sector
+            FROM companies
+            WHERE ticker = ?
+            LIMIT 1
+            """,
+            (ticker,),
+        ).fetchone()
+        sector = row["sector"] if row is not None else None
+    if not sector:
+        return None
+    row = conn.execute(
+        """
+        SELECT sector, subsector, rollup_key, payload_json, updated_at
+        FROM sector_rollups
+        WHERE rollup_key = 'peer_intelligence'
+          AND sector = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (sector,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "sector": row["sector"],
+        "subsector": row["subsector"],
+        "rollup_key": row["rollup_key"],
+        "payload": json.loads(row["payload_json"] or "{}"),
+        "updated_at": row["updated_at"],
+    }
 
 
 def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:
