@@ -76,7 +76,10 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     subsector = CASE WHEN subsector IN ('unknown', '') THEN ? ELSE subsector END,
                     industry = CASE WHEN industry IN ('unknown', '') THEN ? ELSE industry END,
                     listing_board = CASE WHEN listing_board = '' THEN ? ELSE listing_board END,
-                    fiscal_year_end_month = COALESCE(fiscal_year_end_month, ?)
+                    fiscal_year_end_month = CASE
+                        WHEN (? BETWEEN 1 AND 11) AND fiscal_year_end_month = 12 THEN ?
+                        ELSE fiscal_year_end_month
+                    END
                 WHERE ticker = ?
                 """,
                 (
@@ -89,6 +92,7 @@ def persist_companies(conn: sqlite3.Connection, candidates: list[DocumentCandida
                     subsector,
                     industry,
                     listing_board,
+                    fiscal_year_end_month,
                     fiscal_year_end_month,
                     candidate.ticker,
                 ),

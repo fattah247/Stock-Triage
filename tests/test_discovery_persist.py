@@ -91,3 +91,37 @@ def test_persist_document_candidates_upserts(tmp_config):
         assert "2.pdf" in row["raw_metadata"]
     finally:
         rconn.close()
+
+
+def test_persist_companies_upgrades_default_fiscal_year_end_when_discovered(tmp_config):
+    initial = DocumentCandidate(
+        source_name="idx_company_universe",
+        source_class=SourceClass.COMPANY_UNIVERSE,
+        source_record_id="ABCD",
+        title="PT Example Tbk.",
+        ticker="ABCD",
+        raw_metadata={"issuer_name": "PT Example Tbk."},
+    )
+    upgraded = DocumentCandidate(
+        source_name="idx_company_universe",
+        source_class=SourceClass.COMPANY_UNIVERSE,
+        source_record_id="ABCD",
+        title="PT Example Tbk.",
+        ticker="ABCD",
+        raw_metadata={"issuer_name": "PT Example Tbk.", "fiscal_year_end_month": 6},
+    )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_companies(conn, [initial]))
+        wq.submit(lambda conn: persist_companies(conn, [upgraded]))
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        row = rconn.execute(
+            "SELECT fiscal_year_end_month FROM companies WHERE ticker = ?",
+            ("ABCD",),
+        ).fetchone()
+        assert row["fiscal_year_end_month"] == 6
+    finally:
+        rconn.close()
