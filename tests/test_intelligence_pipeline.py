@@ -8,7 +8,13 @@ from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.fiscal_year import save_fiscal_year_override
 from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
-from stock_triage.intelligence.pipeline import _derive_stance, _next_expected_filing_window
+from stock_triage.intelligence.pipeline import (
+    RECOMMENDATION_BUCKET_AVOID,
+    RECOMMENDATION_BUCKET_STOCK_PICK,
+    _build_recommendation_summary,
+    _derive_stance,
+    _next_expected_filing_window,
+)
 
 from .test_phase8_ops import _seed_phase8_data
 
@@ -94,8 +100,13 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["decision_panel"]["what_to_watch"]
         assert payload["decision_panel"]["must_improve"]
         assert payload["decision_panel"]["thesis_breakers"]
+        assert payload["decision_panel"]["decision_constraints"]
         assert payload["decision_panel"]["next_catalyst"]["label"]
         assert payload["decision_panel"]["next_catalyst"]["report_type"] in {"quarterly_fs", "interim_fs", "annual_fs", "annual_report"}
+        assert payload["decision_panel"]["recommendation"]["bucket"] == RECOMMENDATION_BUCKET_AVOID
+        assert payload["decision_panel"]["recommendation"]["reason_1"]
+        assert payload["decision_panel"]["recommendation"]["reason_2"]
+        assert payload["decision_panel"]["recommendation"]["reason_3"]
         assert payload["filing_expectations"]
         assert any(item["obligation_type"] == "annual_report" and item["state"] == "satisfied" for item in payload["filing_expectations"])
         assert payload["segment_summary"] == []
@@ -324,6 +335,68 @@ def test_stance_mapping_table_rows():
     ]
     for payload, expected in cases:
         assert _derive_stance(**payload) == expected
+
+
+def test_recommendation_summary_classifies_pick_and_avoid_candidates():
+    pick = _build_recommendation_summary(
+        ticker="GOOD",
+        issuer_name="PT Good Shipping Tbk",
+        as_of_document_id="doc-good-a",
+        stance="Buy",
+        confidence="high",
+        overall_state="stable",
+        thesis_state="improving",
+        credibility_band="high",
+        data_completeness_pct=88.0,
+        why=["Comparable baseline is clean", "Improving thesis conditions are matched", "No review queue remains open"],
+        what_changed=["Revenue changed +24.0% versus baseline.", "Operating profit changed +18.0% versus baseline."],
+        what_to_watch=["Watch the next H1 filing window."],
+        must_improve=["Keep leverage stable."],
+        thesis_breakers=["Debt surge appears."],
+        quality_flags=["Auditor changed."],
+        positive_factors=["revenue increased", "operating_profit increased"],
+        negative_factors=[],
+        review_items=[],
+        events=[],
+        triggered_rules=[],
+        peer_anomaly_count=0,
+        decision_constraints=["Keep leverage stable.", "Debt surge appears.", "Watch the next H1 filing window."],
+    )
+    assert pick["bucket"] == RECOMMENDATION_BUCKET_STOCK_PICK
+    assert pick["score"] > 0
+    assert pick["reason_1"]
+    assert pick["reason_2"]
+    assert pick["reason_3"]
+
+    avoid = _build_recommendation_summary(
+        ticker="RISK",
+        issuer_name="PT Risk Shipping Tbk",
+        as_of_document_id="doc-risk-a",
+        stance="Avoid",
+        confidence="high",
+        overall_state="critical",
+        thesis_state="broken",
+        credibility_band="poor",
+        data_completeness_pct=82.0,
+        why=["At least one configured thesis is broken", "Critical rules or events remain active", "Management credibility is poor"],
+        what_changed=["New rule trigger: debt surge.", "New event detected: lawsuit."],
+        what_to_watch=["Resolve the active debt stress before revisiting the name."],
+        must_improve=["Clear critical rules."],
+        thesis_breakers=["Debt surge appears."],
+        quality_flags=["Debt grew faster than revenue.", "Legal or regulatory risk is active."],
+        positive_factors=[],
+        negative_factors=["debt_surge appeared", "lawsuit appeared"],
+        review_items=[],
+        events=[],
+        triggered_rules=[],
+        peer_anomaly_count=1,
+        decision_constraints=["Clear critical rules.", "Debt surge appears.", "Resolve the active debt stress before revisiting the name."],
+    )
+    assert avoid["bucket"] == RECOMMENDATION_BUCKET_AVOID
+    assert avoid["score"] > 0
+    assert avoid["reason_1"]
+    assert avoid["reason_2"]
+    assert avoid["reason_3"]
 
 
 def test_next_expected_filing_window_matches_v3_2_deadline_table():

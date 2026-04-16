@@ -1305,6 +1305,7 @@ def _build_snapshot_payload_json(
         review_items=review_items,
         profile=profile,
         top_card=health,
+        peer_view=peer_view,
     )
     payload = {
         "ticker": profile.ticker,
@@ -1342,6 +1343,7 @@ def _build_snapshot_payload_json(
         ),
         "top_card": health,
         "decision_panel": decision_panel,
+        "recommendation": decision_panel.get("recommendation"),
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "fiscal_year_end_source": profile.fiscal_year_end_source,
         "filing_expectations": [
@@ -1749,33 +1751,280 @@ def _build_decision_panel(
     thesis_evaluations: list[ThesisEvaluationRecord],
     review_items: list[ReviewQueueItem],
     top_card: dict[str, Any],
+    peer_view: dict[str, Any],
 ) -> dict[str, Any]:
+    why = list(top_card.get("reasons") or [])[:3]
+    what_changed = _summarize_deltas(deltas, limit=3)
+    what_to_watch = _build_watch_items(
+        latest_analysis=latest_analysis,
+        events=events,
+        triggered_rules=triggered_rules,
+        review_items=review_items,
+        top_card=top_card,
+    )
+    must_improve = _build_improvement_items(
+        thesis_evaluations=thesis_evaluations,
+        review_items=review_items,
+        top_card=top_card,
+    )
+    thesis_breakers = _build_thesis_breakers(thesis_evaluations)
+    quality_flags = _build_quality_flags(deltas=deltas, events=events, triggered_rules=triggered_rules)
+    next_catalyst = _estimate_next_catalyst(
+        filing_expectations=filing_expectations,
+        profile=profile,
+        latest_document=latest_document,
+        latest_metrics=latest_metrics,
+    )
+    decision_constraints = _build_decision_constraints(
+        must_improve=must_improve,
+        thesis_breakers=thesis_breakers,
+        what_to_watch=what_to_watch,
+    )
+    recommendation = _build_recommendation_summary(
+        ticker=profile.ticker,
+        issuer_name=profile.issuer_name,
+        as_of_document_id=latest_document.document_id,
+        stance=str(top_card.get("decision_state") or "Watch"),
+        confidence=str(top_card.get("stance_confidence") or top_card.get("confidence") or "low"),
+        overall_state=str(top_card.get("overall_state") or "stable"),
+        thesis_state=str(top_card.get("thesis_state") or "none"),
+        credibility_band=str(top_card.get("credibility_band") or "unknown"),
+        data_completeness_pct=float(top_card.get("data_completeness_pct") or 0.0),
+        why=why,
+        what_changed=what_changed,
+        what_to_watch=what_to_watch,
+        must_improve=must_improve,
+        thesis_breakers=thesis_breakers,
+        quality_flags=quality_flags,
+        positive_factors=[str(item) for item in top_card.get("positive_factors") or []],
+        negative_factors=[str(item) for item in top_card.get("negative_factors") or []],
+        review_items=review_items,
+        events=events,
+        triggered_rules=triggered_rules,
+        peer_anomaly_count=len(peer_view.get("anomalies") or []),
+        decision_constraints=decision_constraints,
+    )
     return {
         "stance": top_card.get("decision_state"),
         "confidence": top_card.get("stance_confidence") or top_card.get("confidence"),
-        "why": list(top_card.get("reasons") or [])[:3],
-        "what_changed": _summarize_deltas(deltas, limit=3),
-        "what_to_watch": _build_watch_items(
-            latest_analysis=latest_analysis,
-            events=events,
-            triggered_rules=triggered_rules,
-            review_items=review_items,
-            top_card=top_card,
-        ),
-        "must_improve": _build_improvement_items(
-            thesis_evaluations=thesis_evaluations,
-            review_items=review_items,
-            top_card=top_card,
-        ),
-        "thesis_breakers": _build_thesis_breakers(thesis_evaluations),
-        "quality_flags": _build_quality_flags(deltas=deltas, events=events, triggered_rules=triggered_rules),
-        "next_catalyst": _estimate_next_catalyst(
-            filing_expectations=filing_expectations,
-            profile=profile,
-            latest_document=latest_document,
-            latest_metrics=latest_metrics,
-        ),
+        "why": why,
+        "what_changed": what_changed,
+        "what_to_watch": what_to_watch,
+        "must_improve": must_improve,
+        "thesis_breakers": thesis_breakers,
+        "quality_flags": quality_flags,
+        "decision_constraints": decision_constraints,
+        "next_catalyst": next_catalyst,
+        "recommendation": recommendation,
     }
+
+
+RECOMMENDATION_BUCKET_STOCK_PICK = "stock_pick_candidate"
+RECOMMENDATION_BUCKET_AVOID = "avoid_candidate"
+RECOMMENDATION_BUCKET_NEITHER = "neither"
+_MIN_PICK_DATA_COMPLETENESS_PCT = 75.0
+_MIN_PICK_EVIDENCE_REF_COUNT = 3
+_MIN_AVOID_EVIDENCE_REF_COUNT = 2
+_MAX_PICK_QUALITY_FLAGS = 1
+
+
+def _build_decision_constraints(
+    *,
+    must_improve: list[str],
+    thesis_breakers: list[str],
+    what_to_watch: list[str],
+) -> list[str]:
+    return _dedupe_keep_order([*must_improve, *thesis_breakers, *what_to_watch])[:6]
+
+
+def _build_recommendation_summary(
+    *,
+    ticker: str,
+    issuer_name: str | None,
+    as_of_document_id: str,
+    stance: str,
+    confidence: str,
+    overall_state: str,
+    thesis_state: str,
+    credibility_band: str,
+    data_completeness_pct: float,
+    why: list[str],
+    what_changed: list[str],
+    what_to_watch: list[str],
+    must_improve: list[str],
+    thesis_breakers: list[str],
+    quality_flags: list[str],
+    positive_factors: list[str],
+    negative_factors: list[str],
+    review_items: list[ReviewQueueItem],
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    peer_anomaly_count: int,
+    decision_constraints: list[str],
+) -> dict[str, Any]:
+    open_review_count = len(review_items)
+    critical_review_count = sum(1 for item in review_items if item.priority == "high")
+    critical_rule_count = sum(1 for rule in triggered_rules if rule.severity == "critical")
+    warning_rule_count = sum(1 for rule in triggered_rules if rule.severity == "warning")
+    critical_event_count = sum(1 for event in events if (event.severity or "") == "critical")
+    warning_event_count = sum(1 for event in events if (event.severity or "") == "warning")
+    critical_signal_count = critical_rule_count + critical_event_count
+    warning_signal_count = warning_rule_count + warning_event_count
+    positive_factor_count = len(positive_factors)
+    negative_factor_count = len(negative_factors)
+    quality_flag_count = len(quality_flags)
+    evidence_ref_count = len(
+        _dedupe_keep_order(
+            [
+                *why,
+                *what_changed,
+                *quality_flags,
+                *(rule.rule_name for rule in triggered_rules if rule.rule_name),
+                *(event.event_type for event in events if event.event_type),
+            ]
+        )
+    )
+    pick_reasons = _dedupe_keep_order(
+        [
+            *_sentenceize_all(why),
+            *_sentenceize_all(positive_factors),
+            *_sentenceize_all(what_changed),
+        ]
+    )[:3]
+    avoid_reasons = _dedupe_keep_order(
+        [
+            *_sentenceize_all(why),
+            *_sentenceize_all(negative_factors),
+            *_sentenceize_all(quality_flags),
+            *_sentenceize_all(what_to_watch),
+        ]
+    )[:3]
+    pick_eligible = all(
+        [
+            stance == "Buy",
+            confidence == "high",
+            overall_state == "stable",
+            thesis_state == "improving",
+            credibility_band in {"high", "acceptable"},
+            open_review_count == 0,
+            critical_signal_count == 0,
+            quality_flag_count <= _MAX_PICK_QUALITY_FLAGS,
+            data_completeness_pct >= _MIN_PICK_DATA_COMPLETENESS_PCT,
+            evidence_ref_count >= _MIN_PICK_EVIDENCE_REF_COUNT,
+            len(pick_reasons) >= 3,
+        ]
+    )
+    avoid_eligible = all(
+        [
+            stance == "Avoid",
+            confidence in {"high", "medium"},
+            overall_state in {"critical", "review_required"} or thesis_state == "broken" or credibility_band == "poor",
+            (
+                critical_signal_count > 0
+                or critical_review_count > 0
+                or thesis_state == "broken"
+                or credibility_band == "poor"
+                or quality_flag_count >= 2
+            ),
+            evidence_ref_count >= _MIN_AVOID_EVIDENCE_REF_COUNT,
+            len(avoid_reasons) >= 3,
+        ]
+    )
+    pick_score = (
+        (100 if stance == "Buy" else 0)
+        + (30 if confidence == "high" else 10 if confidence == "medium" else 0)
+        + (25 if thesis_state == "improving" else 0)
+        + int(data_completeness_pct)
+        + (positive_factor_count * 8)
+        + (evidence_ref_count * 3)
+        - (negative_factor_count * 6)
+        - (quality_flag_count * 8)
+        - (warning_signal_count * 4)
+        - (peer_anomaly_count * 5)
+        - (open_review_count * 20)
+        - (critical_signal_count * 40)
+    )
+    avoid_score = (
+        (110 if stance == "Avoid" else 0)
+        + (35 if overall_state == "critical" else 0)
+        + (30 if thesis_state == "broken" else 0)
+        + (25 if credibility_band == "poor" else 0)
+        + (critical_signal_count * 20)
+        + (warning_signal_count * 6)
+        + (critical_review_count * 15)
+        + (open_review_count * 8)
+        + (negative_factor_count * 8)
+        + (quality_flag_count * 6)
+        + (peer_anomaly_count * 4)
+        + (evidence_ref_count * 2)
+        - (positive_factor_count * 5)
+    )
+    if avoid_eligible:
+        bucket = RECOMMENDATION_BUCKET_AVOID
+        score = avoid_score
+        reasons = avoid_reasons
+        label = "Avoid candidate"
+    elif pick_eligible:
+        bucket = RECOMMENDATION_BUCKET_STOCK_PICK
+        score = pick_score
+        reasons = pick_reasons
+        label = "Stock-pick candidate"
+    else:
+        bucket = RECOMMENDATION_BUCKET_NEITHER
+        score = 0
+        reasons = _dedupe_keep_order(
+            [
+                *_sentenceize_all(why),
+                *_sentenceize_all(what_changed),
+                *_sentenceize_all(what_to_watch),
+            ]
+        )[:3]
+        label = "Neither"
+    return {
+        "bucket": bucket,
+        "label": label,
+        "eligible": bucket != RECOMMENDATION_BUCKET_NEITHER,
+        "score": score,
+        "ticker": ticker,
+        "issuer_name": issuer_name,
+        "as_of_document_id": as_of_document_id,
+        "reason_1": reasons[0] if len(reasons) > 0 else None,
+        "reason_2": reasons[1] if len(reasons) > 1 else None,
+        "reason_3": reasons[2] if len(reasons) > 2 else None,
+        "reasons": reasons,
+        "decision_constraints": decision_constraints[:3],
+        "evidence_ref_count": evidence_ref_count,
+        "ranking_inputs": {
+            "stance": stance,
+            "confidence": confidence,
+            "overall_state": overall_state,
+            "thesis_state": thesis_state,
+            "credibility_band": credibility_band,
+            "data_completeness_pct": data_completeness_pct,
+            "open_review_count": open_review_count,
+            "critical_review_count": critical_review_count,
+            "critical_signal_count": critical_signal_count,
+            "warning_signal_count": warning_signal_count,
+            "positive_factor_count": positive_factor_count,
+            "negative_factor_count": negative_factor_count,
+            "quality_flag_count": quality_flag_count,
+            "peer_anomaly_count": peer_anomaly_count,
+            "pick_score": pick_score,
+            "avoid_score": avoid_score,
+        },
+    }
+
+
+def _sentenceize_all(items: list[str]) -> list[str]:
+    return [_sentenceize(item) for item in items if item]
+
+
+def _sentenceize(text: str) -> str:
+    stripped = str(text).strip()
+    if not stripped:
+        return ""
+    stripped = stripped.rstrip(".")
+    return f"{stripped[0].upper()}{stripped[1:]}."
 
 
 def _data_completeness_pct(
