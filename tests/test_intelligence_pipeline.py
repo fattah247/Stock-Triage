@@ -96,6 +96,8 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["decision_panel"]["thesis_breakers"]
         assert payload["decision_panel"]["next_catalyst"]["label"]
         assert payload["decision_panel"]["next_catalyst"]["report_type"] in {"quarterly_fs", "interim_fs", "annual_fs", "annual_report"}
+        assert payload["filing_expectations"]
+        assert any(item["obligation_type"] == "annual_report" and item["state"] == "satisfied" for item in payload["filing_expectations"])
         assert payload["segment_summary"] == []
         assert "revenue increased" in payload["top_card"]["positive_factors"]
         assert "debt_surge appeared" in payload["top_card"]["negative_factors"]
@@ -128,6 +130,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         counts = {
             table: rconn.execute(f"SELECT COUNT(*) AS cnt FROM {table}").fetchone()["cnt"]
             for table in (
+                "filing_expectations",
                 "company_timeseries",
                 "decision_briefs",
                 "review_queue_items",
@@ -141,6 +144,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
             )
         }
         assert counts == {
+            "filing_expectations": 20,
             "company_timeseries": 7,
             "decision_briefs": 1,
             "review_queue_items": 5,
@@ -174,6 +178,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
             for table in (
                 "document_deltas",
                 "company_snapshots",
+                "filing_expectations",
                 "company_timeseries",
                 "decision_briefs",
                 "review_queue_items",
@@ -187,6 +192,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
         assert counts == {
             "document_deltas": 8,
             "company_snapshots": 1,
+            "filing_expectations": 20,
             "company_timeseries": 7,
             "decision_briefs": 1,
             "review_queue_items": 5,
@@ -329,7 +335,7 @@ def test_next_expected_filing_window_matches_v3_2_deadline_table():
     )
     assert h1 is not None
     assert h1["label"] == "H1 filing due"
-    assert h1["window_start"] == "2026-08-29"
+    assert h1["window_start"] == "2026-08-08"
 
     annual_report = _next_expected_filing_window(
         fiscal_year_end_month=12,
@@ -339,7 +345,7 @@ def test_next_expected_filing_window_matches_v3_2_deadline_table():
     )
     assert annual_report is not None
     assert annual_report["report_type"] == "annual_report"
-    assert annual_report["window_start"] == "2026-04-30"
+    assert annual_report["window_start"] == "2026-03-31"
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

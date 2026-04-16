@@ -115,6 +115,15 @@ class CompanyDocument:
 
 
 @dataclass(frozen=True)
+class FilingDocument:
+    document_id: str
+    document_type: str | None
+    as_of: str
+    period_end_dates: tuple[str, ...]
+    fiscal_periods: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MetricPoint:
     metric_id: str
     document_id: str
@@ -232,6 +241,23 @@ class SectorRollupRecord:
 
 
 @dataclass(frozen=True)
+class FilingExpectationRecord:
+    expectation_id: str
+    ticker: str
+    obligation_type: str
+    fiscal_year: int
+    period_label: str
+    period_end_date: str
+    window_start: str
+    deadline_at: str
+    satisfied_at: str | None
+    state: str
+    knowledge_source: str
+    satisfied_document_id: str | None
+    payload_json: str
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -258,6 +284,7 @@ class CompanyIntelligenceBundle:
     profile: CompanyProfile
     latest_document: CompanyDocument
     baseline: BaselineChoice | None
+    filing_expectations: list[FilingExpectationRecord]
     latest_analysis: AnalysisSummary | None
     deltas: list[DeltaRecord]
     timeseries: list[TimeseriesPoint]
@@ -422,6 +449,11 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
     latest_metrics = _load_document_metrics(conn, latest_document.document_id)
     if not latest_metrics:
         return None
+    filing_expectations = _build_filing_expectations(
+        profile=profile,
+        filing_documents=_load_filing_documents(conn, ticker),
+        now=date.today(),
+    )
     previous_metrics = _load_document_metrics(conn, baseline.document.document_id) if baseline is not None else []
     latest_events = _load_document_events(conn, latest_document.document_id)
     previous_events = _load_document_events(conn, baseline.document.document_id) if baseline is not None else []
@@ -502,6 +534,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         profile=profile,
         latest_document=latest_document,
         baseline=baseline,
+        filing_expectations=filing_expectations,
         latest_analysis=latest_analysis,
         latest_metrics=latest_metrics,
         deltas=deltas,
@@ -540,6 +573,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         profile=profile,
         latest_document=latest_document,
         baseline=baseline,
+        filing_expectations=filing_expectations,
         latest_analysis=latest_analysis,
         deltas=deltas,
         timeseries=timeseries,
@@ -634,6 +668,52 @@ def _load_company_documents(
             created_at=row["created_at"],
         )
         for row in rows
+    ]
+
+
+def _load_filing_documents(conn: sqlite3.Connection, ticker: str) -> list[FilingDocument]:
+    rows = conn.execute(
+        """
+        SELECT
+            d.document_id,
+            d.document_type,
+            COALESCE(d.source_modified_at, d.updated_at, d.created_at) AS as_of,
+            mi.period_end_date,
+            mi.fiscal_period
+        FROM documents d
+        LEFT JOIN metric_items mi ON mi.document_id = d.document_id
+        WHERE d.ticker = ?
+          AND d.process_state = 'analyzed'
+          AND d.document_type IN ('annual_report', 'financial_statement')
+        ORDER BY COALESCE(d.source_modified_at, d.updated_at, d.created_at) DESC, d.document_id DESC
+        """,
+        (ticker,),
+    ).fetchall()
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        record = grouped.setdefault(
+            row["document_id"],
+            {
+                "document_id": row["document_id"],
+                "document_type": row["document_type"],
+                "as_of": row["as_of"],
+                "period_end_dates": set(),
+                "fiscal_periods": set(),
+            },
+        )
+        if row["period_end_date"]:
+            record["period_end_dates"].add(str(row["period_end_date"]))
+        if row["fiscal_period"]:
+            record["fiscal_periods"].add(str(row["fiscal_period"]))
+    return [
+        FilingDocument(
+            document_id=str(item["document_id"]),
+            document_type=item["document_type"],
+            as_of=str(item["as_of"]),
+            period_end_dates=tuple(sorted(item["period_end_dates"])),
+            fiscal_periods=tuple(sorted(item["fiscal_periods"])),
+        )
+        for item in grouped.values()
     ]
 
 
@@ -1180,6 +1260,7 @@ def _build_snapshot_payload_json(
     profile: CompanyProfile,
     latest_document: CompanyDocument,
     baseline: BaselineChoice | None,
+    filing_expectations: list[FilingExpectationRecord],
     latest_analysis: AnalysisSummary | None,
     latest_metrics: list[MetricPoint],
     deltas: list[DeltaRecord],
@@ -1214,6 +1295,7 @@ def _build_snapshot_payload_json(
         health["reasons"].append(f"Peer comparison has {warning_count} comparability warning(s).")
     decision_panel = _build_decision_panel(
         latest_document=latest_document,
+        filing_expectations=filing_expectations,
         latest_metrics=latest_metrics,
         latest_analysis=latest_analysis,
         deltas=deltas,
@@ -1262,6 +1344,21 @@ def _build_snapshot_payload_json(
         "decision_panel": decision_panel,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "fiscal_year_end_source": profile.fiscal_year_end_source,
+        "filing_expectations": [
+            {
+                "obligation_type": expectation.obligation_type,
+                "fiscal_year": expectation.fiscal_year,
+                "period_label": expectation.period_label,
+                "period_end_date": expectation.period_end_date,
+                "window_start": expectation.window_start,
+                "deadline_at": expectation.deadline_at,
+                "satisfied_at": expectation.satisfied_at,
+                "state": expectation.state,
+                "knowledge_source": expectation.knowledge_source,
+                "satisfied_document_id": expectation.satisfied_document_id,
+            }
+            for expectation in filing_expectations[:10]
+        ],
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "segment_summary": _build_segment_summary(latest_metrics),
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
@@ -1643,6 +1740,7 @@ def _build_decision_panel(
     *,
     profile: CompanyProfile,
     latest_document: CompanyDocument,
+    filing_expectations: list[FilingExpectationRecord],
     latest_metrics: list[MetricPoint],
     latest_analysis: AnalysisSummary | None,
     deltas: list[DeltaRecord],
@@ -1672,6 +1770,7 @@ def _build_decision_panel(
         "thesis_breakers": _build_thesis_breakers(thesis_evaluations),
         "quality_flags": _build_quality_flags(deltas=deltas, events=events, triggered_rules=triggered_rules),
         "next_catalyst": _estimate_next_catalyst(
+            filing_expectations=filing_expectations,
             profile=profile,
             latest_document=latest_document,
             latest_metrics=latest_metrics,
@@ -1862,25 +1961,27 @@ def _build_quality_flags(
 
 def _estimate_next_catalyst(
     *,
+    filing_expectations: list[FilingExpectationRecord],
     profile: CompanyProfile,
     latest_document: CompanyDocument,
     latest_metrics: list[MetricPoint],
 ) -> dict[str, Any]:
-    anchor = _anchor_metric(latest_metrics)
-    period_end = _parse_iso_date(anchor.period_end_date) if anchor is not None else None
-    schedule = _next_expected_filing_window(
-        fiscal_year_end_month=profile.fiscal_year_end_month,
-        now=date.today(),
-        latest_period_end=period_end,
-        latest_document_type=latest_document.document_type,
+    del profile, latest_document, latest_metrics
+    schedule = next(
+        (
+            expectation
+            for expectation in filing_expectations
+            if expectation.state in {"upcoming", "due"}
+        ),
+        None,
     )
     if schedule is not None:
         return {
-            "label": schedule["label"],
-            "window_start": schedule["window_start"],
-            "window_end": schedule["window_end"],
-            "reason": schedule["reason"],
-            "report_type": schedule["report_type"],
+            "label": f"{schedule.period_label} due",
+            "window_start": schedule.window_start,
+            "window_end": schedule.deadline_at,
+            "reason": json.loads(schedule.payload_json).get("reason", "Derived from filing expectation model."),
+            "report_type": schedule.obligation_type,
         }
     return {
         "label": "No catalyst estimate yet",
@@ -1889,6 +1990,113 @@ def _estimate_next_catalyst(
         "reason": "Insufficient timing metadata exists for this issuer.",
         "report_type": None,
     }
+
+
+_EXPECTATION_WINDOW_DAYS = {
+    "quarterly_fs": 14,
+    "interim_fs": 21,
+    "annual_fs": 30,
+    "annual_report": 30,
+}
+
+
+def _build_filing_expectations(
+    *,
+    profile: CompanyProfile,
+    filing_documents: list[FilingDocument],
+    now: date,
+) -> list[FilingExpectationRecord]:
+    expectations: list[FilingExpectationRecord] = []
+    for year in range(now.year - 2, now.year + 2):
+        for template in _filing_deadline_templates(profile.fiscal_year_end_month, around_year=year):
+            satisfied = _match_filing_expectation(template, filing_documents)
+            if satisfied is not None:
+                state = "satisfied"
+            elif now < template["window_start"]:
+                state = "upcoming"
+            elif now <= template["deadline_at"]:
+                state = "due"
+            else:
+                state = "late"
+            expectations.append(
+                FilingExpectationRecord(
+                    expectation_id=_stable_id(
+                        "expectation",
+                        profile.ticker,
+                        template["obligation_type"],
+                        template["period_end_date"],
+                        DERIVED_VERSION,
+                    ),
+                    ticker=profile.ticker,
+                    obligation_type=str(template["obligation_type"]),
+                    fiscal_year=int(template["fiscal_year"]),
+                    period_label=str(template["period_label"]),
+                    period_end_date=str(template["period_end_date"]),
+                    window_start=str(template["window_start"].isoformat()),
+                    deadline_at=str(template["deadline_at"].isoformat()),
+                    satisfied_at=satisfied["as_of"] if satisfied is not None else None,
+                    state=state,
+                    knowledge_source=profile.fiscal_year_end_source,
+                    satisfied_document_id=satisfied["document_id"] if satisfied is not None else None,
+                    payload_json=json.dumps(
+                        {
+                            "reason": template["reason"],
+                            "report_type": template["obligation_type"],
+                            "fiscal_year_end_month": profile.fiscal_year_end_month,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            )
+    expectations.sort(key=lambda item: (item.deadline_at, item.obligation_type))
+    return expectations
+
+
+def _filing_deadline_templates(fiscal_year_end_month: int, *, around_year: int) -> list[dict[str, Any]]:
+    fiscal_year_end = _month_end(around_year, fiscal_year_end_month)
+    q1_end = _shift_months(fiscal_year_end, -9)
+    h1_end = _shift_months(fiscal_year_end, -6)
+    q3_end = _shift_months(fiscal_year_end, -3)
+    templates = [
+        ("quarterly_fs", "Q1 filing", q1_end, q1_end + timedelta(days=30)),
+        ("interim_fs", "H1 filing", h1_end, h1_end + timedelta(days=60)),
+        ("quarterly_fs", "Q3 filing", q3_end, q3_end + timedelta(days=30)),
+        ("annual_fs", "Annual FS", fiscal_year_end, fiscal_year_end + timedelta(days=120)),
+        ("annual_report", "Annual report", fiscal_year_end, fiscal_year_end + timedelta(days=120)),
+    ]
+    rows: list[dict[str, Any]] = []
+    for obligation_type, period_label, period_end, deadline_at in templates:
+        window_days = _EXPECTATION_WINDOW_DAYS[obligation_type]
+        rows.append(
+            {
+                "obligation_type": obligation_type,
+                "period_label": period_label,
+                "period_end_date": period_end.isoformat(),
+                "fiscal_year": period_end.year,
+                "window_start": deadline_at - timedelta(days=window_days),
+                "deadline_at": deadline_at,
+                "reason": f"Derived from fiscal year end month {fiscal_year_end_month:02d} using the v3.3 filing expectation model.",
+            }
+        )
+    return rows
+
+
+def _match_filing_expectation(
+    template: dict[str, Any],
+    filing_documents: list[FilingDocument],
+) -> dict[str, str] | None:
+    expected_period_end = str(template["period_end_date"])
+    obligation_type = str(template["obligation_type"])
+    for document in filing_documents:
+        if obligation_type == "annual_report":
+            if document.document_type != "annual_report":
+                continue
+        else:
+            if document.document_type != "financial_statement":
+                continue
+        if expected_period_end in document.period_end_dates:
+            return {"document_id": document.document_id, "as_of": document.as_of}
+    return None
 
 
 def _month_end(year: int, month: int) -> date:
@@ -1905,16 +2113,15 @@ def _shift_months(anchor: date, months: int) -> date:
 
 
 def _filing_deadlines(fiscal_year_end_month: int, *, around_year: int) -> list[tuple[date, str, str, int, str]]:
-    fiscal_year_end = _month_end(around_year, fiscal_year_end_month)
-    q1_end = _shift_months(fiscal_year_end, -9)
-    h1_end = _shift_months(fiscal_year_end, -6)
-    q3_end = _shift_months(fiscal_year_end, -3)
     return [
-        (q1_end + timedelta(days=30), "Q1 filing due", q1_end.isoformat(), 1, "quarterly_fs"),
-        (h1_end + timedelta(days=60), "H1 filing due", h1_end.isoformat(), 2, "interim_fs"),
-        (q3_end + timedelta(days=30), "Q3 filing due", q3_end.isoformat(), 3, "quarterly_fs"),
-        (fiscal_year_end + timedelta(days=120), "Annual FS due", fiscal_year_end.isoformat(), 4, "annual_fs"),
-        (fiscal_year_end + timedelta(days=120), "Annual report due", fiscal_year_end.isoformat(), 5, "annual_report"),
+        (
+            row["deadline_at"],
+            f"{row['period_label']} due",
+            row["period_end_date"],
+            index,
+            row["obligation_type"],
+        )
+        for index, row in enumerate(_filing_deadline_templates(fiscal_year_end_month, around_year=around_year), start=1)
     ]
 
 
@@ -1963,11 +2170,12 @@ def _next_expected_filing_window(
             and period_end == latest_period_end
         ):
             continue
+        window_days = _EXPECTATION_WINDOW_DAYS[report_type]
         return {
             "label": label,
-            "window_start": due_date.isoformat(),
-            "window_end": (due_date + timedelta(days=7)).isoformat(),
-            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} using the v3.2 filing deadline table.",
+            "window_start": (due_date - timedelta(days=window_days)).isoformat(),
+            "window_end": due_date.isoformat(),
+            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} using the v3.3 filing expectation model.",
             "report_type": report_type,
         }
     return None
@@ -2811,6 +3019,49 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 delta.percent_change,
                 delta.payload_json,
                 DERIVED_VERSION,
+                now,
+            ),
+        )
+
+    for expectation in bundle.filing_expectations:
+        conn.execute(
+            """
+            INSERT INTO filing_expectations (
+                expectation_id, ticker, obligation_type, fiscal_year, period_label, period_end_date,
+                window_start, deadline_at, satisfied_at, state, knowledge_source, satisfied_document_id,
+                payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, obligation_type, period_end_date, derived_version)
+            DO UPDATE SET
+                expectation_id = excluded.expectation_id,
+                fiscal_year = excluded.fiscal_year,
+                period_label = excluded.period_label,
+                period_end_date = excluded.period_end_date,
+                window_start = excluded.window_start,
+                deadline_at = excluded.deadline_at,
+                satisfied_at = excluded.satisfied_at,
+                state = excluded.state,
+                knowledge_source = excluded.knowledge_source,
+                satisfied_document_id = excluded.satisfied_document_id,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                expectation.expectation_id,
+                expectation.ticker,
+                expectation.obligation_type,
+                expectation.fiscal_year,
+                expectation.period_label,
+                expectation.period_end_date,
+                expectation.window_start,
+                expectation.deadline_at,
+                expectation.satisfied_at,
+                expectation.state,
+                expectation.knowledge_source,
+                expectation.satisfied_document_id,
+                expectation.payload_json,
+                DERIVED_VERSION,
+                now,
                 now,
             ),
         )

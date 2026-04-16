@@ -12,6 +12,7 @@ from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
+from ..intelligence.pipeline import DERIVED_VERSION
 from ..intelligence.review import load_intelligence_kpis, load_latest_digests, load_review_queue
 
 
@@ -292,72 +293,7 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
     ).fetchall()
     event_counts = {row["event_type"]: row["count"] for row in recent_event_rows}
 
-    recent_financial_rows = conn.execute(
-        """
-        SELECT
-            c.ticker,
-            c.issuer_name,
-            c.fiscal_year_end_month,
-            MAX(
-                CASE
-                    WHEN d.document_type != 'annual_report'
-                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
-                END
-            ) AS latest_financial_periodic_at,
-            MAX(
-                CASE
-                    WHEN d.document_type = 'annual_report'
-                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
-                END
-            ) AS latest_annual_report_at
-        FROM companies c
-        LEFT JOIN documents d
-          ON d.ticker = c.ticker
-         AND d.document_type IN ('annual_report', 'financial_statement')
-        LEFT JOIN metric_items mi
-          ON mi.document_id = d.document_id
-        WHERE COALESCE(c.active_status, 'listed') != 'delisted'
-        GROUP BY c.ticker, c.issuer_name, c.fiscal_year_end_month
-        ORDER BY c.ticker ASC
-        """
-    ).fetchall()
-    late_periodic_rows: list[dict[str, object]] = []
-    for row in recent_financial_rows:
-        latest_financial_period_end = _parse_iso_date(row["latest_financial_periodic_at"]) or (
-            _parse_iso_datetime(row["latest_financial_periodic_at"]).date()
-            if _parse_iso_datetime(row["latest_financial_periodic_at"]) is not None
-            else None
-        )
-        latest_annual_report_period_end = _parse_iso_date(row["latest_annual_report_at"]) or (
-            _parse_iso_datetime(row["latest_annual_report_at"]).date()
-            if _parse_iso_datetime(row["latest_annual_report_at"]) is not None
-            else None
-        )
-        deadline = _most_recent_periodic_deadline(
-            fiscal_year_end_month=resolve_fiscal_year_end_month(
-                conn,
-                cfg,
-                ticker=row["ticker"],
-                stored_month=int(row["fiscal_year_end_month"] or 12),
-            )[0],
-            now=now.date(),
-            latest_financial_period_end=latest_financial_period_end,
-            latest_annual_report_period_end=latest_annual_report_period_end,
-        )
-        if deadline is None:
-            continue
-        late_periodic_rows.append(
-            {
-                "ticker": row["ticker"],
-                "issuer_name": row["issuer_name"],
-                "latest_periodic_at": row["latest_financial_periodic_at"] or row["latest_annual_report_at"],
-                "days_since_periodic": (
-                    now.date() - (latest_annual_report_period_end or latest_financial_period_end)
-                ).days if (latest_annual_report_period_end or latest_financial_period_end) is not None else None,
-                "expected_label": deadline["label"],
-                "expected_due_date": deadline["due_date"].isoformat(),
-            }
-        )
+    late_periodic_rows = _load_late_periodic_rows(conn, cfg, now)
 
     sector_rows = conn.execute(
         """
@@ -668,6 +604,119 @@ def _shift_months(anchor: date, months: int) -> date:
     year = month_index // 12
     month = (month_index % 12) + 1
     return _month_end(year, month)
+
+
+def _load_late_periodic_rows(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    now: datetime,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+            fe.ticker,
+            c.issuer_name,
+            fe.period_label,
+            fe.obligation_type,
+            fe.period_end_date,
+            fe.deadline_at,
+            fe.satisfied_at,
+            fe.state,
+            fe.knowledge_source
+        FROM filing_expectations fe
+        LEFT JOIN companies c ON c.ticker = fe.ticker
+        WHERE fe.derived_version = ?
+          AND fe.state = 'late'
+          AND COALESCE(c.active_status, 'listed') != 'delisted'
+        ORDER BY fe.deadline_at ASC, fe.ticker ASC
+        LIMIT 25
+        """,
+        (DERIVED_VERSION,),
+    ).fetchall()
+    if rows:
+        return [
+            {
+                "ticker": row["ticker"],
+                "issuer_name": row["issuer_name"],
+                "latest_periodic_at": row["period_end_date"],
+                "days_since_periodic": (
+                    now.date() - _parse_iso_date(row["period_end_date"])
+                ).days if _parse_iso_date(row["period_end_date"]) is not None else None,
+                "expected_label": row["period_label"],
+                "expected_due_date": row["deadline_at"],
+                "knowledge_source": row["knowledge_source"],
+            }
+            for row in rows
+        ]
+
+    recent_financial_rows = conn.execute(
+        """
+        SELECT
+            c.ticker,
+            c.issuer_name,
+            c.fiscal_year_end_month,
+            MAX(
+                CASE
+                    WHEN d.document_type != 'annual_report'
+                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
+                END
+            ) AS latest_financial_periodic_at,
+            MAX(
+                CASE
+                    WHEN d.document_type = 'annual_report'
+                    THEN COALESCE(mi.period_end_date, d.source_modified_at, d.updated_at, d.created_at)
+                END
+            ) AS latest_annual_report_at
+        FROM companies c
+        LEFT JOIN documents d
+          ON d.ticker = c.ticker
+         AND d.document_type IN ('annual_report', 'financial_statement')
+        LEFT JOIN metric_items mi
+          ON mi.document_id = d.document_id
+        WHERE COALESCE(c.active_status, 'listed') != 'delisted'
+        GROUP BY c.ticker, c.issuer_name, c.fiscal_year_end_month
+        ORDER BY c.ticker ASC
+        """
+    ).fetchall()
+    legacy_rows: list[dict[str, object]] = []
+    for row in recent_financial_rows:
+        latest_financial_period_end = _parse_iso_date(row["latest_financial_periodic_at"]) or (
+            _parse_iso_datetime(row["latest_financial_periodic_at"]).date()
+            if _parse_iso_datetime(row["latest_financial_periodic_at"]) is not None
+            else None
+        )
+        latest_annual_report_period_end = _parse_iso_date(row["latest_annual_report_at"]) or (
+            _parse_iso_datetime(row["latest_annual_report_at"]).date()
+            if _parse_iso_datetime(row["latest_annual_report_at"]) is not None
+            else None
+        )
+        deadline = _most_recent_periodic_deadline(
+            fiscal_year_end_month=resolve_fiscal_year_end_month(
+                conn,
+                cfg,
+                ticker=row["ticker"],
+                stored_month=int(row["fiscal_year_end_month"] or 12),
+            )[0],
+            now=now.date(),
+            latest_financial_period_end=latest_financial_period_end,
+            latest_annual_report_period_end=latest_annual_report_period_end,
+        )
+        if deadline is None:
+            continue
+        legacy_rows.append(
+            {
+                "ticker": row["ticker"],
+                "issuer_name": row["issuer_name"],
+                "latest_periodic_at": row["latest_financial_periodic_at"] or row["latest_annual_report_at"],
+                "days_since_periodic": (
+                    now.date() - (latest_annual_report_period_end or latest_financial_period_end)
+                ).days if (latest_annual_report_period_end or latest_financial_period_end) is not None else None,
+                "expected_label": deadline["label"],
+                "expected_due_date": deadline["due_date"].isoformat(),
+                "knowledge_source": "legacy",
+            }
+        )
+    return legacy_rows
 
 
 def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:

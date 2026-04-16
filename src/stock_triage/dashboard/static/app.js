@@ -930,6 +930,7 @@
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
         const reviewRequired = (payload.review_required || []).slice(0, 6);
+        const filingExpectations = (payload.filing_expectations || []).slice(0, 6);
         const segmentSummary = (payload.segment_summary || []).slice(0, 6);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
@@ -969,6 +970,16 @@
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No review-required items in the current snapshot.</strong></div>`
+          }
+          ${
+            filingExpectations.length
+              ? `<table class="metricTable"><thead><tr><th>Filing</th><th>State</th><th>Window</th><th>Deadline</th><th>Source</th></tr></thead><tbody>${filingExpectations
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.period_label || item.obligation_type || "")}<div class="meta">${esc(item.period_end_date || "")}</div></td><td>${esc(item.state || "unknown")}</td><td>${esc(item.window_start || "")}</td><td>${esc(item.deadline_at || "")}</td><td>${esc(item.knowledge_source || "")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No filing calendar yet.</strong> Run or rerun intelligence for this issuer to materialize explicit filing expectations.</div>`
           }
         `;
         claimsList.innerHTML = `
