@@ -40,6 +40,11 @@
     _sectionLoaded: {},       // section -> boolean
     _sectionLoading: {},      // section -> boolean (in-flight guard)
     activeView: "home",       // current view tab
+    subviews: {
+      home: "board",
+      company: "current",
+      ops: "run",
+    },
   };
 
   const actionEndpoint = bootstrap.actionEndpoint || null;
@@ -231,6 +236,18 @@
         </article>
       </div>
     `;
+  }
+
+  function applySubviewVisibility() {
+    document.querySelectorAll("[data-subview-scope]").forEach((tab) => {
+      const scope = tab.dataset.subviewScope;
+      const target = tab.dataset.subviewTarget;
+      tab.classList.toggle("active", state.subviews[scope] === target);
+    });
+    document.querySelectorAll("[data-subpanels]").forEach((el) => {
+      const [scope, panel] = String(el.dataset.subpanels || "").split(":");
+      el.classList.toggle("subPanelVisible", state.activeView === scope && state.subviews[scope] === panel);
+    });
   }
 
   function updateHighlights(previous, next) {
@@ -458,6 +475,7 @@
       const views = el.dataset.views.split(/\s+/);
       el.classList.toggle("viewVisible", views.includes(view));
     });
+    applySubviewVisibility();
     // Auto-select company view when an issuer is picked.
     if (view === "company" && state.selectedTicker) {
       fetchCompanyDetail(state.selectedTicker);
@@ -466,46 +484,40 @@
     const hint = document.getElementById("sidebarHint");
     if (hint) {
       const hints = {
-        home: "Start with recent changes, then open one issuer.",
-        watchlist: "Star tickers here, then use this view to stay inside your watchlist.",
-        company: "Everything below is scoped to the selected issuer only.",
-        sector: "Compare the selected issuer against its peers and sector context.",
-        review: "Resolve or snooze the human queue here.",
-        ops: "Pipeline control panel, backlog, and source health live here.",
+        home: "Start with the decision board, then open one issuer.",
+        watchlist: "Stay inside starred names and work urgency from the top.",
+        company: "Use local company modes to move from current view to filings, signals, and context.",
+        review: "Resolve or snooze grouped issue families here.",
+        ops: "Run actions, monitor system health, and audit golden checks in separate modes.",
       };
       hint.textContent = hints[view] || "";
     }
     if (viewTitle && viewLead && viewEyebrow) {
       const copy = {
         home: {
-          eyebrow: "Daily Workflow",
-          title: "Triage what changed before you open a company.",
-          lead: "Home is the landing screen: recent changes, digest, and KPI health. Use it to choose the next issuer, not to do detailed analysis.",
+          eyebrow: "Decision Flow",
+          title: "Start from ranked market decisions, not from raw documents.",
+          lead: "Use Home in three passes: Decision Board for picks and risks, Inbox for recent changes, then Digest and KPI health when you need context.",
         },
         watchlist: {
           eyebrow: "Watchlist Mode",
-          title: "Stay inside the names you actively care about.",
-          lead: "This view uses the same inbox and digest surfaces, but the issuer rail is narrowed to your starred tickers.",
+          title: "Stay inside the names you already care about.",
+          lead: "Watchlist is for urgency triage across starred issuers only. Use it when you want a narrow operating list instead of the full market.",
         },
         company: {
           eyebrow: "Company Workspace",
-          title: "Review one issuer deeply, with everything scoped to that name.",
-          lead: "Decision snapshot, claims, filings, findings, and normalized facts are all gathered here so you do not need to jump between sections.",
-        },
-        sector: {
-          eyebrow: "Comparative Intelligence",
-          title: "Compare the selected issuer against peers and sector context.",
-          lead: "Use this screen when you want relative position, peer anomalies, or comparability warnings rather than a single-company read.",
+          title: "Work one issuer through current view, filings, signals, and context.",
+          lead: "The company screen is now split into local modes so you can inspect one layer at a time instead of scrolling through the whole research stack.",
         },
         review: {
           eyebrow: "Human Review Loop",
-          title: "Work the open queue without wading through the entire dashboard.",
-          lead: "This screen is for analyst judgment: revised filings, broken theses, contradictions, and other items that require a human decision.",
+          title: "Clear grouped exceptions without leaving the queue.",
+          lead: "Review is the dedicated human judgment screen for contradictions, broken theses, revised filings, and other unresolved issue families.",
         },
         ops: {
           eyebrow: "Operations",
-          title: "Run the pipeline and inspect source health in one place.",
-          lead: "Use Ops only when you want to change the system state. Day-to-day reading should happen in Home, Company, or Review.",
+          title: "Run, monitor, and audit the system in separate modes.",
+          lead: "Ops is now split so you can trigger actions, inspect health, and run audits without mixing them into one long control page.",
         },
       };
       const current = copy[view] || copy.home;
@@ -1843,6 +1855,18 @@
       return;
     }
 
+    const subviewTarget = event.target.closest("[data-subview-scope]");
+    if (subviewTarget) {
+      const scope = subviewTarget.dataset.subviewScope;
+      const target = subviewTarget.dataset.subviewTarget;
+      if (scope && target) {
+        state.subviews[scope] = target;
+        applySubviewVisibility();
+        render();
+      }
+      return;
+    }
+
     const starTarget = event.target.closest("[data-star-ticker]");
     if (starTarget) {
       event.stopPropagation();
@@ -1866,6 +1890,7 @@
     const issuerTarget = event.target.closest("[data-ticker]");
     if (issuerTarget) {
       state.selectedTicker = issuerTarget.dataset.ticker || null;
+      state.subviews.company = "current";
       render();
       if (state.selectedTicker) {
         fetchCompanyDetail(state.selectedTicker);
@@ -1877,6 +1902,7 @@
     const focusTarget = event.target.closest("[data-focus-ticker]");
     if (focusTarget) {
       state.selectedTicker = focusTarget.dataset.focusTicker || null;
+      state.subviews.company = "current";
       render();
       if (state.selectedTicker) {
         fetchCompanyDetail(state.selectedTicker);

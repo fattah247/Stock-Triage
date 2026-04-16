@@ -70,13 +70,16 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Advanced actions" in html
         assert "Daily Digest" in html
         assert "Open Review Queue" in html
-        assert "Market Monitor" in html
+        assert "Decision board" in html
         assert "Decision Snapshot" in html
         assert "Claims and Thesis" in html
-        assert "Sector and Peer Explorer" in html
+        assert "Context and Comparison" in html
         assert "Observability" in html
         assert "Golden Checks" in html
         assert "Rerun Preview" in html
+        assert "Home Modes" in html
+        assert "Company Modes" in html
+        assert "Ops Modes" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
         assert "window.__DASHBOARD_BOOTSTRAP__" in html
