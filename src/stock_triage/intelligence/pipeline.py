@@ -30,7 +30,7 @@ from .claims import (
     extract_claims_for_documents,
 )
 
-DERIVED_VERSION = "v3_3-v1"
+DERIVED_VERSION = "v3_4-v1"
 
 CORE_FINANCIAL_METRICS = {
     "revenue",
@@ -262,6 +262,60 @@ class FilingExpectationRecord:
 
 
 @dataclass(frozen=True)
+class EvidenceContext:
+    span_id: str
+    document_id: str
+    section_label: str | None
+    excerpt_text: str | None
+
+
+@dataclass(frozen=True)
+class NuanceFindingRecord:
+    nuance_id: str
+    ticker: str
+    document_id: str
+    nuance_class: str
+    severity: str
+    confidence: float | None
+    section_label: str | None
+    summary: str
+    evidence_span_id: str | None
+    requires_human_review: bool
+    payload_json: str
+
+
+@dataclass(frozen=True)
+class UncertaintyRecord:
+    uncertainty_id: str
+    ticker: str
+    document_id: str
+    uncertainty_class: str
+    severity: str
+    summary: str
+    confidence: float | None
+    section_label: str | None
+    evidence_span_id: str | None
+    requires_human_review: bool
+    payload_json: str
+
+
+@dataclass(frozen=True)
+class NextReadRecord:
+    guidance_id: str
+    ticker: str
+    document_id: str
+    priority_rank: int
+    target_document_type: str | None
+    target_period_label: str | None
+    target_section_label: str | None
+    reason_class: str
+    why_this_matters: str
+    evidence_reference_count: int
+    blocked_by: str | None
+    payload_json: str
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -289,6 +343,9 @@ class CompanyIntelligenceBundle:
     latest_document: CompanyDocument
     baseline: BaselineChoice | None
     filing_expectations: list[FilingExpectationRecord]
+    nuance_findings: list[NuanceFindingRecord]
+    uncertainty_rows: list[UncertaintyRecord]
+    next_read_guidance: list[NextReadRecord]
     latest_analysis: AnalysisSummary | None
     deltas: list[DeltaRecord]
     timeseries: list[TimeseriesPoint]
@@ -539,6 +596,49 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
     )
     peer_set, peer_view = _build_peer_set(conn, cfg, profile, current_company_state)
     sector_rollup, sector_view = _build_sector_rollup(conn, cfg, profile, current_company_state)
+    segment_summary = _build_segment_summary(
+        latest_document_id=latest_document.document_id,
+        latest_metrics=latest_metrics,
+        all_metrics=all_metrics,
+    )
+    narrative_signals = _build_narrative_signals(
+        latest_analysis=latest_analysis,
+        events=latest_events,
+        claims=claims,
+        credibility_summary=credibility_summary,
+    )
+    evidence_context = _load_evidence_contexts(
+        conn,
+        document_ids=[document.document_id for document in documents],
+    )
+    nuance_findings = _build_nuance_findings(
+        ticker=ticker,
+        latest_document=latest_document,
+        latest_analysis=latest_analysis,
+        events=latest_events,
+        triggered_rules=latest_rules,
+        claim_outcomes=claim_outcomes,
+        segment_summary=segment_summary,
+        evidence_context=evidence_context,
+    )
+    uncertainty_rows = _build_uncertainty_rows(
+        ticker=ticker,
+        latest_document=latest_document,
+        baseline=baseline,
+        events=latest_events,
+        review_items=active_review_items,
+        peer_view=peer_view,
+        filing_expectations=filing_expectations,
+        evidence_context=evidence_context,
+    )
+    next_read_guidance = _build_next_read_guidance(
+        ticker=ticker,
+        latest_document=latest_document,
+        filing_expectations=filing_expectations,
+        nuance_findings=nuance_findings,
+        uncertainty_rows=uncertainty_rows,
+        latest_analysis=latest_analysis,
+    )
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
         latest_document=latest_document,
@@ -547,6 +647,11 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         latest_analysis=latest_analysis,
         latest_metrics=latest_metrics,
         all_metrics=all_metrics,
+        segment_summary=segment_summary,
+        narrative_signals=narrative_signals,
+        nuance_findings=nuance_findings,
+        uncertainty_rows=uncertainty_rows,
+        next_read_guidance=next_read_guidance,
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
@@ -584,6 +689,9 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         latest_document=latest_document,
         baseline=baseline,
         filing_expectations=filing_expectations,
+        nuance_findings=nuance_findings,
+        uncertainty_rows=uncertainty_rows,
+        next_read_guidance=next_read_guidance,
         latest_analysis=latest_analysis,
         deltas=deltas,
         timeseries=timeseries,
@@ -725,6 +833,52 @@ def _load_filing_documents(conn: sqlite3.Connection, ticker: str) -> list[Filing
         )
         for item in grouped.values()
     ]
+
+
+def _load_evidence_contexts(
+    conn: sqlite3.Connection,
+    *,
+    document_ids: list[str],
+) -> dict[str, EvidenceContext]:
+    doc_ids = [doc_id for doc_id in document_ids if doc_id]
+    if not doc_ids:
+        return {}
+    placeholders = ",".join("?" for _ in doc_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            es.span_id,
+            es.document_id,
+            dc.section_label,
+            es.excerpt_text
+        FROM evidence_spans es
+        LEFT JOIN document_chunks dc ON dc.chunk_id = es.chunk_id
+        WHERE es.document_id IN ({placeholders})
+        """,
+        tuple(doc_ids),
+    ).fetchall()
+    return {
+        row["span_id"]: EvidenceContext(
+            span_id=row["span_id"],
+            document_id=row["document_id"],
+            section_label=row["section_label"],
+            excerpt_text=row["excerpt_text"],
+        )
+        for row in rows
+    }
+
+
+def _evidence_context_for(
+    evidence_context: dict[str, EvidenceContext],
+    span_id: str | None,
+    *,
+    document_id: str,
+) -> EvidenceContext | None:
+    if span_id:
+        context = evidence_context.get(span_id)
+        if context is not None:
+            return context
+    return None
 
 
 def _select_baseline(latest_document: CompanyDocument, prior_documents: list[CompanyDocument]) -> BaselineChoice | None:
@@ -1268,6 +1422,467 @@ def _build_timeseries(*, ticker: str, metrics: list[MetricPoint]) -> list[Timese
     return points
 
 
+def _build_nuance_findings(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    latest_analysis: AnalysisSummary | None,
+    events: list[EventSignal],
+    triggered_rules: list[TriggeredRule],
+    claim_outcomes: list[ClaimOutcomeRecord],
+    segment_summary: list[dict[str, Any]],
+    evidence_context: dict[str, EvidenceContext],
+) -> list[NuanceFindingRecord]:
+    findings: list[NuanceFindingRecord] = []
+
+    for event in events:
+        if event.severity not in {"warning", "critical"}:
+            continue
+        context = _evidence_context_for(
+            evidence_context,
+            event.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        summary = event.rationale or f"{event.event_type.replace('_', ' ')} requires review."
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "event", event.event_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class=f"event:{event.event_type}",
+                severity=event.severity or "warning",
+                confidence=event.confidence,
+                section_label=context.section_label if context else None,
+                summary=summary,
+                evidence_span_id=event.evidence_span_id,
+                requires_human_review=event.severity == "critical",
+                payload_json=json.dumps(
+                    {
+                        "source": "event",
+                        "event_type": event.event_type,
+                        "impact_direction": event.impact_direction,
+                        "section_label": context.section_label if context else None,
+                        "excerpt_text": context.excerpt_text if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    for rule in triggered_rules:
+        if rule.severity not in {"warning", "critical"}:
+            continue
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "rule", rule.rule_run_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class=f"rule:{rule.rule_name}",
+                severity=rule.severity,
+                confidence=None,
+                section_label=None,
+                summary=rule.rationale or f"{rule.rule_name.replace('_', ' ')} triggered in the latest filing.",
+                evidence_span_id=None,
+                requires_human_review=rule.severity == "critical",
+                payload_json=json.dumps(
+                    {
+                        "source": "rule",
+                        "rule_name": rule.rule_name,
+                        "threshold": rule.threshold,
+                        "input_values": rule.input_values,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    for outcome in claim_outcomes:
+        if outcome.outcome_status not in {"Contradicted", "Missed"}:
+            continue
+        context = _evidence_context_for(
+            evidence_context,
+            outcome.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "claim", outcome.claim_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class="claim_contradiction",
+                severity="critical" if outcome.outcome_status == "Contradicted" else "warning",
+                confidence=None,
+                section_label=context.section_label if context else None,
+                summary=outcome.rationale or "Management claim outcome needs human review.",
+                evidence_span_id=outcome.evidence_span_id,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "claim_outcome",
+                        "claim_id": outcome.claim_id,
+                        "outcome_status": outcome.outcome_status,
+                        "section_label": context.section_label if context else None,
+                        "excerpt_text": context.excerpt_text if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    for segment in segment_summary:
+        if segment.get("concentration_risk") not in {"high", "elevated"}:
+            continue
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id(
+                    "nuance",
+                    ticker,
+                    latest_document.document_id,
+                    "segment",
+                    segment.get("segment_name"),
+                    DERIVED_VERSION,
+                ),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class="segment_concentration",
+                severity="warning",
+                confidence=None,
+                section_label="Segment note",
+                summary=f"{segment.get('segment_name') or 'One segment'} drives {round(float(segment.get('revenue_share_pct') or 0), 1)}% of revenue.",
+                evidence_span_id=None,
+                requires_human_review=False,
+                payload_json=json.dumps(
+                    {
+                        "source": "segment_summary",
+                        "segment_name": segment.get("segment_name"),
+                        "revenue_share_pct": segment.get("revenue_share_pct"),
+                        "concentration_risk": segment.get("concentration_risk"),
+                        "trend": segment.get("trend"),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    if latest_analysis:
+        for index, item in enumerate(latest_analysis.what_to_verify[:3], start=1):
+            findings.append(
+                NuanceFindingRecord(
+                    nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "verify", index, DERIVED_VERSION),
+                    ticker=ticker,
+                    document_id=latest_document.document_id,
+                    nuance_class="analysis_followup",
+                    severity="warning",
+                    confidence=None,
+                    section_label=None,
+                    summary=item,
+                    evidence_span_id=None,
+                    requires_human_review=True,
+                    payload_json=json.dumps(
+                        {
+                            "source": "analysis",
+                            "analysis_run_id": latest_analysis.analysis_run_id,
+                            "rank": index,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            )
+
+    return findings[:8]
+
+
+def _build_uncertainty_rows(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    baseline: BaselineChoice | None,
+    events: list[EventSignal],
+    review_items: list[ReviewQueueItem],
+    peer_view: dict[str, Any],
+    filing_expectations: list[FilingExpectationRecord],
+    evidence_context: dict[str, EvidenceContext],
+) -> list[UncertaintyRecord]:
+    rows: list[UncertaintyRecord] = []
+
+    if baseline is None or not baseline.comparable:
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "baseline", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="baseline_gap",
+                severity="warning",
+                summary=(baseline.reason if baseline else "No prior analyzed filing is available for comparison."),
+                confidence=None,
+                section_label=None,
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "baseline",
+                        "baseline_kind": baseline.kind if baseline else "none",
+                        "comparable": baseline.comparable if baseline else False,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    for event in events:
+        if event.confidence is None or event.confidence >= 0.75:
+            continue
+        context = _evidence_context_for(
+            evidence_context,
+            event.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "event", event.event_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="low_confidence_event",
+                severity="warning",
+                summary=f"{event.event_type.replace('_', ' ')} has only {int(round(event.confidence * 100))}% extraction confidence.",
+                confidence=event.confidence,
+                section_label=context.section_label if context else None,
+                evidence_span_id=event.evidence_span_id,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "event",
+                        "event_type": event.event_type,
+                        "section_label": context.section_label if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    if events and all(event.confidence is None for event in events):
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "event-confidence-missing", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="event_confidence_missing",
+                severity="warning",
+                summary="Event signals are present, but none carry explicit extraction confidence yet.",
+                confidence=None,
+                section_label=None,
+                evidence_span_id=None,
+                requires_human_review=False,
+                payload_json=json.dumps({"source": "event", "count": len(events)}, sort_keys=True),
+            )
+        )
+
+    comparability_warnings = peer_view.get("comparability_warnings") or []
+    if comparability_warnings:
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "peer-comparability", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="peer_comparability",
+                severity="warning",
+                summary=comparability_warnings[0],
+                confidence=None,
+                section_label=None,
+                evidence_span_id=None,
+                requires_human_review=False,
+                payload_json=json.dumps(
+                    {"source": "peer_view", "comparability_warnings": comparability_warnings[:5]},
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    late_unsatisfied = [
+        item for item in filing_expectations if item.state in {"late", "due"} and item.satisfied_document_id is None
+    ]
+    if late_unsatisfied:
+        first = late_unsatisfied[0]
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "filing-gap", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="filing_gap",
+                severity="critical" if first.state == "late" else "warning",
+                summary=f"{first.obligation_type.replace('_', ' ')} for {first.period_label} is {first.state} and still unsatisfied.",
+                confidence=None,
+                section_label=None,
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "filing_expectation",
+                        "obligation_type": first.obligation_type,
+                        "period_label": first.period_label,
+                        "deadline_at": first.deadline_at,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    if review_items:
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "review-pressure", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class="open_review_pressure",
+                severity="warning",
+                summary=f"{len(review_items)} open review item(s) still constrain confidence.",
+                confidence=None,
+                section_label=None,
+                evidence_span_id=None,
+                requires_human_review=False,
+                payload_json=json.dumps(
+                    {
+                        "source": "review_queue",
+                        "open_review_count": len(review_items),
+                        "item_types": [item.item_type for item in review_items[:10]],
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    return rows[:6]
+
+
+def _build_next_read_guidance(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    filing_expectations: list[FilingExpectationRecord],
+    nuance_findings: list[NuanceFindingRecord],
+    uncertainty_rows: list[UncertaintyRecord],
+    latest_analysis: AnalysisSummary | None,
+) -> list[NextReadRecord]:
+    rows: list[NextReadRecord] = []
+
+    for item in filing_expectations:
+        if item.state not in {"late", "due"} or item.satisfied_document_id is not None:
+            continue
+        rows.append(
+            NextReadRecord(
+                guidance_id=_stable_id("next-read", ticker, "filing", item.obligation_type, item.period_end_date, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                priority_rank=len(rows) + 1,
+                target_document_type=_obligation_to_document_type(item.obligation_type),
+                target_period_label=item.period_label,
+                target_section_label=None,
+                reason_class="missing_filing",
+                why_this_matters=f"{item.obligation_type.replace('_', ' ')} for {item.period_label} is {item.state}; refresh source coverage or fetch the missing filing first.",
+                evidence_reference_count=0,
+                blocked_by=item.knowledge_source if item.knowledge_source == "default" else None,
+                payload_json=json.dumps(
+                    {
+                        "source": "filing_expectation",
+                        "window_start": item.window_start,
+                        "deadline_at": item.deadline_at,
+                        "state": item.state,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+        if len(rows) >= 5:
+            return rows
+
+    for finding in nuance_findings:
+        if not finding.requires_human_review:
+            continue
+        rows.append(
+            NextReadRecord(
+                guidance_id=_stable_id("next-read", ticker, "nuance", finding.nuance_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                priority_rank=len(rows) + 1,
+                target_document_type=latest_document.document_type,
+                target_period_label=None,
+                target_section_label=finding.section_label,
+                reason_class="nuance_review",
+                why_this_matters=finding.summary,
+                evidence_reference_count=1 if finding.evidence_span_id else 0,
+                blocked_by=None,
+                payload_json=json.dumps(
+                    {
+                        "source": "nuance",
+                        "nuance_class": finding.nuance_class,
+                        "severity": finding.severity,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+        if len(rows) >= 5:
+            return rows
+
+    for row in uncertainty_rows:
+        if not row.requires_human_review:
+            continue
+        rows.append(
+            NextReadRecord(
+                guidance_id=_stable_id("next-read", ticker, "uncertainty", row.uncertainty_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                priority_rank=len(rows) + 1,
+                target_document_type=latest_document.document_type,
+                target_period_label=None,
+                target_section_label=row.section_label,
+                reason_class="uncertainty_followup",
+                why_this_matters=row.summary,
+                evidence_reference_count=1 if row.evidence_span_id else 0,
+                blocked_by=None,
+                payload_json=json.dumps(
+                    {
+                        "source": "uncertainty",
+                        "uncertainty_class": row.uncertainty_class,
+                        "severity": row.severity,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+        if len(rows) >= 5:
+            return rows
+
+    if latest_analysis:
+        for item in latest_analysis.what_to_verify[:2]:
+            rows.append(
+                NextReadRecord(
+                    guidance_id=_stable_id("next-read", ticker, "verify", item, DERIVED_VERSION),
+                    ticker=ticker,
+                    document_id=latest_document.document_id,
+                    priority_rank=len(rows) + 1,
+                    target_document_type=latest_document.document_type,
+                    target_period_label=None,
+                    target_section_label=None,
+                    reason_class="analysis_verify",
+                    why_this_matters=item,
+                    evidence_reference_count=0,
+                    blocked_by=None,
+                    payload_json=json.dumps({"source": "analysis"}, sort_keys=True),
+                )
+            )
+            if len(rows) >= 5:
+                break
+
+    return rows[:5]
+
+
+def _obligation_to_document_type(obligation_type: str) -> str:
+    if obligation_type == "annual_report":
+        return "annual_report"
+    return "financial_statement"
+
+
 def _build_snapshot_payload_json(
     *,
     profile: CompanyProfile,
@@ -1277,6 +1892,11 @@ def _build_snapshot_payload_json(
     latest_analysis: AnalysisSummary | None,
     latest_metrics: list[MetricPoint],
     all_metrics: list[MetricPoint],
+    segment_summary: list[dict[str, Any]],
+    narrative_signals: list[str],
+    nuance_findings: list[NuanceFindingRecord],
+    uncertainty_rows: list[UncertaintyRecord],
+    next_read_guidance: list[NextReadRecord],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
@@ -1376,18 +1996,49 @@ def _build_snapshot_payload_json(
             for expectation in filing_expectations[:10]
         ],
         "latest_summary": latest_analysis.summary if latest_analysis else None,
-        "segment_summary": _build_segment_summary(
-            latest_document_id=latest_document.document_id,
-            latest_metrics=latest_metrics,
-            all_metrics=all_metrics,
-        ),
-        "narrative_signals": _build_narrative_signals(
-            latest_analysis=latest_analysis,
-            events=events,
-            claims=claims,
-            credibility_summary=credibility_summary,
-        ),
+        "segment_summary": segment_summary,
+        "narrative_signals": narrative_signals,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
+        "nuance_findings": [
+            {
+                "nuance_class": finding.nuance_class,
+                "severity": finding.severity,
+                "confidence": finding.confidence,
+                "section_label": finding.section_label,
+                "summary": finding.summary,
+                "evidence_span_id": finding.evidence_span_id,
+                "requires_human_review": finding.requires_human_review,
+                "details": json.loads(finding.payload_json),
+            }
+            for finding in nuance_findings
+        ],
+        "uncertainty_rows": [
+            {
+                "uncertainty_class": row.uncertainty_class,
+                "severity": row.severity,
+                "summary": row.summary,
+                "confidence": row.confidence,
+                "section_label": row.section_label,
+                "evidence_span_id": row.evidence_span_id,
+                "requires_human_review": row.requires_human_review,
+                "details": json.loads(row.payload_json),
+            }
+            for row in uncertainty_rows
+        ],
+        "next_read_guidance": [
+            {
+                "priority_rank": row.priority_rank,
+                "target_document_type": row.target_document_type,
+                "target_period_label": row.target_period_label,
+                "target_section_label": row.target_section_label,
+                "reason_class": row.reason_class,
+                "why_this_matters": row.why_this_matters,
+                "evidence_reference_count": row.evidence_reference_count,
+                "blocked_by": row.blocked_by,
+                "details": json.loads(row.payload_json),
+            }
+            for row in next_read_guidance
+        ],
         "management_credibility": {
             "total_claims": credibility_summary.total_claims,
             "achieved": credibility_summary.achieved,
@@ -3374,6 +4025,18 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         outcome.claim_id: outcome.outcome_status.lower().replace(" ", "_")
         for outcome in bundle.claim_outcomes
     }
+    conn.execute(
+        "DELETE FROM nuance_findings WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
+    conn.execute(
+        "DELETE FROM uncertainty_rows WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
+    conn.execute(
+        "DELETE FROM next_read_guidance WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
     for delta in bundle.deltas:
         conn.execute(
             """
@@ -3453,6 +4116,86 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 expectation.knowledge_source,
                 expectation.satisfied_document_id,
                 expectation.payload_json,
+                DERIVED_VERSION,
+                now,
+                now,
+            ),
+        )
+
+    for finding in bundle.nuance_findings:
+        conn.execute(
+            """
+            INSERT INTO nuance_findings (
+                nuance_id, ticker, document_id, nuance_class, severity, confidence, section_label,
+                summary, evidence_span_id, requires_human_review, payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                finding.nuance_id,
+                finding.ticker,
+                finding.document_id,
+                finding.nuance_class,
+                finding.severity,
+                finding.confidence,
+                finding.section_label,
+                finding.summary,
+                finding.evidence_span_id,
+                1 if finding.requires_human_review else 0,
+                finding.payload_json,
+                DERIVED_VERSION,
+                now,
+                now,
+            ),
+        )
+
+    for row in bundle.uncertainty_rows:
+        conn.execute(
+            """
+            INSERT INTO uncertainty_rows (
+                uncertainty_id, ticker, document_id, uncertainty_class, severity, summary, confidence,
+                section_label, evidence_span_id, requires_human_review, payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.uncertainty_id,
+                row.ticker,
+                row.document_id,
+                row.uncertainty_class,
+                row.severity,
+                row.summary,
+                row.confidence,
+                row.section_label,
+                row.evidence_span_id,
+                1 if row.requires_human_review else 0,
+                row.payload_json,
+                DERIVED_VERSION,
+                now,
+                now,
+            ),
+        )
+
+    for row in bundle.next_read_guidance:
+        conn.execute(
+            """
+            INSERT INTO next_read_guidance (
+                guidance_id, ticker, document_id, priority_rank, target_document_type, target_period_label,
+                target_section_label, reason_class, why_this_matters, evidence_reference_count, blocked_by,
+                payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.guidance_id,
+                row.ticker,
+                row.document_id,
+                row.priority_rank,
+                row.target_document_type,
+                row.target_period_label,
+                row.target_section_label,
+                row.reason_class,
+                row.why_this_matters,
+                row.evidence_reference_count,
+                row.blocked_by,
+                row.payload_json,
                 DERIVED_VERSION,
                 now,
                 now,
@@ -3727,6 +4470,9 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "thesis_evaluations": len(bundle.thesis_evaluations),
         "claims": len(bundle.claims),
         "claim_outcomes": len(bundle.claim_outcomes),
+        "nuance_findings": len(bundle.nuance_findings),
+        "uncertainty_rows": len(bundle.uncertainty_rows),
+        "next_read_guidance": len(bundle.next_read_guidance),
     }
 
 

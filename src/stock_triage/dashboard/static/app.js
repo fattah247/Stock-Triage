@@ -1212,6 +1212,8 @@
         const filingExpectations = (payload.filing_expectations || []).slice(0, 6);
         const narrativeSignals = (payload.narrative_signals || []).slice(0, 4);
         const recentEvents = (payload.events || []).slice(0, 6);
+        const uncertaintyRows = (payload.uncertainty_rows || []).slice(0, 4);
+        const nextReadGuidance = (payload.next_read_guidance || []).slice(0, 5);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1273,6 +1275,26 @@
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No recent event signals in the current snapshot.</strong></div>`
+          }
+          ${
+            uncertaintyRows.length
+              ? `<table class="metricTable"><thead><tr><th>Uncertainty</th><th>Severity</th><th>Section</th><th>Needs human read</th></tr></thead><tbody>${uncertaintyRows
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.summary || "")}</td><td>${esc(item.severity || "warning")}</td><td>${esc(item.section_label || "—")}</td><td>${item.requires_human_review ? "yes" : "no"}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No explicit uncertainty rows yet.</strong></div>`
+          }
+          ${
+            nextReadGuidance.length
+              ? `<table class="metricTable"><thead><tr><th>Next read</th><th>Target</th><th>Reason</th><th>Evidence refs</th></tr></thead><tbody>${nextReadGuidance
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.why_this_matters || "")}</td><td>${esc(item.target_document_type || "current filing")}${item.target_section_label ? `<div class="meta">${esc(item.target_section_label)}</div>` : ""}</td><td>${esc(item.reason_class || "")}</td><td>${esc(item.evidence_reference_count ?? 0)}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No next-read guidance yet.</strong></div>`
           }
         `;
         claimsList.innerHTML = `
@@ -1503,7 +1525,23 @@
             )
             .join("")}</tbody></table>`
         : `<div class="emptyState"><strong>No revision groups yet.</strong> Version history appears once multiple files or revisions exist for the issuer.</div>`;
-      findingList.innerHTML = findings.length
+      const nuanceFindings = (payload.nuance_findings || []).slice(0, 8);
+      findingList.innerHTML = (nuanceFindings.length || findings.length)
+        ? `${nuanceFindings.length
+            ? `<div class="findingStack">${nuanceFindings
+                .map(
+                  (item) => `
+                    <article class="findingCard sev-${statusTag(item.severity || "warning")}">
+                      <div><span class="severity sev-${statusTag(item.severity || "warning")}">${esc(item.nuance_class || "nuance")}</span></div>
+                      <div class="findingClaim">${esc(item.summary || "")}</div>
+                      <div class="meta">Section: ${esc(item.section_label || "unknown")} · confidence ${esc(formatPct(item.confidence != null ? Number(item.confidence) * 100 : null, 0) || "—")}</div>
+                      <div class="meta">${item.requires_human_review ? "Needs human read." : "System-level nuance only."}</div>
+                    </article>
+                  `
+                )
+                .join("")}</div>`
+            : ""
+          }${findings.length
         ? `<div class="findingStack">${findings
             .slice(0, 80)
             .map(
@@ -1522,6 +1560,7 @@
               `
             )
             .join("")}</div>`
+        : ""}`
         : signalsEmptyHtml;
     }
 
