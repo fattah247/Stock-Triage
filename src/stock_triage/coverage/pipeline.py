@@ -98,6 +98,8 @@ def load_coverage_status(
     sector: str | None = None,
     ticker: str | None = None,
     tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
     limit: int = 20,
     materialize: bool = True,
 ) -> dict[str, object]:
@@ -124,6 +126,8 @@ def load_coverage_status(
             sector=sector,
             ticker=ticker,
             tickers=tickers,
+            source_name=source_name,
+            document_type=document_type,
             limit=limit,
         )
     finally:
@@ -140,6 +144,8 @@ def load_coverage_status_from_conn(
     sector: str | None = None,
     ticker: str | None = None,
     tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
     limit: int = 20,
 ) -> dict[str, object]:
     range_start, range_end = _normalized_range(date_from, date_to)
@@ -192,6 +198,11 @@ def load_coverage_status_from_conn(
         tuple(params),
     ).fetchall()
     normalized_rows = [dict(row) for row in rows]
+    normalized_rows = [
+        row
+        for row in normalized_rows
+        if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
+    ]
     state_counts = {
         "expected_count": len(normalized_rows),
         "analyzed_count": sum(1 for row in normalized_rows if row["actual_state"] == "analyzed"),
@@ -229,6 +240,8 @@ def load_coverage_status_from_conn(
     return {
         "coverage_version": COVERAGE_VERSION,
         "scope": scope,
+        "source_name": source_name,
+        "document_type": document_type,
         "date_from": range_start.isoformat(),
         "date_to": range_end.isoformat(),
         "ticker_count": len(selected),
@@ -249,6 +262,8 @@ def preview_coverage_action(
     sector: str | None = None,
     ticker: str | None = None,
     tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
     limit: int = 20,
 ) -> dict[str, object]:
     _validate_action(action)
@@ -268,24 +283,38 @@ def preview_coverage_action(
         configure_pragmas(conn, cfg)
         selected = _select_scope_tickers(conn, cfg, scope=scope, sector=sector, ticker=ticker, tickers=tickers)
         coverage_rows = _load_selected_coverage_rows(conn, selected, range_start=range_start, range_end=range_end)
-        plan = _build_action_plan(conn, selected, coverage_rows, action=action, limit=limit)
+        filtered_rows = [
+            row
+            for row in coverage_rows
+            if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
+        ]
+        plan = _build_action_plan(conn, selected, filtered_rows, action=action, limit=limit)
         current_snapshot_count = _count_current_snapshots(conn, selected=selected) if selected else 0
     finally:
         conn.close()
     return {
         "action": action,
         "scope": scope,
-        "scope_label": _scope_label(scope, sector=sector, ticker=ticker, tickers=tickers),
+        "scope_label": _scope_label(
+            scope,
+            sector=sector,
+            ticker=ticker,
+            tickers=tickers,
+            source_name=source_name,
+            document_type=document_type,
+        ),
+        "source_name": source_name,
+        "document_type": document_type,
         "date_from": range_start.isoformat(),
         "date_to": range_end.isoformat(),
         "ticker_count": len(selected),
-        "expected_filing_count": len(coverage_rows),
-        "discovered_count": sum(1 for row in coverage_rows if row["candidate_count"] > 0),
-        "downloaded_count": sum(1 for row in coverage_rows if row["downloaded_count"] > 0),
-        "analyzed_count": sum(1 for row in coverage_rows if row["analyzed_count"] > 0),
-        "blocked_count": sum(1 for row in coverage_rows if row["actual_state"] == "blocked"),
+        "expected_filing_count": len(filtered_rows),
+        "discovered_count": sum(1 for row in filtered_rows if row["candidate_count"] > 0),
+        "downloaded_count": sum(1 for row in filtered_rows if row["downloaded_count"] > 0),
+        "analyzed_count": sum(1 for row in filtered_rows if row["analyzed_count"] > 0),
+        "blocked_count": sum(1 for row in filtered_rows if row["actual_state"] == "blocked"),
         "current_snapshot_count": current_snapshot_count,
-        "dominant_blocked_reasons": _dominant_blocked_reasons(coverage_rows),
+        "dominant_blocked_reasons": _dominant_blocked_reasons(filtered_rows),
         "preview_generated_at": datetime.now(timezone.utc).isoformat(),
         "action_target_count": plan["target_count"],
         "action_targets": plan["targets"],
@@ -303,6 +332,8 @@ def run_coverage_action(
     sector: str | None = None,
     ticker: str | None = None,
     tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
     limit: int = 20,
 ) -> dict[str, object]:
     _validate_action(action)
@@ -315,6 +346,8 @@ def run_coverage_action(
         sector=sector,
         ticker=ticker,
         tickers=tickers,
+        source_name=source_name,
+        document_type=document_type,
         limit=limit,
     )
     log = get_logger("stock_triage.coverage")
@@ -342,6 +375,8 @@ def run_coverage_action(
         sector=sector,
         ticker=ticker,
         tickers=tickers,
+        source_name=source_name,
+        document_type=document_type,
         limit=limit,
         materialize=True,
     )
@@ -804,13 +839,43 @@ def _dominant_blocked_reasons(rows: list[dict[str, object]]) -> list[dict[str, o
     ]
 
 
-def _scope_label(scope: str, *, sector: str | None, ticker: str | None, tickers: Iterable[str] | None) -> str:
+def _scope_label(
+    scope: str,
+    *,
+    sector: str | None,
+    ticker: str | None,
+    tickers: Iterable[str] | None,
+    source_name: str | None,
+    document_type: str | None,
+) -> str:
+    suffix_parts: list[str] = []
+    if source_name:
+        suffix_parts.append(f"source:{source_name}")
+    if document_type:
+        suffix_parts.append(f"document_type:{document_type}")
     if scope == "sector":
-        return f"sector:{sector}"
-    if scope == "ticker-set":
-        values = sorted({*(tickers or []), *( [ticker] if ticker else [])})
-        return f"tickers:{','.join(values)}"
-    return scope
+        label = f"sector:{sector}"
+    elif scope == "ticker-set":
+        values = sorted({*(tickers or []), *([ticker] if ticker else [])})
+        label = f"tickers:{','.join(values)}"
+    else:
+        label = scope
+    if suffix_parts:
+        label = f"{label}|{'|'.join(suffix_parts)}"
+    return label
+
+
+def _coverage_row_matches_filters(
+    row: dict[str, object],
+    *,
+    source_name: str | None,
+    document_type: str | None,
+) -> bool:
+    if source_name and str(row.get("source_name") or "") != source_name:
+        return False
+    if document_type and str(row.get("document_type") or "") != document_type:
+        return False
+    return True
 
 
 def _serialize_coverage_row(row: dict[str, object]) -> dict[str, object]:
@@ -819,6 +884,8 @@ def _serialize_coverage_row(row: dict[str, object]) -> dict[str, object]:
         "ticker": row["ticker"],
         "issuer_name": row.get("issuer_name"),
         "obligation_type": row["obligation_type"],
+        "source_name": row["source_name"],
+        "document_type": row["document_type"],
         "period_label": row["period_label"],
         "period_end_date": row["period_end_date"],
         "deadline_at": row["deadline_at"],

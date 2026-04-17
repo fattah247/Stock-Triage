@@ -1032,6 +1032,7 @@ def test_build_nuance_findings_uses_section_cues_without_events():
     assert json.loads(row_map["legal_note_focus"].payload_json)["page_start"] == 44
     assert json.loads(row_map["legal_note_focus"].payload_json)["stage"] == "active_process"
     assert json.loads(row_map["legal_note_focus"].payload_json)["severity_context"] == "developing"
+    assert json.loads(row_map["legal_note_focus"].payload_json)["severity_tier"] == "active_litigation"
 
 
 def test_build_nuance_findings_adds_capital_allocation_signals():
@@ -1220,7 +1221,7 @@ def test_build_next_read_guidance_carries_nuance_excerpt():
                 "summary": "Auditor qualification language appears in the current filing.",
                 "requires_human_review": True,
                 "evidence_span_id": None,
-                "nuance_class": "audit_note_focus",
+                "nuance_class": "auditor_language",
                 "severity": "critical",
                 "payload_json": json.dumps({"excerpt_text": "Basis for qualified opinion paragraph.", "page_start": 7, "page_end": 8}, sort_keys=True),
             })()

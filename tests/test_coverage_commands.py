@@ -31,6 +31,8 @@ def test_coverage_status_materializes_rows_and_prints_summary(tmp_config, monkey
             sector=None,
             ticker="TAMU",
             tickers=None,
+            source=None,
+            document_type=None,
             limit=10,
         )
     )
@@ -86,6 +88,8 @@ def test_coverage_preview_and_nuance_audit_commands_are_scoped(tmp_config, monke
             sector=None,
             ticker="TAMU",
             tickers=None,
+            source=None,
+            document_type=None,
             limit=5,
         )
     )
@@ -205,3 +209,22 @@ def test_blocked_reason_prefers_specific_candidate_error_code():
     )
 
     assert reason == "http_403"
+
+
+def test_coverage_status_filters_by_source_and_document_type(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+
+    report = load_coverage_status(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=20,
+        materialize=True,
+    )
+
+    assert report["summary"]["expected_count"] > 0
+    assert all(row["source_name"] == "idx_financial_reports" for row in report["gap_leaders"])
+    assert all(row["document_type"] == "financial_statement" for row in report["gap_leaders"])

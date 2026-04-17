@@ -30,6 +30,8 @@ def cmd_coverage_status(args: argparse.Namespace) -> int:
         sector=args.sector,
         ticker=args.ticker,
         tickers=_split_tickers(args.tickers),
+        source_name=args.source,
+        document_type=args.document_type,
         limit=args.limit,
         materialize=True,
     )
@@ -60,6 +62,8 @@ def cmd_coverage_preview(args: argparse.Namespace) -> int:
         sector=args.sector,
         ticker=args.ticker,
         tickers=_split_tickers(args.tickers),
+        source_name=args.source,
+        document_type=args.document_type,
         limit=args.limit,
     )
     print(
@@ -88,6 +92,8 @@ def cmd_coverage_run(args: argparse.Namespace) -> int:
         sector=args.sector,
         ticker=args.ticker,
         tickers=_split_tickers(args.tickers),
+        source_name=args.source,
+        document_type=args.document_type,
         limit=args.limit,
     )
     status = result["status"]
@@ -149,6 +155,8 @@ def _add_scope_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sector", help="Sector filter when --scope=sector")
     parser.add_argument("--ticker", help="Single ticker for company-scoped coverage")
     parser.add_argument("--tickers", help="Comma-separated ticker set when --scope=ticker-set")
+    parser.add_argument("--source", help="Optional source filter, for example idx_financial_reports or idx_disclosures")
+    parser.add_argument("--document-type", help="Optional document type filter, for example annual_report or financial_statement")
     parser.add_argument("--limit", type=int, default=20, help="Preview or action target limit")
 
 

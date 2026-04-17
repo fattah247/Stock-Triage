@@ -86,6 +86,26 @@ GOVERNANCE_EVENT_TYPES = {
     "audit_committee_change",
     "governance_issue",
 }
+NUANCE_CLASS_ALIASES = {
+    "audit_note_focus": "auditor_language",
+    "covenant_note_focus": "debt_covenant_or_maturity",
+}
+
+
+def _canonical_nuance_class(name: str) -> str:
+    return NUANCE_CLASS_ALIASES.get(name, name)
+
+
+def _tier_for_source_label(source_label: str) -> str:
+    if source_label in {"event", "rule", "claim_outcome"}:
+        return "direct"
+    if source_label in {"section_cue", "capital_allocation", "segment_summary", "current_claim_vs_event"}:
+        return "derived"
+    if source_label in {"filing_expectation", "analysis", "nuance", "uncertainty", "contradiction"}:
+        return "guidance"
+    if source_label in {"baseline", "review_queue", "peer_view", "event_note_scope"}:
+        return "derived"
+    return "derived"
 
 
 @dataclass(frozen=True)
@@ -282,6 +302,8 @@ class NuanceFindingRecord:
     evidence_span_id: str | None
     requires_human_review: bool
     payload_json: str
+    tier: str = "derived"
+    source_label: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -297,6 +319,8 @@ class UncertaintyRecord:
     evidence_span_id: str | None
     requires_human_review: bool
     payload_json: str
+    tier: str = "derived"
+    source_label: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -313,6 +337,8 @@ class NextReadRecord:
     evidence_reference_count: int
     blocked_by: str | None
     payload_json: str
+    tier: str = "guidance"
+    source_label: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -327,6 +353,29 @@ class ContradictionRecord:
     section_label: str | None
     evidence_span_id: str | None
     payload_json: str
+    tier: str = "derived"
+    source_label: str = "unknown"
+
+
+@dataclass(frozen=True)
+class SegmentHistoryRecord:
+    segment_history_id: str
+    ticker: str
+    document_id: str
+    normalized_key: str
+    segment_name: str
+    fiscal_year: int | None
+    fiscal_period: str | None
+    period_end_date: str | None
+    revenue: float | None
+    profit: float | None
+    revenue_share_pct: float | None
+    profit_margin_pct: float | None
+    revenue_change_pct: float | None
+    profit_change_pct: float | None
+    trend: str | None
+    dominant: bool
+    concentration_risk: str | None
 
 
 @dataclass(frozen=True)
@@ -393,6 +442,7 @@ class CompanyIntelligenceBundle:
     latest_analysis: AnalysisSummary | None
     deltas: list[DeltaRecord]
     timeseries: list[TimeseriesPoint]
+    segment_history: list[SegmentHistoryRecord]
     triggered_rules: list[TriggeredRule]
     events: list[EventSignal]
     claims: list[ClaimRecord]
@@ -414,6 +464,7 @@ class IntelligenceRunResult:
     deltas: int = 0
     snapshots: int = 0
     timeseries: int = 0
+    segment_history: int = 0
     briefs: int = 0
     review_items: int = 0
     peer_sets: int = 0
@@ -451,6 +502,7 @@ def run_intelligence(
                     deltas=result.deltas + counts["deltas"],
                     snapshots=result.snapshots + counts["snapshots"],
                     timeseries=result.timeseries + counts["timeseries"],
+                    segment_history=result.segment_history + counts["segment_history"],
                     briefs=result.briefs + counts["briefs"],
                     review_items=result.review_items + counts["review_items"],
                     peer_sets=result.peer_sets + counts["peer_sets"],
@@ -492,6 +544,7 @@ def rederive_intelligence(
                     deltas=result.deltas + counts["deltas"],
                     snapshots=result.snapshots + counts["snapshots"],
                     timeseries=result.timeseries + counts["timeseries"],
+                    segment_history=result.segment_history + counts["segment_history"],
                     briefs=result.briefs + counts["briefs"],
                     review_items=result.review_items + counts["review_items"],
                     peer_sets=result.peer_sets + counts["peer_sets"],
@@ -645,6 +698,12 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         latest_metrics=latest_metrics,
         all_metrics=all_metrics,
     )
+    segment_history = _build_segment_history(
+        ticker=ticker,
+        latest_document_id=latest_document.document_id,
+        latest_metrics=latest_metrics,
+        segment_summary=segment_summary,
+    )
     narrative_signals = _build_narrative_signals(
         latest_analysis=latest_analysis,
         events=latest_events,
@@ -727,6 +786,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         latest_metrics=latest_metrics,
         all_metrics=all_metrics,
         segment_summary=segment_summary,
+        segment_history=segment_history,
         narrative_signals=narrative_signals,
         nuance_findings=nuance_findings,
         uncertainty_rows=uncertainty_rows,
@@ -779,6 +839,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         latest_analysis=latest_analysis,
         deltas=deltas,
         timeseries=timeseries,
+        segment_history=segment_history,
         triggered_rules=latest_rules,
         events=latest_events,
         claims=claims,
@@ -1653,6 +1714,8 @@ def _build_nuance_findings(
                 summary=summary,
                 evidence_span_id=event.evidence_span_id,
                 requires_human_review=event.severity == "critical",
+                tier="direct",
+                source_label="event",
                 payload_json=json.dumps(
                     {
                         "source": "event",
@@ -1681,6 +1744,8 @@ def _build_nuance_findings(
                 summary=rule.rationale or f"{rule.rule_name.replace('_', ' ')} triggered in the latest filing.",
                 evidence_span_id=None,
                 requires_human_review=rule.severity == "critical",
+                tier="direct",
+                source_label="rule",
                 payload_json=json.dumps(
                     {
                         "source": "rule",
@@ -1713,6 +1778,8 @@ def _build_nuance_findings(
                 summary=outcome.rationale or "Management claim outcome needs human review.",
                 evidence_span_id=outcome.evidence_span_id,
                 requires_human_review=True,
+                tier="direct",
+                source_label="claim_outcome",
                 payload_json=json.dumps(
                     {
                         "source": "claim_outcome",
@@ -1748,6 +1815,8 @@ def _build_nuance_findings(
                 summary=f"{segment.get('segment_name') or 'One segment'} drives {round(float(segment.get('revenue_share_pct') or 0), 1)}% of revenue.",
                 evidence_span_id=None,
                 requires_human_review=False,
+                tier="derived",
+                source_label="segment_summary",
                 payload_json=json.dumps(
                     {
                         "source": "segment_summary",
@@ -1786,6 +1855,8 @@ def _build_nuance_findings(
                     summary=item,
                     evidence_span_id=None,
                     requires_human_review=True,
+                    tier="guidance",
+                    source_label="analysis",
                     payload_json=json.dumps(
                         {
                             "source": "analysis",
@@ -1797,23 +1868,26 @@ def _build_nuance_findings(
                 )
             )
 
-    existing_clue_classes = {finding.nuance_class for finding in findings}
+    existing_clue_classes = {_canonical_nuance_class(finding.nuance_class) for finding in findings}
     event_types = {event.event_type for event in events}
     for clue in _build_section_nuance_clues(section_cues, event_types=event_types):
-        if clue["nuance_class"] in existing_clue_classes:
+        nuance_class = _canonical_nuance_class(str(clue["nuance_class"]))
+        if nuance_class in existing_clue_classes:
             continue
         findings.append(
             NuanceFindingRecord(
-                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "section", clue["nuance_class"], clue["section_label"], DERIVED_VERSION),
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "section", nuance_class, clue["section_label"], DERIVED_VERSION),
                 ticker=ticker,
                 document_id=latest_document.document_id,
-                nuance_class=str(clue["nuance_class"]),
+                nuance_class=nuance_class,
                 severity=str(clue["severity"]),
                 confidence=None,
                 section_label=str(clue["section_label"]) if clue.get("section_label") else None,
                 summary=str(clue["summary"]),
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="derived",
+                source_label="section_cue",
                 payload_json=json.dumps(
                     {
                         "source": "section_cue",
@@ -1826,6 +1900,7 @@ def _build_nuance_findings(
                         "operational_restriction": (clue.get("legal_context") or {}).get("operational_restriction"),
                         "monetary_exposure": (clue.get("legal_context") or {}).get("monetary_exposure"),
                         "severity_context": (clue.get("legal_context") or {}).get("severity_context"),
+                        "severity_tier": (clue.get("legal_context") or {}).get("severity_tier"),
                     },
                     sort_keys=True,
                 ),
@@ -1880,6 +1955,8 @@ def _build_capital_allocation_findings(
                 summary=f"Equity funding appears alongside cash-flow stress; {driver}, so the raise may be supporting the balance sheet rather than self-funded growth.",
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="derived",
+                source_label="capital_allocation",
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
@@ -1906,6 +1983,8 @@ def _build_capital_allocation_findings(
                 summary="Funding-use claims exist, but the latest filing still lacks an explicit proceeds update. Verify where the raised capital was actually deployed.",
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="derived",
+                source_label="capital_allocation",
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
@@ -1942,6 +2021,8 @@ def _build_capital_allocation_findings(
                 summary=capital_context["flag_summary"],
                 evidence_span_id=event.evidence_span_id,
                 requires_human_review=True,
+                tier="derived",
+                source_label="capital_allocation",
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
@@ -2073,6 +2154,16 @@ def _classify_legal_regulatory_context(*, text: str, event_type: str) -> dict[st
     elif monetary_exposure or stage == "active_process":
         severity_context = "developing"
 
+    severity_tier = "routine"
+    if stage == "resolved_adverse":
+        severity_tier = "settlement_or_resolution" if event_type == "lawsuit" else "material_exposure"
+    elif operational_restriction:
+        severity_tier = "supervision_or_restriction"
+    elif monetary_exposure:
+        severity_tier = "material_exposure"
+    elif stage == "active_process":
+        severity_tier = "active_litigation" if event_type == "lawsuit" else "supervision_or_restriction"
+
     if event_type == "lawsuit":
         summary_fragment = "read the case stage, claimed amount, and downside exposure directly."
         if operational_restriction:
@@ -2099,6 +2190,7 @@ def _classify_legal_regulatory_context(*, text: str, event_type: str) -> dict[st
         "operational_restriction": operational_restriction,
         "monetary_exposure": monetary_exposure,
         "severity_context": severity_context,
+        "severity_tier": severity_tier,
         "summary_fragment": summary_fragment,
     }
 
@@ -2111,7 +2203,7 @@ def _build_section_nuance_clues(
     clues: list[dict[str, Any]] = []
     patterns = [
         (
-            "audit_note_focus",
+            "auditor_language",
             "critical",
             {"Auditor Report"},
             [r"qualified opinion", r"wajar dengan pengecualian", r"basis for qualified opinion", r"disclaimer of opinion"],
@@ -2127,12 +2219,20 @@ def _build_section_nuance_clues(
             {"going_concern_warning"},
         ),
         (
-            "covenant_note_focus",
+            "debt_covenant_or_maturity",
             "warning",
             {"Notes to Financial Statements", "Risk Factors"},
-            [r"covenant", r"waiver", r"breach", r"pelanggaran", r"persyaratan pinjaman"],
-            "Debt covenant or waiver language appears in the notes. Read the breach, waiver, and headroom detail directly.",
+            [r"covenant", r"waiver", r"breach", r"pelanggaran", r"persyaratan pinjaman", r"jatuh tempo", r"maturity", r"refinancing risk"],
+            "Debt covenant, waiver, or maturity language appears in the notes. Read the breach, waiver, headroom, and maturity detail directly.",
             {"covenant_stress"},
+        ),
+        (
+            "accounting_caveat",
+            "warning",
+            {"Auditor Report", "Notes to Financial Statements"},
+            [r"restated", r"restatement", r"disajikan kembali", r"reclassification", r"reklasifikasi", r"change in accounting policy", r"perubahan kebijakan akuntansi", r"psak", r"ifrs"],
+            "Accounting caveat language appears in the filing. Read the restatement or accounting-policy note directly before comparing periods.",
+            set(),
         ),
         (
             "related_party_note_focus",
@@ -2239,6 +2339,8 @@ def _build_uncertainty_rows(
                 section_label=None,
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="derived",
+                source_label="baseline",
                 payload_json=json.dumps(
                     {
                         "source": "baseline",
@@ -2270,6 +2372,8 @@ def _build_uncertainty_rows(
                 section_label=context.section_label if context else None,
                 evidence_span_id=event.evidence_span_id,
                 requires_human_review=True,
+                tier="direct",
+                source_label="event",
                 payload_json=json.dumps(
                     {
                         "source": "event",
@@ -2294,6 +2398,8 @@ def _build_uncertainty_rows(
                 section_label=None,
                 evidence_span_id=None,
                 requires_human_review=False,
+                tier="derived",
+                source_label="event",
                 payload_json=json.dumps({"source": "event", "count": len(events)}, sort_keys=True),
             )
         )
@@ -2369,6 +2475,8 @@ def _build_uncertainty_rows(
                 section_label=section,
                 evidence_span_id=event.evidence_span_id,
                 requires_human_review=True,
+                tier="derived",
+                source_label="event_note_scope",
                 payload_json=json.dumps(
                     {
                         "source": "event_note_scope",
@@ -2379,6 +2487,7 @@ def _build_uncertainty_rows(
                         "operational_restriction": legal_context.get("operational_restriction") if legal_context else None,
                         "monetary_exposure": legal_context.get("monetary_exposure") if legal_context else None,
                         "severity_context": legal_context.get("severity_context") if legal_context else None,
+                        "severity_tier": legal_context.get("severity_tier") if legal_context else None,
                     },
                     sort_keys=True,
                 ),
@@ -2401,6 +2510,8 @@ def _build_uncertainty_rows(
                 section_label=str(clue["section_label"]) if clue.get("section_label") else None,
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="derived",
+                source_label="section_cue",
                 payload_json=json.dumps(
                     {
                         "source": "section_cue",
@@ -2413,6 +2524,7 @@ def _build_uncertainty_rows(
                         "operational_restriction": clue.get("operational_restriction"),
                         "monetary_exposure": clue.get("monetary_exposure"),
                         "severity_context": clue.get("severity_context"),
+                        "severity_tier": clue.get("severity_tier"),
                     },
                     sort_keys=True,
                 ),
@@ -2433,6 +2545,8 @@ def _build_uncertainty_rows(
                 section_label=None,
                 evidence_span_id=None,
                 requires_human_review=False,
+                tier="derived",
+                source_label="peer_view",
                 payload_json=json.dumps(
                     {"source": "peer_view", "comparability_warnings": comparability_warnings[:5]},
                     sort_keys=True,
@@ -2457,6 +2571,8 @@ def _build_uncertainty_rows(
                 section_label=None,
                 evidence_span_id=None,
                 requires_human_review=True,
+                tier="guidance",
+                source_label="filing_expectation",
                 payload_json=json.dumps(
                     {
                         "source": "filing_expectation",
@@ -2482,6 +2598,8 @@ def _build_uncertainty_rows(
                 section_label=None,
                 evidence_span_id=None,
                 requires_human_review=False,
+                tier="derived",
+                source_label="review_queue",
                 payload_json=json.dumps(
                     {
                         "source": "review_queue",
@@ -2543,6 +2661,13 @@ def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, 
             "Contingent-liability language appears in this section. Read the exposure triggers and amounts directly.",
         ),
         (
+            "accounting_caveat_scope",
+            "warning",
+            {"Auditor Report", "Notes to Financial Statements"},
+            [r"restated", r"restatement", r"disajikan kembali", r"reclassification", r"reklasifikasi", r"change in accounting policy", r"perubahan kebijakan akuntansi", r"psak", r"ifrs"],
+            "Accounting-policy or restatement language appears in this section. Read the note directly before comparing periods.",
+        ),
+        (
             "legal_severity_scope",
             "critical",
             {"Legal and Regulatory", "Notes to Financial Statements"},
@@ -2596,6 +2721,7 @@ def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, 
                     "operational_restriction": legal_context.get("operational_restriction") if legal_context else None,
                     "monetary_exposure": legal_context.get("monetary_exposure") if legal_context else None,
                     "severity_context": legal_context.get("severity_context") if legal_context else None,
+                    "severity_tier": legal_context.get("severity_tier") if legal_context else None,
                 }
             )
     return cues
@@ -2634,6 +2760,8 @@ def _build_contradiction_rows(
                 source_claim_id=outcome.claim_id,
                 section_label=context.section_label if context else None,
                 evidence_span_id=outcome.evidence_span_id or (claim.evidence_span_id if claim else None),
+                tier="direct",
+                source_label="claim_outcome",
                 payload_json=json.dumps(
                     {
                         "source": "claim_outcome",
@@ -2677,6 +2805,8 @@ def _build_contradiction_rows(
                 source_claim_id=claim.claim_id,
                 section_label=context.section_label if context else None,
                 evidence_span_id=event.evidence_span_id or claim.evidence_span_id,
+                tier="derived",
+                source_label="current_claim_vs_event",
                 payload_json=json.dumps(
                     {
                         "source": "current_claim_vs_event",
@@ -2703,6 +2833,8 @@ def _build_contradiction_rows(
                 source_claim_id=None,
                 section_label=None,
                 evidence_span_id=None,
+                tier="derived",
+                source_label="events",
                 payload_json=json.dumps(
                     {
                         "source": "events",
@@ -2744,6 +2876,8 @@ def _build_next_read_guidance(
                 why_this_matters=f"{item.obligation_type.replace('_', ' ')} for {item.period_label} is {item.state}; refresh source coverage or fetch the missing filing first.",
                 evidence_reference_count=0,
                 blocked_by=item.knowledge_source if item.knowledge_source == "default" else None,
+                tier="guidance",
+                source_label="filing_expectation",
                 payload_json=json.dumps(
                     {
                         "source": "filing_expectation",
@@ -2775,6 +2909,8 @@ def _build_next_read_guidance(
                 why_this_matters=finding.summary,
                 evidence_reference_count=1 if finding.evidence_span_id else 0,
                 blocked_by=None,
+                tier="guidance",
+                source_label="nuance",
                 payload_json=json.dumps(
                     {
                         "source": "nuance",
@@ -2808,6 +2944,8 @@ def _build_next_read_guidance(
                 why_this_matters=row.summary,
                 evidence_reference_count=1 if row.evidence_span_id else 0,
                 blocked_by=None,
+                tier="guidance",
+                source_label="uncertainty",
                 payload_json=json.dumps(
                     {
                         "source": "uncertainty",
@@ -2839,6 +2977,8 @@ def _build_next_read_guidance(
                 why_this_matters=row.summary,
                 evidence_reference_count=1 if row.evidence_span_id else 0,
                 blocked_by=None,
+                tier="guidance",
+                source_label="contradiction",
                 payload_json=json.dumps(
                     {
                         "source": "contradiction",
@@ -2870,6 +3010,8 @@ def _build_next_read_guidance(
                     why_this_matters=item,
                     evidence_reference_count=0,
                     blocked_by=None,
+                    tier="guidance",
+                    source_label="analysis",
                     payload_json=json.dumps({"source": "analysis"}, sort_keys=True),
                 )
             )
@@ -2896,6 +3038,8 @@ def _build_next_read_guidance(
                     why_this_matters=f"Read {cue.section_label} directly; this section is present in the latest filing and may hold unresolved detail.",
                     evidence_reference_count=0,
                     blocked_by=None,
+                    tier="guidance",
+                    source_label="section_cue",
                     payload_json=json.dumps(
                         {
                             "source": "section_cue",
@@ -3289,6 +3433,7 @@ def _build_snapshot_payload_json(
     latest_metrics: list[MetricPoint],
     all_metrics: list[MetricPoint],
     segment_summary: list[dict[str, Any]],
+    segment_history: list[SegmentHistoryRecord],
     narrative_signals: list[str],
     nuance_findings: list[NuanceFindingRecord],
     uncertainty_rows: list[UncertaintyRecord],
@@ -3433,6 +3578,25 @@ def _build_snapshot_payload_json(
         ],
         "latest_summary": latest_analysis.summary if latest_analysis else None,
         "segment_summary": segment_summary,
+        "segment_history": [
+            {
+                "segment_name": row.segment_name,
+                "normalized_key": row.normalized_key,
+                "fiscal_year": row.fiscal_year,
+                "fiscal_period": row.fiscal_period,
+                "period_end_date": row.period_end_date,
+                "revenue": row.revenue,
+                "profit": row.profit,
+                "revenue_share_pct": row.revenue_share_pct,
+                "profit_margin_pct": row.profit_margin_pct,
+                "revenue_change_pct": row.revenue_change_pct,
+                "profit_change_pct": row.profit_change_pct,
+                "trend": row.trend,
+                "dominant": row.dominant,
+                "concentration_risk": row.concentration_risk,
+            }
+            for row in segment_history
+        ],
         "narrative_signals": narrative_signals,
         "what_to_verify": latest_analysis.what_to_verify if latest_analysis else [],
         "nuance_findings": [
@@ -3444,6 +3608,8 @@ def _build_snapshot_payload_json(
                 "summary": finding.summary,
                 "evidence_span_id": finding.evidence_span_id,
                 "requires_human_review": finding.requires_human_review,
+                "tier": finding.tier,
+                "source_label": finding.source_label,
                 "details": json.loads(finding.payload_json),
             }
             for finding in nuance_findings
@@ -3457,6 +3623,8 @@ def _build_snapshot_payload_json(
                 "section_label": row.section_label,
                 "evidence_span_id": row.evidence_span_id,
                 "requires_human_review": row.requires_human_review,
+                "tier": row.tier,
+                "source_label": row.source_label,
                 "details": json.loads(row.payload_json),
             }
             for row in uncertainty_rows
@@ -3471,6 +3639,8 @@ def _build_snapshot_payload_json(
                 "why_this_matters": row.why_this_matters,
                 "evidence_reference_count": row.evidence_reference_count,
                 "blocked_by": row.blocked_by,
+                "tier": row.tier,
+                "source_label": row.source_label,
                 "details": json.loads(row.payload_json),
             }
             for row in next_read_guidance
@@ -3483,6 +3653,8 @@ def _build_snapshot_payload_json(
                 "source_claim_id": row.source_claim_id,
                 "section_label": row.section_label,
                 "evidence_span_id": row.evidence_span_id,
+                "tier": row.tier,
+                "source_label": row.source_label,
                 "details": json.loads(row.payload_json),
             }
             for row in contradiction_rows
@@ -4753,6 +4925,53 @@ def _build_segment_summary(
     return rows[:8]
 
 
+def _build_segment_history(
+    *,
+    ticker: str,
+    latest_document_id: str,
+    latest_metrics: list[MetricPoint],
+    segment_summary: list[dict[str, Any]],
+) -> list[SegmentHistoryRecord]:
+    revenue_by_key = {
+        _normalize_segment_name((metric.consolidation_scope or "").removeprefix("segment:").strip() or "Unknown"): metric
+        for metric in latest_metrics
+        if metric.metric_name == "segment_revenue"
+    }
+    profit_by_key = {
+        _normalize_segment_name((metric.consolidation_scope or "").removeprefix("segment:").strip() or "Unknown"): metric
+        for metric in latest_metrics
+        if metric.metric_name == "segment_profit"
+    }
+    rows: list[SegmentHistoryRecord] = []
+    for segment in segment_summary:
+        normalized_key = str(segment.get("normalized_key") or _normalize_segment_name(str(segment.get("segment_name") or "Unknown")))
+        revenue_metric = revenue_by_key.get(normalized_key)
+        profit_metric = profit_by_key.get(normalized_key)
+        metric = revenue_metric or profit_metric
+        rows.append(
+            SegmentHistoryRecord(
+                segment_history_id=_stable_id("segment-history", ticker, latest_document_id, normalized_key, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document_id,
+                normalized_key=normalized_key,
+                segment_name=str(segment.get("segment_name") or "Unknown"),
+                fiscal_year=metric.fiscal_year if metric else None,
+                fiscal_period=metric.fiscal_period if metric else None,
+                period_end_date=metric.period_end_date if metric else None,
+                revenue=segment.get("revenue"),
+                profit=segment.get("profit"),
+                revenue_share_pct=segment.get("revenue_share_pct"),
+                profit_margin_pct=segment.get("profit_margin_pct"),
+                revenue_change_pct=segment.get("revenue_change_pct"),
+                profit_change_pct=segment.get("profit_change_pct"),
+                trend=segment.get("trend"),
+                dominant=bool(segment.get("dominant")),
+                concentration_risk=segment.get("concentration_risk"),
+            )
+        )
+    return rows
+
+
 def _normalize_segment_name(segment_name: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", " ", segment_name.lower()).strip()
     return normalized or "unknown"
@@ -5661,6 +5880,10 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "DELETE FROM contradiction_rows WHERE ticker = ? AND derived_version = ?",
         (bundle.profile.ticker, DERIVED_VERSION),
     )
+    conn.execute(
+        "DELETE FROM segment_history WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
     for delta in bundle.deltas:
         conn.execute(
             """
@@ -5751,8 +5974,9 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             """
             INSERT INTO nuance_findings (
                 nuance_id, ticker, document_id, nuance_class, severity, confidence, section_label,
-                summary, evidence_span_id, requires_human_review, payload_json, derived_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                summary, evidence_span_id, requires_human_review, tier, source_label, payload_json,
+                derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 finding.nuance_id,
@@ -5765,6 +5989,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 finding.summary,
                 finding.evidence_span_id,
                 1 if finding.requires_human_review else 0,
+                finding.tier,
+                finding.source_label,
                 finding.payload_json,
                 DERIVED_VERSION,
                 now,
@@ -5777,8 +6003,9 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             """
             INSERT INTO uncertainty_rows (
                 uncertainty_id, ticker, document_id, uncertainty_class, severity, summary, confidence,
-                section_label, evidence_span_id, requires_human_review, payload_json, derived_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                section_label, evidence_span_id, requires_human_review, tier, source_label, payload_json,
+                derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row.uncertainty_id,
@@ -5791,6 +6018,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 row.section_label,
                 row.evidence_span_id,
                 1 if row.requires_human_review else 0,
+                row.tier,
+                row.source_label,
                 row.payload_json,
                 DERIVED_VERSION,
                 now,
@@ -5804,8 +6033,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             INSERT INTO next_read_guidance (
                 guidance_id, ticker, document_id, priority_rank, target_document_type, target_period_label,
                 target_section_label, reason_class, why_this_matters, evidence_reference_count, blocked_by,
-                payload_json, derived_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tier, source_label, payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row.guidance_id,
@@ -5819,7 +6048,60 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 row.why_this_matters,
                 row.evidence_reference_count,
                 row.blocked_by,
+                row.tier,
+                row.source_label,
                 row.payload_json,
+                DERIVED_VERSION,
+                now,
+                now,
+            ),
+        )
+
+    for row in bundle.segment_history:
+        conn.execute(
+            """
+            INSERT INTO segment_history (
+                segment_history_id, ticker, document_id, normalized_key, segment_name, fiscal_year,
+                fiscal_period, period_end_date, revenue, profit, revenue_share_pct, profit_margin_pct,
+                revenue_change_pct, profit_change_pct, trend, dominant, concentration_risk, derived_version,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, document_id, normalized_key, derived_version)
+            DO UPDATE SET
+                segment_history_id = excluded.segment_history_id,
+                segment_name = excluded.segment_name,
+                fiscal_year = excluded.fiscal_year,
+                fiscal_period = excluded.fiscal_period,
+                period_end_date = excluded.period_end_date,
+                revenue = excluded.revenue,
+                profit = excluded.profit,
+                revenue_share_pct = excluded.revenue_share_pct,
+                profit_margin_pct = excluded.profit_margin_pct,
+                revenue_change_pct = excluded.revenue_change_pct,
+                profit_change_pct = excluded.profit_change_pct,
+                trend = excluded.trend,
+                dominant = excluded.dominant,
+                concentration_risk = excluded.concentration_risk,
+                updated_at = excluded.updated_at
+            """,
+            (
+                row.segment_history_id,
+                row.ticker,
+                row.document_id,
+                row.normalized_key,
+                row.segment_name,
+                row.fiscal_year,
+                row.fiscal_period,
+                row.period_end_date,
+                row.revenue,
+                row.profit,
+                row.revenue_share_pct,
+                row.profit_margin_pct,
+                row.revenue_change_pct,
+                row.profit_change_pct,
+                row.trend,
+                1 if row.dominant else 0,
+                row.concentration_risk,
                 DERIVED_VERSION,
                 now,
                 now,
@@ -5981,8 +6263,9 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             """
             INSERT INTO contradiction_rows (
                 contradiction_id, ticker, document_id, contradiction_class, severity, summary,
-                source_claim_id, section_label, evidence_span_id, payload_json, derived_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_claim_id, section_label, evidence_span_id, tier, source_label, payload_json,
+                derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row.contradiction_id,
@@ -5994,6 +6277,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 row.source_claim_id,
                 row.section_label,
                 row.evidence_span_id,
+                row.tier,
+                row.source_label,
                 row.payload_json,
                 DERIVED_VERSION,
                 now,
@@ -6112,6 +6397,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "deltas": len(bundle.deltas),
         "snapshots": 1,
         "timeseries": len(bundle.timeseries),
+        "segment_history": len(bundle.segment_history),
         "briefs": 1,
         "review_items": len(bundle.review_items),
         "peer_sets": 1,
