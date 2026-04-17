@@ -645,6 +645,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         claim_outcomes=claim_outcomes,
         segment_summary=segment_summary,
         evidence_context=evidence_context,
+        section_cues=section_cues,
     )
     uncertainty_rows = _build_uncertainty_rows(
         ticker=ticker,
@@ -1496,6 +1497,7 @@ def _build_nuance_findings(
     claim_outcomes: list[ClaimOutcomeRecord],
     segment_summary: list[dict[str, Any]],
     evidence_context: dict[str, EvidenceContext],
+    section_cues: list[SectionCue],
 ) -> list[NuanceFindingRecord]:
     findings: list[NuanceFindingRecord] = []
 
@@ -1653,6 +1655,35 @@ def _build_nuance_findings(
                 )
             )
 
+    existing_clue_classes = {finding.nuance_class for finding in findings}
+    event_types = {event.event_type for event in events}
+    for clue in _build_section_nuance_clues(section_cues, event_types=event_types):
+        if clue["nuance_class"] in existing_clue_classes:
+            continue
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "section", clue["nuance_class"], clue["section_label"], DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class=str(clue["nuance_class"]),
+                severity=str(clue["severity"]),
+                confidence=None,
+                section_label=str(clue["section_label"]) if clue.get("section_label") else None,
+                summary=str(clue["summary"]),
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "section_cue",
+                        "section_label": clue.get("section_label"),
+                        "excerpt_text": clue.get("excerpt_text"),
+                        "matched_keywords": clue.get("matched_keywords"),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
     return findings[:8]
 
 
@@ -1669,6 +1700,100 @@ def _nuance_summary_for_event(*, event: EventSignal, context: EvidenceContext | 
     if event.event_type == "contingent_liability":
         return f"Contingent liabilities appear{f' in {section}' if section else ''}; exposure size and trigger conditions need note review."
     return event.rationale or f"{event.event_type.replace('_', ' ')} requires review."
+
+
+def _build_section_nuance_clues(
+    section_cues: list[SectionCue],
+    *,
+    event_types: set[str],
+) -> list[dict[str, Any]]:
+    clues: list[dict[str, Any]] = []
+    patterns = [
+        (
+            "audit_note_focus",
+            "critical",
+            {"Auditor Report"},
+            [r"qualified opinion", r"wajar dengan pengecualian", r"basis for qualified opinion", r"disclaimer of opinion"],
+            "Auditor report contains qualification language. Read the opinion basis directly before trusting the filing summary.",
+            {"qualified_audit_opinion"},
+        ),
+        (
+            "going_concern_note_focus",
+            "critical",
+            {"Auditor Report", "Notes to Financial Statements"},
+            [r"going concern", r"kelangsungan usaha", r"substantial doubt", r"material uncertainty"],
+            "Going-concern wording appears in the latest filing. Read the liquidity and assumption notes directly.",
+            {"going_concern_warning"},
+        ),
+        (
+            "covenant_note_focus",
+            "warning",
+            {"Notes to Financial Statements", "Risk Factors"},
+            [r"covenant", r"waiver", r"breach", r"pelanggaran", r"persyaratan pinjaman"],
+            "Debt covenant or waiver language appears in the notes. Read the breach, waiver, and headroom detail directly.",
+            {"covenant_stress"},
+        ),
+        (
+            "related_party_note_focus",
+            "warning",
+            {"Notes to Financial Statements", "Governance"},
+            [r"related party", r"pihak berelasi", r"transaksi afiliasi", r"affiliated transaction"],
+            "Related-party wording appears in the filing. Read the balances, terms, and board rationale directly.",
+            {"related_party_transaction"},
+        ),
+        (
+            "liability_note_focus",
+            "warning",
+            {"Notes to Financial Statements", "Legal and Regulatory"},
+            [r"contingent liabilit", r"liabilitas kontinjensi", r"commitments and contingencies", r"komitmen dan kontinjensi"],
+            "Contingent liabilities or commitments appear in the notes. Read the triggers, amounts, and downside exposure directly.",
+            {"contingent_liability"},
+        ),
+        (
+            "legal_note_focus",
+            "critical",
+            {"Legal and Regulatory", "Notes to Financial Statements"},
+            [r"lawsuit", r"litigation", r"gugatan", r"sengketa hukum", r"legal dispute"],
+            "Legal dispute language appears in the latest filing. Read the case stage, claimed amount, and exposure note directly.",
+            {"lawsuit"},
+        ),
+        (
+            "regulatory_note_focus",
+            "critical",
+            {"Legal and Regulatory", "Governance"},
+            [r"regulatory", r"sanksi", r"otoritas jasa keuangan", r"special supervision", r"pembatasan kegiatan usaha"],
+            "Regulatory sanction or restriction language appears in the filing. Read the scope, remedy, and timing directly.",
+            {"regulatory_action", "regulator_supervision", "special_supervision", "business_restriction"},
+        ),
+    ]
+    seen: set[tuple[str, str | None]] = set()
+    for cue in section_cues:
+        if not cue.section_label:
+            continue
+        lowered = cue.text.lower()
+        for nuance_class, severity, sections, regexes, summary, suppressing_events in patterns:
+            if nuance_class in event_types or (event_types & suppressing_events):
+                continue
+            if cue.section_label not in sections:
+                continue
+            matched = [regex for regex in regexes if re.search(regex, lowered, flags=re.IGNORECASE)]
+            if not matched:
+                continue
+            key = (nuance_class, cue.section_label)
+            if key in seen:
+                continue
+            seen.add(key)
+            clues.append(
+                {
+                    "nuance_class": nuance_class,
+                    "severity": severity,
+                    "section_label": cue.section_label,
+                    "summary": summary,
+                    "excerpt_text": cue.excerpt_text,
+                    "matched_keywords": matched,
+                }
+            )
+    return clues
 
 
 def _build_uncertainty_rows(
@@ -2184,6 +2309,7 @@ def _build_next_read_guidance(
     for finding in nuance_findings:
         if not finding.requires_human_review:
             continue
+        details = json.loads(finding.payload_json)
         rows.append(
             NextReadRecord(
                 guidance_id=_stable_id("next-read", ticker, "nuance", finding.nuance_id, DERIVED_VERSION),
@@ -2202,6 +2328,7 @@ def _build_next_read_guidance(
                         "source": "nuance",
                         "nuance_class": finding.nuance_class,
                         "severity": finding.severity,
+                        "excerpt_text": details.get("excerpt_text"),
                     },
                     sort_keys=True,
                 ),

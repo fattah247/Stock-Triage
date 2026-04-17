@@ -20,6 +20,7 @@ from stock_triage.intelligence.pipeline import (
     NextReadRecord,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
+    _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
     _build_uncertainty_rows,
@@ -932,6 +933,45 @@ def test_build_uncertainty_rows_uses_section_cues_without_events():
     assert row_map["contingent_liability_scope"].section_label == "Notes to Financial Statements"
 
 
+def test_build_nuance_findings_uses_section_cues_without_events():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+
+    rows = _build_nuance_findings(
+        ticker="TAMU",
+        latest_document=latest_document,
+        latest_analysis=None,
+        events=[],
+        triggered_rules=[],
+        claim_outcomes=[],
+        segment_summary=[],
+        evidence_context={},
+        section_cues=[
+            type("Cue", (), {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "section_label": "Legal and Regulatory",
+                "text": "The company discusses a lawsuit and regulatory sanction in this section.",
+                "excerpt_text": "The company discusses a lawsuit and regulatory sanction in this section.",
+            })()
+        ],
+    )
+
+    row_map = {row.nuance_class: row for row in rows}
+    assert row_map["legal_note_focus"].section_label == "Legal and Regulatory"
+    assert json.loads(row_map["legal_note_focus"].payload_json)["excerpt_text"] == "The company discusses a lawsuit and regulatory sanction in this section."
+
+
 def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
     latest_document = CompanyDocument(
         document_id="doc-1",
@@ -975,6 +1015,46 @@ def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
     assert rows[0].reason_class == "section_focus"
     assert rows[0].target_section_label == "Auditor Report"
     assert json.loads(rows[0].payload_json)["excerpt_text"] == "Independent auditor report text."
+
+
+def test_build_next_read_guidance_carries_nuance_excerpt():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+
+    rows = _build_next_read_guidance(
+        ticker="TAMU",
+        latest_document=latest_document,
+        filing_expectations=[],
+        nuance_findings=[
+            type("Finding", (), {
+                "nuance_id": "nuance-1",
+                "section_label": "Auditor Report",
+                "summary": "Auditor qualification language appears in the current filing.",
+                "requires_human_review": True,
+                "evidence_span_id": None,
+                "nuance_class": "audit_note_focus",
+                "severity": "critical",
+                "payload_json": json.dumps({"excerpt_text": "Basis for qualified opinion paragraph."}, sort_keys=True),
+            })()
+        ],
+        uncertainty_rows=[],
+        contradiction_rows=[],
+        latest_analysis=None,
+        section_cues=[],
+    )
+
+    assert rows[0].reason_class == "nuance_review"
+    assert json.loads(rows[0].payload_json)["excerpt_text"] == "Basis for qualified opinion paragraph."
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

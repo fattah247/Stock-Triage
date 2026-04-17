@@ -1547,6 +1547,7 @@
                       <div><span class="severity sev-${statusTag(item.severity || "warning")}">${esc(item.nuance_class || "nuance")}</span></div>
                       <div class="findingClaim">${esc(item.summary || "")}</div>
                       <div class="meta">Section: ${esc(item.section_label || "unknown")} · confidence ${esc(formatPct(item.confidence != null ? Number(item.confidence) * 100 : null, 0) || "—")}</div>
+                      ${item.details?.excerpt_text ? `<div class="meta">${esc(item.details.excerpt_text)}</div>` : ""}
                       <div class="meta">${item.requires_human_review ? "Needs human read." : "System-level nuance only."}</div>
                     </article>
                   `
