@@ -449,8 +449,30 @@ def _section_heading(block_text: str) -> str | None:
     uppercase_ratio = sum(ch.isupper() for ch in letters) / len(letters)
     titlecase_ratio = sum(word[:1].isupper() for word in words) / len(words)
     if uppercase_ratio >= 0.75 or titlecase_ratio >= 0.75:
-        return line
+        return _normalize_section_heading(line)
     return None
+
+
+def _normalize_section_heading(line: str) -> str:
+    normalized = re.sub(r"\s+", " ", line.strip())
+    lowered = normalized.lower()
+    if "management discussion" in lowered or "analisis dan pembahasan manajemen" in lowered:
+        return "MD&A"
+    if "risk factor" in lowered or "faktor risiko" in lowered:
+        return "Risk Factors"
+    if "independent auditor" in lowered or "laporan auditor independen" in lowered or "opini auditor" in lowered:
+        return "Auditor Report"
+    if "notes to financial" in lowered or "catatan atas laporan keuangan" in lowered:
+        return "Notes to Financial Statements"
+    if "outlook" in lowered or "prospek" in lowered:
+        return "Outlook"
+    if "use of proceeds" in lowered or "penggunaan dana" in lowered:
+        return "Use of Proceeds"
+    if "governance" in lowered or "tata kelola" in lowered:
+        return "Governance"
+    if "legal" in lowered or "regulatory" in lowered or "hukum" in lowered or "kepatuhan" in lowered:
+        return "Legal and Regulatory"
+    return normalized
 
 
 def _persist_parse_success(

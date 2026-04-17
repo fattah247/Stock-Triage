@@ -13,9 +13,11 @@ from stock_triage.intelligence.pipeline import (
     AnalysisSummary,
     EventSignal,
     MetricPoint,
+    NextReadRecord,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
     _build_narrative_signals,
+    _rank_next_read_rows,
     _build_recommendation_summary,
     _build_segment_summary,
     _derive_stance,
@@ -747,6 +749,58 @@ def test_build_narrative_signals_is_deterministic_and_deduped():
         "Management explicitly framed downside risks in the latest narrative.",
         "Management repeated similar claims across filings, which may indicate boilerplate narrative reuse.",
     ]
+
+
+def test_rank_next_read_rows_prioritizes_reason_and_section():
+    rows = [
+        NextReadRecord(
+            guidance_id="g-1",
+            ticker="TAMU",
+            document_id="doc-1",
+            priority_rank=3,
+            target_document_type="annual_report",
+            target_period_label=None,
+            target_section_label="MD&A",
+            reason_class="uncertainty_followup",
+            why_this_matters="Read MD&A for narrative context.",
+            evidence_reference_count=0,
+            blocked_by=None,
+            payload_json="{}",
+        ),
+        NextReadRecord(
+            guidance_id="g-2",
+            ticker="TAMU",
+            document_id="doc-1",
+            priority_rank=2,
+            target_document_type="annual_report",
+            target_period_label=None,
+            target_section_label="Auditor Report",
+            reason_class="contradiction_review",
+            why_this_matters="Read auditor report for contradiction.",
+            evidence_reference_count=1,
+            blocked_by=None,
+            payload_json="{}",
+        ),
+        NextReadRecord(
+            guidance_id="g-3",
+            ticker="TAMU",
+            document_id="doc-1",
+            priority_rank=1,
+            target_document_type="financial_statement",
+            target_period_label="Annual 2024",
+            target_section_label=None,
+            reason_class="missing_filing",
+            why_this_matters="Fetch missing annual filing.",
+            evidence_reference_count=0,
+            blocked_by=None,
+            payload_json="{}",
+        ),
+    ]
+
+    ranked = _rank_next_read_rows(rows)
+
+    assert [row.guidance_id for row in ranked] == ["g-3", "g-2", "g-1"]
+    assert [row.priority_rank for row in ranked] == [1, 2, 3]
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

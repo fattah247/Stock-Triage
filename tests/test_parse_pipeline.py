@@ -226,9 +226,9 @@ def test_run_parse_persists_section_labels_from_heading_blocks(tmp_config):
             (document_id,),
         ).fetchall()
         assert len(rows) == 2
-        assert rows[0]["section_label"] == "MANAGEMENT DISCUSSION AND ANALYSIS"
+        assert rows[0]["section_label"] == "MD&A"
         assert "Revenue increased materially" in rows[0]["text"]
-        assert rows[1]["section_label"] == "RISK FACTORS"
+        assert rows[1]["section_label"] == "Risk Factors"
         assert "Liquidity pressure remains" in rows[1]["text"]
     finally:
         rconn.close()

@@ -1826,6 +1826,49 @@ def _build_contradiction_rows(
             )
         )
 
+    critical_note_events = [
+        event
+        for event in events
+        if event.event_type in {"qualified_audit_opinion", "going_concern_warning", "regulatory_action", "lawsuit", "covenant_stress"}
+    ]
+    current_positive_claims = [
+        claim
+        for claim in claims
+        if claim.source_document_id == latest_document.document_id
+        and claim.claim_type in {"outlook_guidance", "revenue_growth", "margin_improvement", "debt_reduction"}
+    ]
+    if critical_note_events and current_positive_claims:
+        event = critical_note_events[0]
+        claim = current_positive_claims[0]
+        context = _evidence_context_for(
+            evidence_context,
+            event.evidence_span_id or claim.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        rows.append(
+            ContradictionRecord(
+                contradiction_id=_stable_id("contradiction", ticker, latest_document.document_id, "current-claim-risk", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                contradiction_class="current_positive_claim_vs_critical_risk",
+                severity="critical",
+                summary=f"Current filing makes a positive management claim while also surfacing {event.event_type.replace('_', ' ')} in {context.section_label if context and context.section_label else 'a critical note section'}.",
+                source_claim_id=claim.claim_id,
+                section_label=context.section_label if context else None,
+                evidence_span_id=event.evidence_span_id or claim.evidence_span_id,
+                payload_json=json.dumps(
+                    {
+                        "source": "current_claim_vs_event",
+                        "claim_type": claim.claim_type,
+                        "claim_text": claim.claim_text,
+                        "event_type": event.event_type,
+                        "section_label": context.section_label if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
     event_types = {event.event_type for event in events}
     if "major_contract_win" in event_types and "major_contract_loss" in event_types:
         rows.append(
@@ -1891,7 +1934,7 @@ def _build_next_read_guidance(
             )
         )
         if len(rows) >= 5:
-            return rows
+            return _rank_next_read_rows(rows)
 
     for finding in nuance_findings:
         if not finding.requires_human_review:
@@ -1920,7 +1963,7 @@ def _build_next_read_guidance(
             )
         )
         if len(rows) >= 5:
-            return rows
+            return _rank_next_read_rows(rows)
 
     for row in uncertainty_rows:
         if not row.requires_human_review:
@@ -1949,7 +1992,7 @@ def _build_next_read_guidance(
             )
         )
         if len(rows) >= 5:
-            return rows
+            return _rank_next_read_rows(rows)
 
     for row in contradiction_rows:
         rows.append(
@@ -1976,7 +2019,7 @@ def _build_next_read_guidance(
             )
         )
         if len(rows) >= 5:
-            return rows
+            return _rank_next_read_rows(rows)
 
     if latest_analysis:
         for item in latest_analysis.what_to_verify[:2]:
@@ -1999,13 +2042,67 @@ def _build_next_read_guidance(
             if len(rows) >= 5:
                 break
 
-    return rows[:5]
+    return _rank_next_read_rows(rows[:5])
 
 
 def _obligation_to_document_type(obligation_type: str) -> str:
     if obligation_type == "annual_report":
         return "annual_report"
     return "financial_statement"
+
+
+def _rank_next_read_rows(rows: list[NextReadRecord]) -> list[NextReadRecord]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            _reason_priority(row.reason_class),
+            _section_priority(row.target_section_label),
+            row.priority_rank,
+            row.why_this_matters,
+        ),
+    )
+    return [
+        NextReadRecord(
+            guidance_id=row.guidance_id,
+            ticker=row.ticker,
+            document_id=row.document_id,
+            priority_rank=index,
+            target_document_type=row.target_document_type,
+            target_period_label=row.target_period_label,
+            target_section_label=row.target_section_label,
+            reason_class=row.reason_class,
+            why_this_matters=row.why_this_matters,
+            evidence_reference_count=row.evidence_reference_count,
+            blocked_by=row.blocked_by,
+            payload_json=row.payload_json,
+        )
+        for index, row in enumerate(ordered, start=1)
+    ]
+
+
+def _reason_priority(reason_class: str | None) -> int:
+    order = {
+        "missing_filing": 0,
+        "contradiction_review": 1,
+        "nuance_review": 2,
+        "uncertainty_followup": 3,
+        "analysis_verify": 4,
+    }
+    return order.get(str(reason_class or ""), 9)
+
+
+def _section_priority(section_label: str | None) -> int:
+    order = {
+        "Auditor Report": 0,
+        "Notes to Financial Statements": 1,
+        "Legal and Regulatory": 2,
+        "Risk Factors": 3,
+        "Use of Proceeds": 4,
+        "Governance": 5,
+        "MD&A": 6,
+        "Outlook": 7,
+    }
+    return order.get(str(section_label or ""), 9)
 
 
 def _build_snapshot_payload_json(
