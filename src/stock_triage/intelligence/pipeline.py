@@ -696,6 +696,18 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         current_rows=contradiction_rows,
     )
     persistent_contradiction_signals = _build_persistent_contradiction_signals(contradiction_history)
+    persistence_items = _build_persistence_review_items(
+        ticker=ticker,
+        document_id=latest_document.document_id,
+        persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
+    )
+    active_review_items.extend(
+        _filter_active_review_items(
+            persistence_items,
+            review_statuses=persisted_review_statuses,
+        )
+    )
     next_read_guidance = _build_next_read_guidance(
         ticker=ticker,
         latest_document=latest_document,
@@ -751,6 +763,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         events=latest_events,
         triggered_rules=latest_rules,
     )
+    review_items.extend(persistence_items)
     review_items.extend(conflict_items)
     review_items.extend(thesis_items)
     review_items.extend(claim_items)
@@ -3673,6 +3686,79 @@ def _build_review_items(
                         "event_type": event.event_type,
                         "severity": severity,
                         "evidence_span_id": event.evidence_span_id,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    return items
+
+
+def _build_persistence_review_items(
+    *,
+    ticker: str,
+    document_id: str,
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
+) -> list[ReviewQueueItem]:
+    items: list[ReviewQueueItem] = []
+    for signal in persistent_risk_signals:
+        persistence_state = str(signal.get("persistence_state") or "")
+        if persistence_state not in {"active", "reappeared"}:
+            continue
+        focus_key = str(signal.get("focus_key") or "")
+        source_key = _stable_id("review-src", "persistence-focus", ticker, focus_key, DERIVED_VERSION)
+        severity = str(signal.get("severity") or "warning")
+        priority = "high" if severity == "critical" or persistence_state == "reappeared" else "medium"
+        items.append(
+            ReviewQueueItem(
+                review_item_id=_stable_id("review", "persistence-focus", source_key, DERIVED_VERSION),
+                item_type="persistence_focus",
+                ticker=ticker,
+                document_id=document_id,
+                source_key=source_key,
+                priority=priority,
+                rationale=str(signal.get("summary") or f"{focus_key} persists across recent filings."),
+                payload_json=json.dumps(
+                    {
+                        "focus_key": focus_key,
+                        "label": signal.get("label"),
+                        "repeat_count": signal.get("repeat_count"),
+                        "severity": severity,
+                        "persistence_state": persistence_state,
+                        "latest_age_days": signal.get("latest_age_days"),
+                        "gap_days": signal.get("gap_days"),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    for signal in persistent_contradiction_signals:
+        persistence_state = str(signal.get("persistence_state") or "")
+        if persistence_state not in {"active", "reappeared"}:
+            continue
+        contradiction_class = str(signal.get("contradiction_class") or "")
+        source_key = _stable_id("review-src", "persistence-contradiction", ticker, contradiction_class, DERIVED_VERSION)
+        severity = str(signal.get("severity") or "warning")
+        priority = "high" if severity == "critical" else "medium"
+        items.append(
+            ReviewQueueItem(
+                review_item_id=_stable_id("review", "persistence-contradiction", source_key, DERIVED_VERSION),
+                item_type="persistence_contradiction",
+                ticker=ticker,
+                document_id=document_id,
+                source_key=source_key,
+                priority=priority,
+                rationale=str(signal.get("summary") or f"{contradiction_class} persists across recent filings."),
+                payload_json=json.dumps(
+                    {
+                        "contradiction_class": contradiction_class,
+                        "label": signal.get("label"),
+                        "repeat_count": signal.get("repeat_count"),
+                        "severity": severity,
+                        "persistence_state": persistence_state,
+                        "latest_age_days": signal.get("latest_age_days"),
+                        "gap_days": signal.get("gap_days"),
                     },
                     sort_keys=True,
                 ),

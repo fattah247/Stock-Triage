@@ -27,6 +27,7 @@ from stock_triage.intelligence.pipeline import (
     _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
+    _build_persistence_review_items,
     _build_persistent_contradiction_signals,
     _build_persistent_risk_signals,
     _build_unresolved_nuance_summary,
@@ -1479,6 +1480,53 @@ def test_build_persistent_contradiction_signals_marks_active_when_recent():
 
     assert rows[0]["persistence_state"] == "active"
     assert rows[0]["latest_age_days"] <= 120
+
+
+def test_build_persistence_review_items_emits_active_and_reappeared_only():
+    rows = _build_persistence_review_items(
+        ticker="TAMU",
+        document_id="doc-1",
+        persistent_risk_signals=[
+            {
+                "focus_key": "legal_regulatory",
+                "label": "Legal / Regulatory",
+                "repeat_count": 2,
+                "severity": "critical",
+                "summary": "Legal / Regulatory issues repeated across recent analyzed filings.",
+                "persistence_state": "active",
+                "latest_age_days": 12,
+                "gap_days": 30,
+            },
+            {
+                "focus_key": "capital_allocation",
+                "label": "Capital Allocation",
+                "repeat_count": 2,
+                "severity": "warning",
+                "summary": "Capital allocation issues repeated across recent analyzed filings.",
+                "persistence_state": "stale",
+                "latest_age_days": 480,
+                "gap_days": 240,
+            },
+        ],
+        persistent_contradiction_signals=[
+            {
+                "contradiction_class": "claim_vs_outcome",
+                "label": "Claim vs Outcome",
+                "repeat_count": 2,
+                "severity": "critical",
+                "summary": "Claim credibility contradiction persists across recent analyzed filings.",
+                "persistence_state": "reappeared",
+                "latest_age_days": 25,
+                "gap_days": 190,
+            }
+        ],
+    )
+
+    assert [row.item_type for row in rows] == ["persistence_focus", "persistence_contradiction"]
+    assert rows[0].priority == "high"
+    assert rows[1].priority == "high"
+    assert "legal_regulatory" in json.loads(rows[0].payload_json)["focus_key"]
+    assert json.loads(rows[1].payload_json)["persistence_state"] == "reappeared"
 
 
 def test_build_uncertainty_rows_marks_regulatory_restriction_context():
