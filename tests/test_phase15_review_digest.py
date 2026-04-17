@@ -133,7 +133,7 @@ def test_group_review_rows_collapse_persistence_into_issue_family():
                 "priority": "high",
                 "status": "open",
                 "rationale": "Legal / Regulatory issues repeated across recent analyzed filings.",
-                "payload": {"focus_key": "legal_regulatory", "persistence_state": "active"},
+                "payload": {"focus_key": "legal_regulatory", "label": "Legal / Regulatory", "persistence_state": "active"},
                 "created_at": "2026-04-18T00:00:00+00:00",
                 "updated_at": "2026-04-18T00:00:00+00:00",
                 "source_name": "derived",
@@ -150,3 +150,6 @@ def test_group_review_rows_collapse_persistence_into_issue_family():
     assert rows[0]["issue_family"] == "legal_regulatory"
     assert rows[0]["group_count"] == 2
     assert rows[0]["ranking_inputs"]["persistence_count"] == 1
+    assert rows[0]["has_persistence"] is True
+    assert rows[0]["persistence_states"] == ["active"]
+    assert rows[0]["persistence_summary"] == "Legal / Regulatory · active"

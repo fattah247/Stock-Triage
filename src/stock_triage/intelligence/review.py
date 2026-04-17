@@ -501,12 +501,24 @@ def _group_review_rows(rows: list[dict[str, object]], *, limit: int) -> list[dic
         persistence_count = sum(
             1 for item in members if str(item.get("item_type") or "") in {"persistence_focus", "persistence_contradiction"}
         )
+        persistence_members = [
+            item
+            for item in members
+            if str(item.get("item_type") or "") in {"persistence_focus", "persistence_contradiction"}
+        ]
+        persistence_states = _dedupe_strings(
+            [str((item.get("payload") or {}).get("persistence_state") or "") for item in persistence_members]
+        )
+        persistence_labels = _dedupe_strings(
+            [str((item.get("payload") or {}).get("label") or "") for item in persistence_members]
+        )
         ranking_inputs = {
             "high_priority_count": high_count,
             "medium_priority_count": medium_count,
             "low_priority_count": low_count,
             "member_count": len(members),
             "persistence_count": persistence_count,
+            "persistence_states": persistence_states,
             "decision_state_penalty": _DECISION_STATE_PENALTY.get(str(entry.get("decision_state") or "Watch"), 0),
         }
         rank_score = (
@@ -543,6 +555,13 @@ def _group_review_rows(rows: list[dict[str, object]], *, limit: int) -> list[dic
                 "group_count": len(members),
                 "rank_score": rank_score,
                 "ranking_inputs": ranking_inputs,
+                "has_persistence": bool(persistence_members),
+                "persistence_states": persistence_states,
+                "persistence_labels": persistence_labels[:3],
+                "persistence_summary": _summarize_persistence_group(
+                    labels=persistence_labels,
+                    states=persistence_states,
+                ),
             }
         )
     grouped_rows.sort(
@@ -675,6 +694,16 @@ def _dedupe_strings(items: list[str]) -> list[str]:
         seen.add(normalized)
         result.append(normalized)
     return result
+
+
+def _summarize_persistence_group(*, labels: list[str], states: list[str]) -> str | None:
+    clean_labels = [item for item in labels if item]
+    clean_states = [item for item in states if item]
+    if not clean_labels and not clean_states:
+        return None
+    label_text = ", ".join(clean_labels[:2]) if clean_labels else "persistent issue"
+    state_text = " / ".join(clean_states[:2]) if clean_states else "active"
+    return f"{label_text} · {state_text}"
 
 
 def _update_review_status(conn, *, review_item_id: str, status: str, note: str | None) -> ReviewUpdateResult:

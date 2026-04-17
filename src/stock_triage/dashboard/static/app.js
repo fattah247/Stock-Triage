@@ -1072,6 +1072,11 @@
                 <article class="findingCard sev-${statusTag(item.priority)}">
                   <div class="findingClaim">${esc(item.ticker || "-")} · ${esc(item.issue_family || item.item_type)}</div>
                   <div class="meta">${esc(item.priority)} priority · ${esc(item.status)} · ${esc(item.decision_state || "-")} · grouped ${esc(item.group_count || 1)} · score ${esc(item.rank_score || 0)}</div>
+                  ${
+                    item.has_persistence
+                      ? `<div class="meta"><strong>Persistence:</strong> ${esc(item.persistence_summary || "persistent")} </div>`
+                      : ""
+                  }
                   <div class="meta">${(item.reasons || [item.rationale || ""]).map(esc).join(" · ")}</div>
                   <div class="heroBar">
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">artifact</a>` : ""}
