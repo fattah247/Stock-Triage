@@ -1214,6 +1214,7 @@
         const recentEvents = (payload.events || []).slice(0, 6);
         const uncertaintyRows = (payload.uncertainty_rows || []).slice(0, 4);
         const nextReadGuidance = (payload.next_read_guidance || []).slice(0, 5);
+        const contradictionRows = (payload.contradiction_rows || []).slice(0, 5);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1326,6 +1327,16 @@
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No thesis evaluations for this issuer.</strong></div>`
+          }
+          ${
+            contradictionRows.length
+              ? `<table class="metricTable"><thead><tr><th>Contradiction</th><th>Severity</th><th>Section</th></tr></thead><tbody>${contradictionRows
+                  .map(
+                    (item) =>
+                      `<tr><td>${esc(item.summary || "")}</td><td>${esc(item.severity || "warning")}</td><td>${esc(item.section_label || "—")}</td></tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="emptyState"><strong>No persisted contradictions yet.</strong></div>`
           }
         `;
         sectorExplorer.innerHTML = `

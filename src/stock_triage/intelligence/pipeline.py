@@ -316,6 +316,20 @@ class NextReadRecord:
 
 
 @dataclass(frozen=True)
+class ContradictionRecord:
+    contradiction_id: str
+    ticker: str
+    document_id: str
+    contradiction_class: str
+    severity: str
+    summary: str
+    source_claim_id: str | None
+    section_label: str | None
+    evidence_span_id: str | None
+    payload_json: str
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -346,6 +360,7 @@ class CompanyIntelligenceBundle:
     nuance_findings: list[NuanceFindingRecord]
     uncertainty_rows: list[UncertaintyRecord]
     next_read_guidance: list[NextReadRecord]
+    contradiction_rows: list[ContradictionRecord]
     latest_analysis: AnalysisSummary | None
     deltas: list[DeltaRecord]
     timeseries: list[TimeseriesPoint]
@@ -631,12 +646,21 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         filing_expectations=filing_expectations,
         evidence_context=evidence_context,
     )
+    contradiction_rows = _build_contradiction_rows(
+        ticker=ticker,
+        latest_document=latest_document,
+        claims=claims,
+        claim_outcomes=claim_outcomes,
+        events=latest_events,
+        evidence_context=evidence_context,
+    )
     next_read_guidance = _build_next_read_guidance(
         ticker=ticker,
         latest_document=latest_document,
         filing_expectations=filing_expectations,
         nuance_findings=nuance_findings,
         uncertainty_rows=uncertainty_rows,
+        contradiction_rows=contradiction_rows,
         latest_analysis=latest_analysis,
     )
     snapshot_payload_json = _build_snapshot_payload_json(
@@ -652,6 +676,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         nuance_findings=nuance_findings,
         uncertainty_rows=uncertainty_rows,
         next_read_guidance=next_read_guidance,
+        contradiction_rows=contradiction_rows,
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
@@ -692,6 +717,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         nuance_findings=nuance_findings,
         uncertainty_rows=uncertainty_rows,
         next_read_guidance=next_read_guidance,
+        contradiction_rows=contradiction_rows,
         latest_analysis=latest_analysis,
         deltas=deltas,
         timeseries=timeseries,
@@ -1754,6 +1780,77 @@ def _build_uncertainty_rows(
     return rows[:6]
 
 
+def _build_contradiction_rows(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    claims: list[ClaimRecord],
+    claim_outcomes: list[ClaimOutcomeRecord],
+    events: list[EventSignal],
+    evidence_context: dict[str, EvidenceContext],
+) -> list[ContradictionRecord]:
+    rows: list[ContradictionRecord] = []
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+
+    for outcome in claim_outcomes:
+        if outcome.outcome_status != "Contradicted":
+            continue
+        claim = claims_by_id.get(outcome.claim_id)
+        context = _evidence_context_for(
+            evidence_context,
+            outcome.evidence_span_id or (claim.evidence_span_id if claim else None),
+            document_id=latest_document.document_id,
+        )
+        summary = outcome.rationale or "A previously stated management claim is contradicted by later evidence."
+        rows.append(
+            ContradictionRecord(
+                contradiction_id=_stable_id("contradiction", ticker, latest_document.document_id, outcome.claim_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                summary=summary,
+                source_claim_id=outcome.claim_id,
+                section_label=context.section_label if context else None,
+                evidence_span_id=outcome.evidence_span_id or (claim.evidence_span_id if claim else None),
+                payload_json=json.dumps(
+                    {
+                        "source": "claim_outcome",
+                        "claim_text": claim.claim_text if claim else None,
+                        "claim_type": claim.claim_type if claim else None,
+                        "outcome_status": outcome.outcome_status,
+                        "section_label": context.section_label if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    event_types = {event.event_type for event in events}
+    if "major_contract_win" in event_types and "major_contract_loss" in event_types:
+        rows.append(
+            ContradictionRecord(
+                contradiction_id=_stable_id("contradiction", ticker, latest_document.document_id, "contract-mixed", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                contradiction_class="mixed_contract_signals",
+                severity="warning",
+                summary="The same filing contains both a major contract win and a major contract loss signal.",
+                source_claim_id=None,
+                section_label=None,
+                evidence_span_id=None,
+                payload_json=json.dumps(
+                    {
+                        "source": "events",
+                        "event_types": sorted({"major_contract_win", "major_contract_loss"}),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+    return rows[:5]
+
+
 def _build_next_read_guidance(
     *,
     ticker: str,
@@ -1761,6 +1858,7 @@ def _build_next_read_guidance(
     filing_expectations: list[FilingExpectationRecord],
     nuance_findings: list[NuanceFindingRecord],
     uncertainty_rows: list[UncertaintyRecord],
+    contradiction_rows: list[ContradictionRecord],
     latest_analysis: AnalysisSummary | None,
 ) -> list[NextReadRecord]:
     rows: list[NextReadRecord] = []
@@ -1853,6 +1951,33 @@ def _build_next_read_guidance(
         if len(rows) >= 5:
             return rows
 
+    for row in contradiction_rows:
+        rows.append(
+            NextReadRecord(
+                guidance_id=_stable_id("next-read", ticker, "contradiction", row.contradiction_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                priority_rank=len(rows) + 1,
+                target_document_type=latest_document.document_type,
+                target_period_label=None,
+                target_section_label=row.section_label,
+                reason_class="contradiction_review",
+                why_this_matters=row.summary,
+                evidence_reference_count=1 if row.evidence_span_id else 0,
+                blocked_by=None,
+                payload_json=json.dumps(
+                    {
+                        "source": "contradiction",
+                        "contradiction_class": row.contradiction_class,
+                        "severity": row.severity,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+        if len(rows) >= 5:
+            return rows
+
     if latest_analysis:
         for item in latest_analysis.what_to_verify[:2]:
             rows.append(
@@ -1897,6 +2022,7 @@ def _build_snapshot_payload_json(
     nuance_findings: list[NuanceFindingRecord],
     uncertainty_rows: list[UncertaintyRecord],
     next_read_guidance: list[NextReadRecord],
+    contradiction_rows: list[ContradictionRecord],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
@@ -2038,6 +2164,18 @@ def _build_snapshot_payload_json(
                 "details": json.loads(row.payload_json),
             }
             for row in next_read_guidance
+        ],
+        "contradiction_rows": [
+            {
+                "contradiction_class": row.contradiction_class,
+                "severity": row.severity,
+                "summary": row.summary,
+                "source_claim_id": row.source_claim_id,
+                "section_label": row.section_label,
+                "evidence_span_id": row.evidence_span_id,
+                "details": json.loads(row.payload_json),
+            }
+            for row in contradiction_rows
         ],
         "management_credibility": {
             "total_claims": credibility_summary.total_claims,
@@ -4037,6 +4175,10 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "DELETE FROM next_read_guidance WHERE ticker = ? AND derived_version = ?",
         (bundle.profile.ticker, DERIVED_VERSION),
     )
+    conn.execute(
+        "DELETE FROM contradiction_rows WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
     for delta in bundle.deltas:
         conn.execute(
             """
@@ -4352,6 +4494,31 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             ),
         )
 
+    for row in bundle.contradiction_rows:
+        conn.execute(
+            """
+            INSERT INTO contradiction_rows (
+                contradiction_id, ticker, document_id, contradiction_class, severity, summary,
+                source_claim_id, section_label, evidence_span_id, payload_json, derived_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.contradiction_id,
+                row.ticker,
+                row.document_id,
+                row.contradiction_class,
+                row.severity,
+                row.summary,
+                row.source_claim_id,
+                row.section_label,
+                row.evidence_span_id,
+                row.payload_json,
+                DERIVED_VERSION,
+                now,
+                now,
+            ),
+        )
+
     conn.execute(
         """
         INSERT INTO decision_briefs (
@@ -4473,6 +4640,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         "nuance_findings": len(bundle.nuance_findings),
         "uncertainty_rows": len(bundle.uncertainty_rows),
         "next_read_guidance": len(bundle.next_read_guidance),
+        "contradiction_rows": len(bundle.contradiction_rows),
     }
 
 

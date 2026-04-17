@@ -118,9 +118,11 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["nuance_findings"]
         assert payload["uncertainty_rows"]
         assert payload["next_read_guidance"]
+        assert payload["contradiction_rows"]
         assert any(item["nuance_class"] == "claim_contradiction" for item in payload["nuance_findings"])
         assert any(item["uncertainty_class"] == "event_confidence_missing" for item in payload["uncertainty_rows"])
         assert payload["next_read_guidance"][0]["reason_class"] in {"missing_filing", "nuance_review", "uncertainty_followup"}
+        assert payload["contradiction_rows"][0]["contradiction_class"] == "claim_vs_outcome"
         assert any(item["obligation_type"] == "annual_report" and item["state"] == "satisfied" for item in payload["filing_expectations"])
         assert payload["segment_summary"] == []
         assert "revenue increased" in payload["top_card"]["positive_factors"]
@@ -158,6 +160,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
                 "nuance_findings",
                 "uncertainty_rows",
                 "next_read_guidance",
+                "contradiction_rows",
                 "company_timeseries",
                 "decision_briefs",
                 "review_queue_items",
@@ -175,6 +178,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
             "nuance_findings": len(payload["nuance_findings"]),
             "uncertainty_rows": len(payload["uncertainty_rows"]),
             "next_read_guidance": len(payload["next_read_guidance"]),
+            "contradiction_rows": len(payload["contradiction_rows"]),
             "company_timeseries": 7,
             "decision_briefs": 1,
             "review_queue_items": 5,
@@ -208,6 +212,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
                 "nuance_findings",
                 "uncertainty_rows",
                 "next_read_guidance",
+                "contradiction_rows",
                 "company_timeseries",
                 "decision_briefs",
                 "review_queue_items",
@@ -238,6 +243,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
                 "nuance_findings",
                 "uncertainty_rows",
                 "next_read_guidance",
+                "contradiction_rows",
                 "company_timeseries",
                 "decision_briefs",
                 "review_queue_items",
@@ -252,6 +258,7 @@ def test_run_intelligence_is_rerunnable_without_duplicate_rows(tmp_config):
         assert counts["nuance_findings"] > 0
         assert counts["uncertainty_rows"] > 0
         assert counts["next_read_guidance"] > 0
+        assert counts["contradiction_rows"] > 0
     finally:
         rconn.close()
 

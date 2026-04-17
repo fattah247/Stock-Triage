@@ -400,6 +400,72 @@ def test_run_extract_captures_segment_metrics(tmp_config):
         rconn.close()
 
 
+def test_run_extract_detects_financial_note_nuance_events(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-note-nuance-1",
+        document_type="annual_report",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025"},
+        title="Annual Report 2024",
+        chunks=[
+            (
+                0,
+                10,
+                "Independent Auditor Report",
+                "The auditor issued a qualified opinion and noted material uncertainty related to going concern.",
+            ),
+            (
+                1,
+                45,
+                "Notes to Financial Statements",
+                "The Company requested a waiver for covenant compliance. Related party transactions remain material. The notes also describe contingent liabilities and commitments.",
+            ),
+            (
+                2,
+                60,
+                "Financial Highlights",
+                "Revenue 5,082,099\nGross profit 2,145,824\nOperating profit 1,420,000\nNet profit 820,000\nTotal Assets 4,000,000\nTotal Liabilities 1,600,000\nEquity 2,400,000\nOperating cash flow 200,000",
+            ),
+        ],
+    )
+
+    result = run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    assert result.selected == 1
+    assert result.partial == 1
+    assert result.events >= 5
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        rows = rconn.execute(
+            """
+            SELECT event_type, severity, impact_direction, confidence, payload_json
+            FROM events
+            WHERE document_id = ?
+            ORDER BY event_type
+            """,
+            (document_id,),
+        ).fetchall()
+        event_types = [row["event_type"] for row in rows]
+        assert {
+            "qualified_audit_opinion",
+            "going_concern_warning",
+            "covenant_stress",
+            "related_party_transaction",
+            "contingent_liability",
+        }.issubset(set(event_types))
+        event_map = {row["event_type"]: dict(row) for row in rows}
+        assert event_map["qualified_audit_opinion"]["severity"] == "critical"
+        assert event_map["going_concern_warning"]["impact_direction"] == "negative"
+        assert event_map["covenant_stress"]["confidence"] == 0.92
+        assert json.loads(event_map["related_party_transaction"]["payload_json"])["section_label"] == "Notes to Financial Statements"
+    finally:
+        rconn.close()
+
+
 def test_parse_status_counts_extracted_documents_as_parse_complete(tmp_config):
     _insert_parsed_document(
         tmp_config,
