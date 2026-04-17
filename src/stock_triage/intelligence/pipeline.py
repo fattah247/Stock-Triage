@@ -341,6 +341,14 @@ class SectionCue:
 
 
 @dataclass(frozen=True)
+class FocusHistoryRow:
+    document_id: str
+    document_type: str | None
+    as_of: str
+    focus_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -638,6 +646,8 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         conn,
         document_ids=[document.document_id for document in documents],
     )
+    focus_history = _load_focus_history(conn, documents[:5])
+    persistent_risk_signals = _build_persistent_risk_signals(focus_history)
     nuance_findings = _build_nuance_findings(
         ticker=ticker,
         latest_document=latest_document,
@@ -694,6 +704,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         uncertainty_rows=uncertainty_rows,
         next_read_guidance=next_read_guidance,
         contradiction_rows=contradiction_rows,
+        persistent_risk_signals=persistent_risk_signals,
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
@@ -1108,6 +1119,35 @@ def _load_document_events(conn: sqlite3.Connection, document_id: str) -> list[Ev
         )
         for row in rows
     ]
+
+
+def _load_focus_history(
+    conn: sqlite3.Connection,
+    documents: list[CompanyDocument],
+) -> list[FocusHistoryRow]:
+    rows: list[FocusHistoryRow] = []
+    for document in documents:
+        events = _load_document_events(conn, document.document_id)
+        rules = _load_triggered_rules(conn, document.document_id)
+        focus_keys: set[str] = set()
+        event_types = {event.event_type for event in events}
+        rule_names = {rule.rule_name for rule in rules}
+        if event_types & {"rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue", "use_of_proceeds"} or rule_names & {"funding_event", "dilution_event"}:
+            focus_keys.add("capital_allocation")
+        if event_types & {"lawsuit", "regulatory_action", "regulator_supervision", "special_supervision", "business_restriction"}:
+            focus_keys.add("legal_regulatory")
+        if event_types & {"qualified_audit_opinion", "going_concern_warning", "contingent_liability", "covenant_stress"}:
+            focus_keys.add("accounting_audit")
+        if focus_keys:
+            rows.append(
+                FocusHistoryRow(
+                    document_id=document.document_id,
+                    document_type=document.document_type,
+                    as_of=document.source_modified_at or document.updated_at,
+                    focus_keys=tuple(sorted(focus_keys)),
+                )
+            )
+    return rows
 
 
 def _load_triggered_rules(conn: sqlite3.Connection, document_id: str) -> list[TriggeredRule]:
@@ -2858,6 +2898,7 @@ def _build_unresolved_nuance_summary(
     uncertainty_rows: list[UncertaintyRecord],
     contradiction_rows: list[ContradictionRecord],
     next_read_guidance: list[NextReadRecord],
+    persistent_risk_signals: list[dict[str, Any]],
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
@@ -2930,6 +2971,16 @@ def _build_unresolved_nuance_summary(
         grouped.values(),
         key=lambda item: (-severity_rank.get(str(item["severity"]), 0), -int(item["count"]), str(item["label"])),
     )[:4]
+    persistent_focus = [
+        {
+            "focus_key": item["focus_key"],
+            "label": item["label"],
+            "repeat_count": item["repeat_count"],
+            "summary": item["summary"],
+            "severity": item["severity"],
+        }
+        for item in persistent_risk_signals[:3]
+    ]
     next_action = None
     if next_read_guidance:
         first = next_read_guidance[0]
@@ -2943,6 +2994,7 @@ def _build_unresolved_nuance_summary(
         "critical_count": sum(1 for entry in entries if str(entry["severity"]) == "critical"),
         "human_review_count": len(entries),
         "focus_rows": focus_rows,
+        "persistent_focus": persistent_focus,
         "next_action": next_action,
     }
 
@@ -2983,6 +3035,36 @@ def _focus_bucket_label(focus_key: str) -> str:
     return labels.get(focus_key, focus_key.replace("_", " ").title())
 
 
+def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[FocusHistoryRow]] = {}
+    for row in history_rows:
+        for focus_key in row.focus_keys:
+            grouped.setdefault(focus_key, []).append(row)
+    severity_map = {
+        "legal_regulatory": "critical",
+        "accounting_audit": "critical",
+        "capital_allocation": "warning",
+    }
+    rows: list[dict[str, Any]] = []
+    for focus_key, docs in grouped.items():
+        if len(docs) < 2:
+            continue
+        docs_sorted = sorted(docs, key=lambda item: (item.as_of, item.document_id), reverse=True)
+        rows.append(
+            {
+                "focus_key": focus_key,
+                "label": _focus_bucket_label(focus_key),
+                "repeat_count": len(docs),
+                "severity": severity_map.get(focus_key, "warning"),
+                "summary": f"{_focus_bucket_label(focus_key)} issues repeated across {len(docs)} of the last {len(history_rows)} analyzed filings.",
+                "document_ids": [item.document_id for item in docs_sorted[:3]],
+                "latest_as_of": docs_sorted[0].as_of,
+            }
+        )
+    rows.sort(key=lambda item: (0 if item["severity"] == "critical" else 1, -int(item["repeat_count"]), str(item["focus_key"])))
+    return rows
+
+
 def _build_snapshot_payload_json(
     *,
     profile: CompanyProfile,
@@ -2998,6 +3080,7 @@ def _build_snapshot_payload_json(
     uncertainty_rows: list[UncertaintyRecord],
     next_read_guidance: list[NextReadRecord],
     contradiction_rows: list[ContradictionRecord],
+    persistent_risk_signals: list[dict[str, Any]],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
@@ -3048,6 +3131,7 @@ def _build_snapshot_payload_json(
         uncertainty_rows=uncertainty_rows,
         contradiction_rows=contradiction_rows,
         next_read_guidance=next_read_guidance,
+        persistent_risk_signals=persistent_risk_signals,
     )
     payload = {
         "ticker": profile.ticker,
@@ -3087,6 +3171,7 @@ def _build_snapshot_payload_json(
         "decision_panel": decision_panel,
         "recommendation": decision_panel.get("recommendation"),
         "unresolved_nuance_summary": unresolved_nuance_summary,
+        "persistent_risk_signals": persistent_risk_signals,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "fiscal_year_end_source": profile.fiscal_year_end_source,
         "filing_expectations": [

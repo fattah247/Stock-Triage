@@ -17,6 +17,7 @@ from stock_triage.intelligence.pipeline import (
     EvidenceContext,
     EventSignal,
     FilingExpectationRecord,
+    FocusHistoryRow,
     MetricPoint,
     NextReadRecord,
     NuanceFindingRecord,
@@ -25,6 +26,7 @@ from stock_triage.intelligence.pipeline import (
     _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
+    _build_persistent_risk_signals,
     _build_unresolved_nuance_summary,
     _build_uncertainty_rows,
     _rank_next_read_rows,
@@ -1279,11 +1281,48 @@ def test_build_unresolved_nuance_summary_groups_focuses():
                 payload_json="{}",
             )
         ],
+        persistent_risk_signals=[],
     )
 
     assert summary["critical_count"] == 4
     assert summary["focus_rows"][0]["label"] == "Legal / Regulatory"
     assert summary["next_action"]["why_this_matters"] == "Read the legal section first."
+
+
+def test_build_persistent_risk_signals_repeats_focus_across_filings():
+    rows = _build_persistent_risk_signals(
+        [
+            FocusHistoryRow(
+                document_id="doc-1",
+                document_type="annual_report",
+                as_of="2026-04-01T00:00:00+00:00",
+                focus_keys=("capital_allocation", "legal_regulatory"),
+            ),
+            FocusHistoryRow(
+                document_id="doc-2",
+                document_type="financial_statement",
+                as_of="2025-12-31T00:00:00+00:00",
+                focus_keys=("capital_allocation",),
+            ),
+            FocusHistoryRow(
+                document_id="doc-3",
+                document_type="annual_report",
+                as_of="2025-06-30T00:00:00+00:00",
+                focus_keys=("accounting_audit",),
+            ),
+            FocusHistoryRow(
+                document_id="doc-4",
+                document_type="annual_report",
+                as_of="2024-12-31T00:00:00+00:00",
+                focus_keys=("accounting_audit",),
+            ),
+        ]
+    )
+
+    assert rows[0]["focus_key"] == "accounting_audit"
+    assert rows[0]["repeat_count"] == 2
+    assert rows[1]["focus_key"] == "capital_allocation"
+    assert rows[1]["repeat_count"] == 2
 
 
 def test_build_uncertainty_rows_marks_regulatory_restriction_context():

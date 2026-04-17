@@ -1226,6 +1226,7 @@
         const contradictionRows = (payload.contradiction_rows || []).slice(0, 5);
         const unresolvedNuance = payload.unresolved_nuance_summary || {};
         const unresolvedFocusRows = (unresolvedNuance.focus_rows || []).slice(0, 4);
+        const persistentRiskSignals = (payload.persistent_risk_signals || []).slice(0, 3);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1253,6 +1254,20 @@
                   .join("")}</div>`
               : ""
           }
+          ${
+            persistentRiskSignals.length
+              ? `<div class="findingStack">${persistentRiskSignals
+                  .map(
+                    (item) => `
+                      <article class="findingCard sev-${statusTag(item.severity || "warning")}">
+                        <div class="findingClaim">${esc(item.label || "Persistent risk")} · repeated ${esc(item.repeat_count || 0)} filings</div>
+                        <div class="meta">${esc(item.summary || "")}</div>
+                      </article>
+                    `
+                  )
+                  .join("")}</div>`
+              : ""
+          }
           <div class="findingStack">
             <article class="findingCard">
               <div class="findingClaim">Baseline and review context</div>
@@ -1270,6 +1285,7 @@
               <div class="meta"><strong>Quality flags:</strong> ${(decisionPanel.quality_flags || []).map(esc).join(" · ") || "No explicit quality flags right now."}</div>
               <div class="meta"><strong>Narrative signals:</strong> ${narrativeSignals.map(esc).join(" · ") || "No stronger narrative cues extracted yet."}</div>
               <div class="meta"><strong>Unresolved focus:</strong> ${unresolvedFocusRows.map((item) => esc(item.label)).join(" · ") || "No dominant unresolved focus class."}</div>
+              <div class="meta"><strong>Persistent focus:</strong> ${persistentRiskSignals.map((item) => `${esc(item.label)} (${esc(item.repeat_count)})`).join(" · ") || "No repeated focus class across recent filings."}</div>
               <div class="meta"><strong>Next nuance action:</strong> ${esc(unresolvedNuance.next_action?.why_this_matters || "No explicit next action beyond the standard reading queue.")}</div>
             </article>
           </div>
@@ -1723,6 +1739,7 @@
                           <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
                           <div class="meta">score ${esc(item.score || 0)} · ${esc(item.decision_state || "—")} · confidence ${esc(item.confidence || "—")} · overall ${esc(item.overall_state || "—")}</div>
                           <div class="meta">dominant focus ${esc(item.dominant_focus_label || "—")} · count ${esc(item.dominant_focus_count || 0)}</div>
+                          <div class="meta">persistent focus ${esc(item.persistent_focus_label || "—")} · repeat ${esc(item.persistent_focus_repeat_count || 0)}</div>
                           <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No explicit unresolved reasons captured."}</div>
                           <div class="meta">${esc(item.next_action || "No ranked next action captured yet.")}</div>
                           <div class="meta">note scopes ${esc(item.note_scope_count || 0)} · contradictions ${esc(item.contradiction_count || 0)} · coverage gaps ${esc(item.coverage_gap_count || 0)}</div>

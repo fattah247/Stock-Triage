@@ -1259,6 +1259,8 @@ def _build_snapshot_nuance_audit_row(
     unresolved_summary = payload.get("unresolved_nuance_summary") or {}
     focus_rows = list(unresolved_summary.get("focus_rows") or [])
     dominant_focus = focus_rows[0] if focus_rows else None
+    persistent_signals = list(payload.get("persistent_risk_signals") or [])
+    persistent_top = persistent_signals[0] if persistent_signals else None
 
     contradiction_count = len(contradiction_rows)
     critical_contradictions = sum(1 for row in contradiction_rows if str(row.get("severity") or "") == "critical")
@@ -1292,6 +1294,8 @@ def _build_snapshot_nuance_audit_row(
         + blocked_coverage_count * 2
         + max(0, coverage_gap_count - blocked_coverage_count)
     )
+    if persistent_top:
+        score += int(persistent_top.get("repeat_count") or 0) * (6 if str(persistent_top.get("severity")) == "critical" else 3)
     reasons: list[str] = []
     if critical_contradictions:
         reasons.append(f"{critical_contradictions} critical contradiction row(s) need review")
@@ -1305,6 +1309,8 @@ def _build_snapshot_nuance_audit_row(
         reasons.append(f"{late_filing_count} filing expectation(s) are already late")
     if blocked_coverage_count:
         reasons.append(f"{blocked_coverage_count} blocked coverage obligation(s) limit confidence")
+    if persistent_top:
+        reasons.append(str(persistent_top.get("summary") or "A risk focus repeats across recent filings"))
     if not reasons and next_read_guidance:
         reasons.append(f"{len(next_read_guidance)} ranked next-read target(s) remain open")
 
@@ -1327,6 +1333,8 @@ def _build_snapshot_nuance_audit_row(
         "reasons": reasons[:3],
         "dominant_focus_label": dominant_focus.get("label") if dominant_focus else None,
         "dominant_focus_count": dominant_focus.get("count") if dominant_focus else 0,
+        "persistent_focus_label": persistent_top.get("label") if persistent_top else None,
+        "persistent_focus_repeat_count": persistent_top.get("repeat_count") if persistent_top else 0,
         "next_action": (unresolved_summary.get("next_action") or {}).get("why_this_matters"),
         "updated_at": updated_at,
     }
