@@ -1334,8 +1334,10 @@ def test_build_persistent_risk_signals_repeats_focus_across_filings():
 
     assert rows[0]["focus_key"] == "accounting_audit"
     assert rows[0]["repeat_count"] == 2
+    assert rows[0]["persistence_state"] == "reappeared"
     assert rows[1]["focus_key"] == "capital_allocation"
     assert rows[1]["repeat_count"] == 2
+    assert rows[1]["persistence_state"] == "active"
 
 
 def test_build_persistent_contradiction_signals_repeats_across_filings():
@@ -1380,8 +1382,59 @@ def test_build_persistent_contradiction_signals_repeats_across_filings():
     assert rows[0]["repeat_count"] == 2
     assert rows[0]["severity"] == "critical"
     assert "persists across 2 recent analyzed filings" in rows[0]["summary"]
+    assert rows[0]["persistence_state"] == "active"
     assert rows[1]["contradiction_class"] == "mixed_contract_signals"
     assert rows[1]["repeat_count"] == 2
+    assert rows[1]["persistence_state"] == "reappeared"
+
+
+def test_build_persistent_risk_signals_marks_reappeared_after_gap():
+    rows = _build_persistent_risk_signals(
+        [
+            FocusHistoryRow(
+                document_id="doc-1",
+                document_type="annual_report",
+                as_of="2026-04-15T00:00:00+00:00",
+                focus_keys=("legal_regulatory",),
+            ),
+            FocusHistoryRow(
+                document_id="doc-2",
+                document_type="annual_report",
+                as_of="2025-08-01T00:00:00+00:00",
+                focus_keys=("legal_regulatory",),
+            ),
+        ]
+    )
+
+    assert rows[0]["persistence_state"] == "reappeared"
+    assert rows[0]["gap_days"] >= 180
+    assert "Reappeared after" in rows[0]["summary"]
+
+
+def test_build_persistent_contradiction_signals_marks_active_when_recent():
+    rows = _build_persistent_contradiction_signals(
+        [
+            ContradictionHistoryRow(
+                document_id="doc-1",
+                document_type="annual_report",
+                as_of="2026-04-15T00:00:00+00:00",
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                source_claim_id="claim-1",
+            ),
+            ContradictionHistoryRow(
+                document_id="doc-2",
+                document_type="financial_statement",
+                as_of="2026-01-15T00:00:00+00:00",
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                source_claim_id="claim-2",
+            ),
+        ]
+    )
+
+    assert rows[0]["persistence_state"] == "active"
+    assert rows[0]["latest_age_days"] <= 120
 
 
 def test_build_uncertainty_rows_marks_regulatory_restriction_context():

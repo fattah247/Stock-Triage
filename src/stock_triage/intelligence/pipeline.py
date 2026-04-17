@@ -3058,6 +3058,10 @@ def _build_unresolved_nuance_summary(
             "repeat_count": item["repeat_count"],
             "summary": item["summary"],
             "severity": item["severity"],
+            "latest_age_days": item.get("latest_age_days"),
+            "gap_days": item.get("gap_days"),
+            "recency_band": item.get("recency_band"),
+            "persistence_state": item.get("persistence_state"),
         }
         for item in persistent_risk_signals[:3]
     ]
@@ -3068,6 +3072,10 @@ def _build_unresolved_nuance_summary(
             "repeat_count": item["repeat_count"],
             "summary": item["summary"],
             "severity": item["severity"],
+            "latest_age_days": item.get("latest_age_days"),
+            "gap_days": item.get("gap_days"),
+            "recency_band": item.get("recency_band"),
+            "persistence_state": item.get("persistence_state"),
         }
         for item in persistent_contradiction_signals[:3]
     ]
@@ -3135,6 +3143,33 @@ def _contradiction_label(contradiction_class: str) -> str:
     return labels.get(contradiction_class, contradiction_class.replace("_", " ").title())
 
 
+def _persistence_recency_meta(as_of_values: list[str], *, today: date | None = None) -> dict[str, Any]:
+    resolved_today = today or date.today()
+    parsed = sorted(
+        [value for value in (_parse_iso_datetime(item) for item in as_of_values) if value is not None],
+        reverse=True,
+    )
+    if not parsed:
+        return {
+            "latest_age_days": None,
+            "gap_days": None,
+            "recency_band": "unknown",
+            "persistence_state": "active",
+        }
+    latest_age_days = max(0, (resolved_today - parsed[0].date()).days)
+    gap_days = None
+    if len(parsed) >= 2:
+        gap_days = max(0, (parsed[0].date() - parsed[1].date()).days)
+    recency_band = "current" if latest_age_days <= 120 else "recent" if latest_age_days <= 365 else "stale"
+    persistence_state = "stale" if latest_age_days > 365 else "reappeared" if (gap_days or 0) >= 180 else "active"
+    return {
+        "latest_age_days": latest_age_days,
+        "gap_days": gap_days,
+        "recency_band": recency_band,
+        "persistence_state": persistence_state,
+    }
+
+
 def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[dict[str, Any]]:
     grouped: dict[str, list[FocusHistoryRow]] = {}
     for row in history_rows:
@@ -3150,18 +3185,36 @@ def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[
         if len(docs) < 2:
             continue
         docs_sorted = sorted(docs, key=lambda item: (item.as_of, item.document_id), reverse=True)
+        recency_meta = _persistence_recency_meta([item.as_of for item in docs_sorted])
+        summary = f"{_focus_bucket_label(focus_key)} issues repeated across {len(docs)} of the last {len(history_rows)} analyzed filings."
+        if recency_meta["persistence_state"] == "reappeared":
+            summary += f" Reappeared after a {recency_meta['gap_days']}-day quiet gap."
+        elif recency_meta["persistence_state"] == "stale":
+            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days old."
         rows.append(
             {
                 "focus_key": focus_key,
                 "label": _focus_bucket_label(focus_key),
                 "repeat_count": len(docs),
                 "severity": severity_map.get(focus_key, "warning"),
-                "summary": f"{_focus_bucket_label(focus_key)} issues repeated across {len(docs)} of the last {len(history_rows)} analyzed filings.",
+                "summary": summary,
                 "document_ids": [item.document_id for item in docs_sorted[:3]],
                 "latest_as_of": docs_sorted[0].as_of,
+                "latest_age_days": recency_meta["latest_age_days"],
+                "gap_days": recency_meta["gap_days"],
+                "recency_band": recency_meta["recency_band"],
+                "persistence_state": recency_meta["persistence_state"],
             }
         )
-    rows.sort(key=lambda item: (0 if item["severity"] == "critical" else 1, -int(item["repeat_count"]), str(item["focus_key"])))
+    state_rank = {"active": 0, "reappeared": 1, "stale": 2}
+    rows.sort(
+        key=lambda item: (
+            0 if item["severity"] == "critical" else 1,
+            state_rank.get(str(item["persistence_state"]), 3),
+            -int(item["repeat_count"]),
+            str(item["focus_key"]),
+        )
+    )
     return rows
 
 
@@ -3178,9 +3231,14 @@ def _build_persistent_contradiction_signals(history_rows: list[ContradictionHist
         items_sorted = sorted(items, key=lambda item: (item.as_of, item.document_id), reverse=True)
         severity = max(items, key=lambda item: severity_rank.get(item.severity, 0)).severity
         repeated_claim_carry = contradiction_class == "claim_vs_outcome" and any(item.source_claim_id for item in items)
+        recency_meta = _persistence_recency_meta([item.as_of for item in items_sorted])
         summary = f"{_contradiction_label(contradiction_class)} contradiction remains unresolved across {len(unique_documents)} recent analyzed filings."
         if repeated_claim_carry:
             summary = f"Claim credibility contradiction persists across {len(unique_documents)} recent analyzed filings."
+        if recency_meta["persistence_state"] == "reappeared":
+            summary += f" Reappeared after a {recency_meta['gap_days']}-day quiet gap."
+        elif recency_meta["persistence_state"] == "stale":
+            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days old."
         rows.append(
             {
                 "contradiction_class": contradiction_class,
@@ -3190,11 +3248,17 @@ def _build_persistent_contradiction_signals(history_rows: list[ContradictionHist
                 "summary": summary,
                 "document_ids": [item.document_id for item in items_sorted[:3]],
                 "latest_as_of": items_sorted[0].as_of,
+                "latest_age_days": recency_meta["latest_age_days"],
+                "gap_days": recency_meta["gap_days"],
+                "recency_band": recency_meta["recency_band"],
+                "persistence_state": recency_meta["persistence_state"],
             }
         )
+    state_rank = {"active": 0, "reappeared": 1, "stale": 2}
     rows.sort(
         key=lambda item: (
             0 if item["severity"] == "critical" else 1,
+            state_rank.get(str(item["persistence_state"]), 3),
             -int(item["repeat_count"]),
             str(item["contradiction_class"]),
         )
