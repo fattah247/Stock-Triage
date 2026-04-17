@@ -165,21 +165,26 @@ def load_latest_golden_runs(cfg: Config, *, limit: int = 10) -> list[dict[str, o
             """,
             (DERIVED_VERSION, limit),
         ).fetchall()
-        return [
-            {
-                "golden_run_id": row["golden_run_id"],
-                "scope": row["scope"],
-                "target_ticker": row["target_ticker"],
-                "case_count": row["case_count"],
-                "passed_count": row["passed_count"],
-                "failed_count": row["failed_count"],
-                "warning_count": row["warning_count"],
-                "payload": json.loads(row["payload_json"] or "{}"),
-                "derived_version": row["derived_version"],
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        result_rows: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            result_rows.append(
+                {
+                    "golden_run_id": row["golden_run_id"],
+                    "scope": row["scope"],
+                    "target_ticker": row["target_ticker"],
+                    "case_count": row["case_count"],
+                    "passed_count": row["passed_count"],
+                    "failed_count": row["failed_count"],
+                    "warning_count": row["warning_count"],
+                    "payload": payload,
+                    "summary": payload.get("summary"),
+                    "no_case_reason": payload.get("no_case_reason"),
+                    "derived_version": row["derived_version"],
+                    "created_at": row["created_at"],
+                }
+            )
+        return result_rows
     finally:
         conn.close()
 
@@ -907,6 +912,53 @@ def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[s
         else:
             add_case("narrative_signal_quality", "fail", "Narrative signals exceed cap or are not deduplicated.")
 
+    no_case_reason: str | None = None
+    summary: str
+    if not rows:
+        if ticker:
+            ticker_upper = ticker.upper()
+            analyzed_docs = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM documents
+                WHERE ticker = ?
+                  AND process_state = 'analyzed'
+                """,
+                (ticker_upper,),
+            ).fetchone()["count"]
+            if analyzed_docs:
+                no_case_reason = (
+                    f"No current {DERIVED_VERSION} snapshot exists for {ticker_upper}. "
+                    "Run intelligence-rederive for this issuer."
+                )
+            else:
+                document_count = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM documents
+                    WHERE ticker = ?
+                    """,
+                    (ticker_upper,),
+                ).fetchone()["count"]
+                if document_count:
+                    no_case_reason = (
+                        f"{ticker_upper} has local documents, but none are analyzed yet. "
+                        "Run parse, extract, and rules before golden checks."
+                    )
+                else:
+                    no_case_reason = (
+                        f"{ticker_upper} has no local documents yet. "
+                        "Run discovery and download before golden checks."
+                    )
+        else:
+            no_case_reason = (
+                f"No current {DERIVED_VERSION} snapshots exist yet. "
+                "Run intelligence-rederive before golden checks."
+            )
+        summary = no_case_reason
+    else:
+        summary = f"Audited {len(rows)} snapshot row(s): {passed} passed, {failed} failed, {warning} warning."
+
     return {
         "scope": "ticker" if ticker else "snapshot_sample",
         "target_ticker": ticker.upper() if ticker else None,
@@ -915,6 +967,8 @@ def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[s
         "passed_count": passed,
         "failed_count": failed,
         "warning_count": warning,
+        "summary": summary,
+        "no_case_reason": no_case_reason,
         "cases": cases,
     }
 

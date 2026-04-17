@@ -12,6 +12,7 @@ from ..intelligence import DERIVED_VERSION, rederive_intelligence, run_intellige
 from ..intelligence.review import (
     load_intelligence_observability,
     load_intelligence_kpis,
+    load_latest_golden_runs,
     load_review_queue,
     run_golden_set,
     run_daily_digest,
@@ -149,6 +150,7 @@ def cmd_intelligence_golden(args: argparse.Namespace) -> int:
         ticker=args.ticker,
         limit=args.limit,
     )
+    payload = load_latest_golden_runs(cfg, limit=1)[0]
     print(
         "intelligence-golden: "
         f"derived_version={DERIVED_VERSION} "
@@ -160,6 +162,8 @@ def cmd_intelligence_golden(args: argparse.Namespace) -> int:
         f"failed_count={result.failed_count} "
         f"warning_count={result.warning_count}"
     )
+    if payload.get("summary"):
+        print(f"summary={payload['summary']}")
     return 0
 
 

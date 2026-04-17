@@ -1047,10 +1047,14 @@
       const hasDocuments = docs.length > 0;
       const hasDerivedSnapshot = Boolean(companySnapshot);
       const hasNormalizedFacts = metrics.length > 0;
+      const preview = data.company_rerun_preview || {};
+      const previewAnalyzedCount = Number(preview.analyzed_count ?? analyzedCount);
+      const previewFailedCount = Number(preview.failed_count ?? failedCount);
+      const previewLatestType = preview.latest_document_type || latestFiling?.document_type || "unknown";
       const summaryEmptyHtml = hasDocuments
-        ? analyzedCount > 0
-          ? `<div class="emptyState"><strong>No current v3 snapshot yet.</strong> This issuer already has ${analyzedCount} analyzed filing(s), so the missing piece is the derived intelligence layer. Use <strong>rebuild company intelligence</strong> first.</div>`
-          : `<div class="emptyState"><strong>No analyzed filing yet.</strong> Local documents exist for this issuer, but none are in the analyzed state. Run parse, extract, and rules on the newest filing before expecting a company snapshot.</div>`
+        ? previewAnalyzedCount > 0
+          ? `<div class="emptyState"><strong>No current v3 snapshot yet.</strong> This issuer already has ${previewAnalyzedCount} analyzed filing(s), so the missing piece is the derived intelligence layer. Use <strong>rebuild company intelligence</strong> first.</div>`
+          : `<div class="emptyState"><strong>No analyzed filing yet.</strong> Local documents exist for this issuer, but none are in the analyzed state yet. Latest document type: <strong>${esc(previewLatestType)}</strong>. Run parse, extract, and rules on the newest filing before expecting a company snapshot.</div>`
         : `<div class="emptyState"><strong>No filings downloaded for this issuer yet.</strong> Run discovery and download first. The company workspace only becomes useful after at least one filing is available locally.</div>`;
       const claimsEmptyHtml = hasDerivedSnapshot
         ? `<div class="emptyState"><strong>No claim or thesis state yet.</strong> This issuer has a snapshot, but no stable narrative or thesis evaluation has been generated yet. Generate summaries or wait for a newer filing.</div>`
@@ -1059,12 +1063,12 @@
         ? `<div class="emptyState"><strong>No peer or sector context yet.</strong> Comparative data is still thin for this issuer. Rebuild intelligence again after more peer issuers have current filings.</div>`
         : `<div class="emptyState"><strong>No peer or sector explorer yet.</strong> The context view appears once this issuer has a derived snapshot and enough peer data to compare against.</div>`;
       const metricsEmptyHtml = hasDocuments
-        ? analyzedCount > 0
+        ? previewAnalyzedCount > 0
           ? `<div class="emptyState"><strong>No normalized metrics yet.</strong> The issuer has analyzed filings, so extraction likely did not map any stable fields yet. Re-run extract on the newest filing if that looks wrong.</div>`
           : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Run parse and extract on the newest filing to populate revenue, cash flow, debt, and other normalized facts here.</div>`
         : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Download a filing for this issuer before expecting metrics.</div>`;
       const signalsEmptyHtml = hasNormalizedFacts || hasDocuments
-        ? analyzedCount > 0
+        ? previewAnalyzedCount > 0
           ? `<div class="emptyState"><strong>No findings yet.</strong> The issuer has analyzed filings, but rules or summaries have not surfaced signals yet. Re-run rules or summarize on the latest analyzed filing if this looks incomplete.</div>`
           : `<div class="emptyState"><strong>No findings yet.</strong> The issuer has local filings, but they are not analyzed yet. Parse, extract, and rules must finish before findings appear.</div>`
         : `<div class="emptyState"><strong>No findings yet.</strong> Findings appear after at least one filing is downloaded and processed.</div>`;
@@ -1086,16 +1090,16 @@
               </div>`
             : hasDocuments
               ? `<div class="findingStack">
-                  <article class="findingCard sev-${analyzedCount > 0 ? "warning" : "info"}">
+                  <article class="findingCard sev-${previewAnalyzedCount > 0 ? "warning" : "info"}">
                     <div class="findingClaim">Snapshot readiness</div>
-                    <div class="meta">Documents: ${docs.length} · analyzed: ${analyzedCount} · failed: ${failedCount}</div>
+                    <div class="meta">Documents: ${docs.length} · analyzed: ${previewAnalyzedCount} · failed: ${previewFailedCount} · latest type: ${esc(previewLatestType)}</div>
                     <div class="meta">${
-                      analyzedCount > 0
+                      previewAnalyzedCount > 0
                         ? "The source filings are analyzed, but the current derived intelligence layer has not been rebuilt for this issuer yet."
                         : "The issuer has local filings, but none have reached analyzed state yet."
                     }</div>
                     <div class="meta">${
-                      analyzedCount > 0
+                      previewAnalyzedCount > 0
                         ? "Next action: rebuild company intelligence."
                         : "Next action: parse, extract, and run rules on the newest filing before rebuilding intelligence."
                     }</div>
@@ -1509,20 +1513,39 @@
         <div class="meta">Recommendation buckets: ${Object.entries(recommendationBuckets).map(([name, count]) => `${name}=${count}`).join(" · ") || "none"}</div>
         <div class="meta">Latest golden run: ${
           latestGolden
-            ? `${esc(latestGolden.scope)} · ${esc(latestGolden.passed_count)}/${esc(latestGolden.case_count)} passed · ${renderTimestamp(latestGolden.created_at)}`
+            ? latestGolden.case_count > 0
+              ? `${esc(latestGolden.scope)} · ${esc(latestGolden.passed_count)}/${esc(latestGolden.case_count)} passed · ${renderTimestamp(latestGolden.created_at)}`
+              : `${esc(latestGolden.scope)} · no eligible cases · ${renderTimestamp(latestGolden.created_at)}`
             : "No persisted golden-set audit yet."
         }</div>
       `;
     }
     if (goldenList) {
       const rows = data.golden_rows || [];
+      const meaningfulRows = rows.filter((item) => Number(item.case_count || 0) > 0);
+      const zeroCaseRows = rows.filter((item) => Number(item.case_count || 0) === 0);
       goldenList.innerHTML = rows.length
-        ? `<table class="systemTable"><thead><tr><th>Run</th><th>Scope</th><th>Passed</th><th>Failed</th><th>Warnings</th><th>When</th></tr></thead><tbody>${rows
-            .map(
-              (item) =>
-                `<tr><td>${esc(item.golden_run_id)}</td><td>${esc(item.target_ticker || item.scope)}</td><td>${esc(item.passed_count)}</td><td>${esc(item.failed_count)}</td><td>${esc(item.warning_count)}</td><td>${renderTimestamp(item.created_at)}</td></tr>`
-            )
-            .join("")}</tbody></table>`
+        ? `${meaningfulRows.length
+            ? `<table class="systemTable"><thead><tr><th>Run</th><th>Scope</th><th>Passed</th><th>Failed</th><th>Warnings</th><th>Summary</th><th>When</th></tr></thead><tbody>${meaningfulRows
+                .map(
+                  (item) =>
+                    `<tr><td>${esc(item.golden_run_id)}</td><td>${esc(item.target_ticker || item.scope)}</td><td>${esc(item.passed_count)}</td><td>${esc(item.failed_count)}</td><td>${esc(item.warning_count)}</td><td>${esc(item.summary || "-")}</td><td>${renderTimestamp(item.created_at)}</td></tr>`
+                )
+                .join("")}</tbody></table>`
+            : ""}${zeroCaseRows.length
+            ? `<div class="findingStack">${zeroCaseRows
+                .slice(0, 3)
+                .map(
+                  (item) => `
+                    <article class="findingCard sev-info">
+                      <div class="findingClaim">${esc(item.target_ticker || item.scope)} · no eligible golden cases</div>
+                      <div class="meta">${esc(item.no_case_reason || item.summary || "No applicable current snapshot rows were available for this audit.")}</div>
+                      <div class="meta">${renderTimestamp(item.created_at)}</div>
+                    </article>
+                  `
+                )
+                .join("")}</div>${zeroCaseRows.length > 3 ? `<div class="meta">Additional zero-case runs hidden: ${esc(zeroCaseRows.length - 3)}</div>` : ""}`
+            : ""}`
         : `<div class="emptyState"><strong>No golden checks run yet.</strong> Use Run Golden Checks from Ops or from a company workspace.</div>`;
     }
     if (rerunPreviewList) {

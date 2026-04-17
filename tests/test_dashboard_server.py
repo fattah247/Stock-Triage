@@ -796,6 +796,27 @@ def test_market_monitor_falls_back_to_closest_recommendation_setups(tmp_config) 
         thread.join(timeout=5)
 
 
+def test_ops_detail_exposes_zero_case_golden_reason(tmp_config) -> None:
+    from stock_triage.intelligence.review import run_golden_set
+
+    _seed_phase8_data(tmp_config)
+    run_golden_set(tmp_config, ticker="TAMU", limit=1)
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        ops = json.loads(urlopen(f"{handle.url}/api/detail?section=ops").read().decode("utf-8"))
+        zero_case = next((row for row in ops["golden_rows"] if row["target_ticker"] == "TAMU"), None)
+        assert zero_case is not None
+        assert zero_case["case_count"] == 0
+        assert "no analyzed" in (zero_case["no_case_reason"] or "").lower() or "no current" in (zero_case["no_case_reason"] or "").lower()
+        assert zero_case["summary"]
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> None:
     monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
     seen = {}
