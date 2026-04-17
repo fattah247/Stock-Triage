@@ -1367,6 +1367,21 @@ def _build_coverage_bridge_row(
     if not blockers and coverage.get("blocked_reasons"):
         blockers.extend(list(coverage["blocked_reasons"])[:2])
 
+    recommended_action = "review-company-signals"
+    recommended_command = None
+    if document_count == 0:
+        recommended_action = "discover-missing"
+        recommended_command = f"python -m stock_triage coverage-preview discover-missing --scope ticker-set --ticker {ticker}"
+    elif analyzed_document_count == 0:
+        recommended_action = "process-missing"
+        recommended_command = f"python -m stock_triage coverage-preview process-missing --scope ticker-set --ticker {ticker}"
+    elif blocked_coverage_count > 0:
+        recommended_action = "rerun-blocked"
+        recommended_command = f"python -m stock_triage coverage-preview rerun-blocked --scope ticker-set --ticker {ticker}"
+    elif not snapshot_ready:
+        recommended_action = "rederive-company"
+        recommended_command = f"python -m stock_triage intelligence-rederive --ticker {ticker} --limit 1"
+
     return {
         "ticker": ticker,
         "issuer_name": issuer_name,
@@ -1378,6 +1393,8 @@ def _build_coverage_bridge_row(
         "document_count": document_count,
         "analyzed_document_count": analyzed_document_count,
         "blockers": blockers[:3],
+        "recommended_action": recommended_action,
+        "recommended_command": recommended_command,
         "latest_document_at": documents.get("latest_document_at"),
     }
 
@@ -1401,6 +1418,7 @@ def _build_target_nuance_audit(
             "state": "snapshot_ready",
             "leader": leader,
             "bridge": bridge,
+            "guidance_command": bridge.get("recommended_command") if bridge else None,
         }
     document_count = int(documents.get("document_count") or 0)
     analyzed_count = int(documents.get("analyzed_count") or 0)
@@ -1424,6 +1442,7 @@ def _build_target_nuance_audit(
         "failed_document_count": failed_count,
         "guidance": guidance,
         "bridge": bridge,
+        "guidance_command": bridge.get("recommended_command") if bridge else None,
     }
 
 

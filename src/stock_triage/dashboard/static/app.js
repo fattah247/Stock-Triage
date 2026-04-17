@@ -1718,6 +1718,7 @@
                           <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
                           <div class="meta">score ${esc(item.score || 0)} · coverage gaps ${esc(item.coverage_gap_count || 0)} · blocked ${esc(item.blocked_coverage_count || 0)} · snapshot ${item.snapshot_ready ? "ready" : "missing"}</div>
                           <div class="meta">${(item.blockers || []).map(esc).join(" · ") || "No explicit blockers captured."}</div>
+                          <div class="meta">${esc(item.recommended_action || "review-company-signals")}${item.recommended_command ? ` · <code>${esc(item.recommended_command)}</code>` : ""}</div>
                         </article>
                       `
                     )

@@ -102,6 +102,10 @@ def test_coverage_preview_and_nuance_audit_commands_are_scoped(tmp_config, monke
     assert audit_payload["audit"]["scope"] == "ticker"
     assert audit_payload["audit"]["target_ticker"] == "TAMU"
     assert "summary" in audit_payload["audit"]
+    target = audit_payload["audit"]["target"]
+    assert target["ticker"] == "TAMU"
+    if target.get("bridge"):
+        assert "recommended_command" in target["bridge"]
 
 
 def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
