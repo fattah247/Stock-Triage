@@ -975,6 +975,8 @@ def test_build_nuance_findings_uses_section_cues_without_events():
     assert row_map["legal_note_focus"].section_label == "Legal and Regulatory"
     assert json.loads(row_map["legal_note_focus"].payload_json)["excerpt_text"] == "The company discusses a lawsuit and regulatory sanction in this section."
     assert json.loads(row_map["legal_note_focus"].payload_json)["page_start"] == 44
+    assert json.loads(row_map["legal_note_focus"].payload_json)["stage"] == "active_process"
+    assert json.loads(row_map["legal_note_focus"].payload_json)["severity_context"] == "developing"
 
 
 def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
@@ -1066,6 +1068,54 @@ def test_build_next_read_guidance_carries_nuance_excerpt():
     assert rows[0].reason_class == "nuance_review"
     assert json.loads(rows[0].payload_json)["excerpt_text"] == "Basis for qualified opinion paragraph."
     assert json.loads(rows[0].payload_json)["page_start"] == 7
+
+
+def test_build_uncertainty_rows_marks_regulatory_restriction_context():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+    baseline = BaselineChoice(
+        kind="prior_period",
+        document=latest_document,
+        comparable=True,
+        reason="Comparable prior filing exists.",
+    )
+
+    rows = _build_uncertainty_rows(
+        ticker="TAMU",
+        latest_document=latest_document,
+        baseline=baseline,
+        events=[],
+        review_items=[],
+        peer_view={},
+        filing_expectations=[],
+        evidence_context={},
+        section_cues=[
+            type("Cue", (), {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "section_label": "Legal and Regulatory",
+                "page_start": 21,
+                "page_end": 22,
+                "text": "The company is under special supervision and faces pembatasan kegiatan usaha from the regulator.",
+                "excerpt_text": "The company is under special supervision and faces pembatasan kegiatan usaha from the regulator.",
+            })()
+        ],
+    )
+
+    row_map = {row.uncertainty_class: row for row in rows}
+    payload = json.loads(row_map["regulatory_severity_scope"].payload_json)
+    assert payload["operational_restriction"] is True
+    assert payload["severity_context"] == "material"
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

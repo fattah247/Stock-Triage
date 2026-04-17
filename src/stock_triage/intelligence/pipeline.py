@@ -1684,6 +1684,10 @@ def _build_nuance_findings(
                         "matched_keywords": clue.get("matched_keywords"),
                         "page_start": clue.get("page_start"),
                         "page_end": clue.get("page_end"),
+                        "stage": (clue.get("legal_context") or {}).get("stage"),
+                        "operational_restriction": (clue.get("legal_context") or {}).get("operational_restriction"),
+                        "monetary_exposure": (clue.get("legal_context") or {}).get("monetary_exposure"),
+                        "severity_context": (clue.get("legal_context") or {}).get("severity_context"),
                     },
                     sort_keys=True,
                 ),
@@ -1705,7 +1709,74 @@ def _nuance_summary_for_event(*, event: EventSignal, context: EvidenceContext | 
         return f"Related-party activity appears{f' in {section}' if section else ''}; terms and value transfer need note-level review."
     if event.event_type == "contingent_liability":
         return f"Contingent liabilities appear{f' in {section}' if section else ''}; exposure size and trigger conditions need note review."
+    if event.event_type in {"lawsuit", "regulatory_action"}:
+        context_row = _classify_legal_regulatory_context(
+            text=(context.excerpt_text if context and context.excerpt_text else event.rationale or ""),
+            event_type=event.event_type,
+        )
+        return (
+            f"{'Legal' if event.event_type == 'lawsuit' else 'Regulatory'} disclosure appears"
+            f"{f' in {section}' if section else ''}; {context_row['summary_fragment']}"
+        )
     return event.rationale or f"{event.event_type.replace('_', ' ')} requires review."
+
+
+def _classify_legal_regulatory_context(*, text: str, event_type: str) -> dict[str, Any]:
+    lowered = (text or "").lower()
+    stage = "procedural"
+    if re.search(r"putusan|judgment|award|diputus|final and binding|inkracht|denda|fine imposed|sanksi administratif", lowered, flags=re.IGNORECASE):
+        stage = "resolved_adverse"
+    elif re.search(r"gugatan|lawsuit|litigation|arbitration|claim|class action|sengketa|investigation|probe|penyelidikan|penyidikan|pemeriksaan|examined|under review|special supervision", lowered, flags=re.IGNORECASE):
+        stage = "active_process"
+
+    operational_restriction = bool(
+        re.search(
+            r"special supervision|pembatasan kegiatan usaha|restriction|restricted|suspension|pembekuan|izin.*dicabut|license revoked|stop operations|penghentian kegiatan",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+    )
+    monetary_exposure = bool(
+        re.search(
+            r"(?:rp|idr|usd)\s?[\d\.,]+|\b\d[\d\.,]*\s?(?:miliar|juta|billion|million)\b|material amount|nilai material",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+    )
+    severity_context = "procedural"
+    if operational_restriction or stage == "resolved_adverse":
+        severity_context = "material"
+    elif monetary_exposure or stage == "active_process":
+        severity_context = "developing"
+
+    if event_type == "lawsuit":
+        summary_fragment = "read the case stage, claimed amount, and downside exposure directly."
+        if operational_restriction:
+            summary_fragment = "the filing suggests operational restriction risk; read the case stage, remedies, and business impact directly."
+        elif stage == "resolved_adverse":
+            summary_fragment = "the filing suggests an adverse legal outcome; read the judgment, payable amount, and remedy directly."
+        elif monetary_exposure:
+            summary_fragment = "the filing suggests a monetary claim or settlement amount; read the claim size and downside exposure directly."
+        elif stage == "active_process":
+            summary_fragment = "the filing suggests an active legal process; read the case stage and management defense directly."
+    else:
+        summary_fragment = "read the restriction scope, remedy, and remediation burden directly."
+        if operational_restriction:
+            summary_fragment = "the filing suggests an active business restriction or supervision regime; read the scope and remediation timeline directly."
+        elif stage == "resolved_adverse":
+            summary_fragment = "the filing suggests an imposed sanction or fine; read the remedy, amount, and compliance obligations directly."
+        elif monetary_exposure:
+            summary_fragment = "the filing suggests monetary sanction exposure; read the amount, timetable, and remedy directly."
+        elif stage == "active_process":
+            summary_fragment = "the filing suggests an active regulatory review or supervision process; read the trigger and expected remedy directly."
+
+    return {
+        "stage": stage,
+        "operational_restriction": operational_restriction,
+        "monetary_exposure": monetary_exposure,
+        "severity_context": severity_context,
+        "summary_fragment": summary_fragment,
+    }
 
 
 def _build_section_nuance_clues(
@@ -1760,7 +1831,7 @@ def _build_section_nuance_clues(
             "critical",
             {"Legal and Regulatory", "Notes to Financial Statements"},
             [r"lawsuit", r"litigation", r"gugatan", r"sengketa hukum", r"legal dispute"],
-            "Legal dispute language appears in the latest filing. Read the case stage, claimed amount, and exposure note directly.",
+            None,
             {"lawsuit"},
         ),
         (
@@ -1768,7 +1839,7 @@ def _build_section_nuance_clues(
             "critical",
             {"Legal and Regulatory", "Governance"},
             [r"regulatory", r"sanksi", r"otoritas jasa keuangan", r"special supervision", r"pembatasan kegiatan usaha"],
-            "Regulatory sanction or restriction language appears in the filing. Read the scope, remedy, and timing directly.",
+            None,
             {"regulatory_action", "regulator_supervision", "special_supervision", "business_restriction"},
         ),
     ]
@@ -1789,16 +1860,29 @@ def _build_section_nuance_clues(
             if key in seen:
                 continue
             seen.add(key)
+            legal_context = None
+            resolved_summary = summary
+            if nuance_class in {"legal_note_focus", "regulatory_note_focus"}:
+                legal_context = _classify_legal_regulatory_context(
+                    text=cue.text,
+                    event_type="lawsuit" if nuance_class == "legal_note_focus" else "regulatory_action",
+                )
+                resolved_summary = (
+                    "Legal dispute language appears in the latest filing; "
+                    if nuance_class == "legal_note_focus"
+                    else "Regulatory sanction or restriction language appears in the filing; "
+                ) + str(legal_context["summary_fragment"])
             clues.append(
                 {
                     "nuance_class": nuance_class,
                     "severity": severity,
                     "section_label": cue.section_label,
-                    "summary": summary,
+                    "summary": resolved_summary,
                     "excerpt_text": cue.excerpt_text,
                     "matched_keywords": matched,
                     "page_start": cue.page_start,
                     "page_end": cue.page_end,
+                    "legal_context": legal_context,
                 }
             )
     return clues
@@ -1919,12 +2003,12 @@ def _build_uncertainty_rows(
         "lawsuit": (
             "legal_severity_scope",
             "critical",
-            "Legal disclosures need direct reading to judge claim size, stage, and operational risk.",
+            None,
         ),
         "regulatory_action": (
             "regulatory_severity_scope",
             "critical",
-            "Regulatory disclosures need direct reading to judge restriction scope and remediation burden.",
+            None,
         ),
     }
     for event in events:
@@ -1937,7 +2021,18 @@ def _build_uncertainty_rows(
             document_id=latest_document.document_id,
         )
         section = context.section_label if context and context.section_label else None
-        summary = base_summary if section is None else f"{base_summary} Focus on {section}."
+        legal_context = None
+        if event.event_type in {"lawsuit", "regulatory_action"}:
+            legal_context = _classify_legal_regulatory_context(
+                text=context.excerpt_text if context and context.excerpt_text else event.rationale or "",
+                event_type=event.event_type,
+            )
+            prefix = "Legal disclosures need direct reading" if event.event_type == "lawsuit" else "Regulatory disclosures need direct reading"
+            summary = f"{prefix} because {legal_context['summary_fragment']}"
+        else:
+            summary = base_summary
+        if section is not None:
+            summary = f"{summary} Focus on {section}."
         rows.append(
             UncertaintyRecord(
                 uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, event.event_id, uncertainty_class, DERIVED_VERSION),
@@ -1956,6 +2051,10 @@ def _build_uncertainty_rows(
                         "event_type": event.event_type,
                         "section_label": section,
                         "impact_direction": event.impact_direction,
+                        "stage": legal_context.get("stage") if legal_context else None,
+                        "operational_restriction": legal_context.get("operational_restriction") if legal_context else None,
+                        "monetary_exposure": legal_context.get("monetary_exposure") if legal_context else None,
+                        "severity_context": legal_context.get("severity_context") if legal_context else None,
                     },
                     sort_keys=True,
                 ),
@@ -1986,6 +2085,10 @@ def _build_uncertainty_rows(
                         "matched_keywords": clue.get("matched_keywords"),
                         "page_start": clue.get("page_start"),
                         "page_end": clue.get("page_end"),
+                        "stage": clue.get("stage"),
+                        "operational_restriction": clue.get("operational_restriction"),
+                        "monetary_exposure": clue.get("monetary_exposure"),
+                        "severity_context": clue.get("severity_context"),
                     },
                     sort_keys=True,
                 ),
@@ -2120,14 +2223,14 @@ def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, 
             "critical",
             {"Legal and Regulatory", "Notes to Financial Statements"},
             [r"lawsuit", r"litigation", r"gugatan", r"sengketa hukum"],
-            "Legal dispute language appears in this section. Read the claim stage and monetary exposure directly.",
+            None,
         ),
         (
             "regulatory_severity_scope",
             "critical",
             {"Legal and Regulatory", "Governance"},
             [r"regulatory", r"sanksi", r"otoritas jasa keuangan", r"special supervision", r"pembatasan kegiatan usaha"],
-            "Regulatory restriction language appears in this section. Read the sanction scope and remediation directly.",
+            None,
         ),
     ]
     seen: set[tuple[str, str | None]] = set()
@@ -2146,16 +2249,29 @@ def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, 
             if key in seen:
                 continue
             seen.add(key)
+            legal_context = None
+            resolved_summary = summary
+            if uncertainty_class in {"legal_severity_scope", "regulatory_severity_scope"}:
+                legal_context = _classify_legal_regulatory_context(
+                    text=cue.text,
+                    event_type="lawsuit" if uncertainty_class == "legal_severity_scope" else "regulatory_action",
+                )
+                prefix = "Legal dispute language appears in this section." if uncertainty_class == "legal_severity_scope" else "Regulatory restriction language appears in this section."
+                resolved_summary = f"{prefix} {legal_context['summary_fragment']}"
             cues.append(
                 {
                     "uncertainty_class": uncertainty_class,
                     "severity": severity,
                     "section_label": section_label,
-                    "summary": summary,
+                    "summary": resolved_summary,
                     "excerpt_text": cue.excerpt_text,
                     "matched_keywords": matched,
                     "page_start": cue.page_start,
                     "page_end": cue.page_end,
+                    "stage": legal_context.get("stage") if legal_context else None,
+                    "operational_restriction": legal_context.get("operational_restriction") if legal_context else None,
+                    "monetary_exposure": legal_context.get("monetary_exposure") if legal_context else None,
+                    "severity_context": legal_context.get("severity_context") if legal_context else None,
                 }
             )
     return cues
