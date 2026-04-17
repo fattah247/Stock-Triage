@@ -6,6 +6,7 @@ from stock_triage.alerts import run_alerts
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.intelligence import run_intelligence
 from stock_triage.intelligence.review import (
+    _group_review_rows,
     load_intelligence_kpis,
     load_review_queue,
     run_daily_digest,
@@ -100,3 +101,52 @@ def test_phase15_migration_applies(tmp_config):
     with WriterQueue(tmp_config) as wq:
         applied = wq.submit(run_migrations)
     assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+
+def test_group_review_rows_collapse_persistence_into_issue_family():
+    rows = _group_review_rows(
+        [
+            {
+                "review_item_id": "r1",
+                "item_type": "event_signal",
+                "ticker": "TAMU",
+                "document_id": "doc-1",
+                "source_key": "event:lawsuit",
+                "priority": "high",
+                "status": "open",
+                "rationale": "Active lawsuit needs review.",
+                "payload": {"event_type": "lawsuit"},
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "updated_at": "2026-04-18T00:00:00+00:00",
+                "source_name": "idx_disclosures",
+                "local_path": None,
+                "as_of_date": "2026-04-18T00:00:00+00:00",
+                "decision_state": "Review manually",
+                "overall_state": "critical",
+            },
+            {
+                "review_item_id": "r2",
+                "item_type": "persistence_focus",
+                "ticker": "TAMU",
+                "document_id": "doc-1",
+                "source_key": "persist:legal",
+                "priority": "high",
+                "status": "open",
+                "rationale": "Legal / Regulatory issues repeated across recent analyzed filings.",
+                "payload": {"focus_key": "legal_regulatory", "persistence_state": "active"},
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "updated_at": "2026-04-18T00:00:00+00:00",
+                "source_name": "derived",
+                "local_path": None,
+                "as_of_date": "2026-04-18T00:00:00+00:00",
+                "decision_state": "Review manually",
+                "overall_state": "critical",
+            },
+        ],
+        limit=10,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["issue_family"] == "legal_regulatory"
+    assert rows[0]["group_count"] == 2
+    assert rows[0]["ranking_inputs"]["persistence_count"] == 1

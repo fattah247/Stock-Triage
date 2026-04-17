@@ -498,11 +498,15 @@ def _group_review_rows(rows: list[dict[str, object]], *, limit: int) -> list[dic
         high_count = sum(1 for item in members if item.get("priority") == "high")
         medium_count = sum(1 for item in members if item.get("priority") == "medium")
         low_count = sum(1 for item in members if item.get("priority") == "low")
+        persistence_count = sum(
+            1 for item in members if str(item.get("item_type") or "") in {"persistence_focus", "persistence_contradiction"}
+        )
         ranking_inputs = {
             "high_priority_count": high_count,
             "medium_priority_count": medium_count,
             "low_priority_count": low_count,
             "member_count": len(members),
+            "persistence_count": persistence_count,
             "decision_state_penalty": _DECISION_STATE_PENALTY.get(str(entry.get("decision_state") or "Watch"), 0),
         }
         rank_score = (
@@ -510,6 +514,7 @@ def _group_review_rows(rows: list[dict[str, object]], *, limit: int) -> list[dic
             + medium_count * 40
             + low_count * 10
             + len(members) * 8
+            + persistence_count * 25
             + _DECISION_STATE_PENALTY.get(str(entry.get("decision_state") or "Watch"), 0)
         )
         grouped_rows.append(
@@ -587,6 +592,10 @@ def _review_issue_family(row: dict[str, object]) -> str:
         return _issue_family_from_signal(str(payload.get("rule_name") or "rule"), signal_type="rule")
     if item_type == "event_signal":
         return _issue_family_from_signal(str(payload.get("event_type") or "event"), signal_type="event")
+    if item_type == "persistence_focus":
+        return _issue_family_from_persistence_focus(str(payload.get("focus_key") or "focus"))
+    if item_type == "persistence_contradiction":
+        return _issue_family_from_persistence_contradiction(str(payload.get("contradiction_class") or "contradiction"))
     if item_type.startswith("thesis_"):
         thesis_name = str(payload.get("thesis_name") or payload.get("thesis_id") or "thesis")
         return f"thesis:{thesis_name.lower()}"
@@ -622,6 +631,36 @@ def _issue_family_from_signal(name: str, *, signal_type: str) -> str:
     if any(token in normalized for token in ("guidance", "projection", "outlook")):
         return "guidance"
     return f"{signal_type}:{normalized}"
+
+
+def _issue_family_from_persistence_focus(focus_key: str) -> str:
+    normalized = focus_key.lower()
+    if normalized == "capital_allocation":
+        return "capital_actions"
+    if normalized == "legal_regulatory":
+        return "legal_regulatory"
+    if normalized == "accounting_audit":
+        return "governance"
+    if normalized == "liquidity_balance_sheet":
+        return "debt_stress"
+    if normalized == "governance_related_party":
+        return "governance"
+    if normalized == "segment_concentration":
+        return "segment"
+    if normalized == "claim_credibility":
+        return "claim:credibility"
+    if normalized == "filing_coverage":
+        return "revision:filing_change"
+    return f"persistence:{normalized}"
+
+
+def _issue_family_from_persistence_contradiction(contradiction_class: str) -> str:
+    normalized = contradiction_class.lower()
+    if normalized in {"claim_vs_outcome", "current_positive_claim_vs_critical_risk"}:
+        return "claim:credibility"
+    if normalized == "mixed_contract_signals":
+        return "contracts"
+    return f"contradiction:{normalized}"
 
 
 def _dedupe_strings(items: list[str]) -> list[str]:
