@@ -1224,6 +1224,8 @@
         const uncertaintyRows = (payload.uncertainty_rows || []).slice(0, 4);
         const nextReadGuidance = (payload.next_read_guidance || []).slice(0, 5);
         const contradictionRows = (payload.contradiction_rows || []).slice(0, 5);
+        const unresolvedNuance = payload.unresolved_nuance_summary || {};
+        const unresolvedFocusRows = (unresolvedNuance.focus_rows || []).slice(0, 4);
         const peerComparison = payload.peer_comparison || {};
         const sectorContext = payload.sector_context || {};
         const metricRanks = Object.entries(peerComparison.metric_ranks || {});
@@ -1236,6 +1238,21 @@
             <div class="stat"><div class="summaryLabel">Comparability</div><strong>${esc(topCard.comparability_state || baseline.kind || "none")}</strong></div>
             <div class="stat"><div class="summaryLabel">As Of</div><strong>${renderTimestamp(companySnapshot.as_of_date || companySnapshot.updated_at)}</strong></div>
           </div>
+          ${
+            unresolvedFocusRows.length
+              ? `<div class="statsGrid">${unresolvedFocusRows
+                  .map(
+                    (item) => `
+                      <div class="stat">
+                        <div class="summaryLabel">${esc(item.label || "Focus")}</div>
+                        <strong>${esc(item.count || 0)}</strong>
+                        <div class="meta">${esc(item.example_summary || "")}</div>
+                      </div>
+                    `
+                  )
+                  .join("")}</div>`
+              : ""
+          }
           <div class="findingStack">
             <article class="findingCard">
               <div class="findingClaim">Baseline and review context</div>
@@ -1252,6 +1269,8 @@
               }</div>
               <div class="meta"><strong>Quality flags:</strong> ${(decisionPanel.quality_flags || []).map(esc).join(" · ") || "No explicit quality flags right now."}</div>
               <div class="meta"><strong>Narrative signals:</strong> ${narrativeSignals.map(esc).join(" · ") || "No stronger narrative cues extracted yet."}</div>
+              <div class="meta"><strong>Unresolved focus:</strong> ${unresolvedFocusRows.map((item) => esc(item.label)).join(" · ") || "No dominant unresolved focus class."}</div>
+              <div class="meta"><strong>Next nuance action:</strong> ${esc(unresolvedNuance.next_action?.why_this_matters || "No explicit next action beyond the standard reading queue.")}</div>
             </article>
           </div>
           ${
@@ -1703,7 +1722,9 @@
                         <article class="findingCard sev-${(item.contradiction_count || 0) > 0 || (item.blocked_coverage_count || 0) > 0 ? "critical" : "warning"} clickableCard" data-focus-ticker="${esc(item.ticker)}">
                           <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
                           <div class="meta">score ${esc(item.score || 0)} · ${esc(item.decision_state || "—")} · confidence ${esc(item.confidence || "—")} · overall ${esc(item.overall_state || "—")}</div>
+                          <div class="meta">dominant focus ${esc(item.dominant_focus_label || "—")} · count ${esc(item.dominant_focus_count || 0)}</div>
                           <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No explicit unresolved reasons captured."}</div>
+                          <div class="meta">${esc(item.next_action || "No ranked next action captured yet.")}</div>
                           <div class="meta">note scopes ${esc(item.note_scope_count || 0)} · contradictions ${esc(item.contradiction_count || 0)} · coverage gaps ${esc(item.coverage_gap_count || 0)}</div>
                         </article>
                       `

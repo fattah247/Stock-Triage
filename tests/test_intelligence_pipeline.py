@@ -13,22 +13,26 @@ from stock_triage.intelligence.pipeline import (
     AnalysisSummary,
     BaselineChoice,
     CompanyDocument,
+    ContradictionRecord,
     EvidenceContext,
     EventSignal,
     FilingExpectationRecord,
     MetricPoint,
     NextReadRecord,
+    NuanceFindingRecord,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
     _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
+    _build_unresolved_nuance_summary,
     _build_uncertainty_rows,
     _rank_next_read_rows,
     _build_recommendation_summary,
     _build_segment_summary,
     _derive_stance,
     _next_expected_filing_window,
+    UncertaintyRecord,
 )
 from stock_triage.intelligence.review import load_intelligence_observability, run_golden_set
 
@@ -1181,6 +1185,105 @@ def test_build_next_read_guidance_carries_nuance_excerpt():
     assert rows[0].reason_class == "nuance_review"
     assert json.loads(rows[0].payload_json)["excerpt_text"] == "Basis for qualified opinion paragraph."
     assert json.loads(rows[0].payload_json)["page_start"] == 7
+
+
+def test_build_unresolved_nuance_summary_groups_focuses():
+    summary = _build_unresolved_nuance_summary(
+        filing_expectations=[
+            FilingExpectationRecord(
+                expectation_id="exp-1",
+                ticker="TAMU",
+                obligation_type="annual_report",
+                fiscal_year=2025,
+                period_label="FY2025",
+                period_end_date="2025-12-31",
+                window_start="2026-01-01",
+                deadline_at="2026-04-30",
+                satisfied_at=None,
+                state="late",
+                knowledge_source="stored",
+                satisfied_document_id=None,
+                payload_json="{}",
+            )
+        ],
+        nuance_findings=[
+            NuanceFindingRecord(
+                nuance_id="n1",
+                ticker="TAMU",
+                document_id="doc-1",
+                nuance_class="legal_note_focus",
+                severity="critical",
+                confidence=None,
+                section_label="Legal and Regulatory",
+                summary="Legal dispute language appears.",
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json="{}",
+            ),
+            NuanceFindingRecord(
+                nuance_id="n2",
+                ticker="TAMU",
+                document_id="doc-1",
+                nuance_class="proceeds_redeployment",
+                severity="warning",
+                confidence=None,
+                section_label="Use of Proceeds",
+                summary="Use of proceeds was revised.",
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json="{}",
+            ),
+        ],
+        uncertainty_rows=[
+            UncertaintyRecord(
+                uncertainty_id="u1",
+                ticker="TAMU",
+                document_id="doc-1",
+                uncertainty_class="regulatory_severity_scope",
+                severity="critical",
+                summary="Regulatory restriction needs direct reading.",
+                confidence=None,
+                section_label="Legal and Regulatory",
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json="{}",
+            )
+        ],
+        contradiction_rows=[
+            ContradictionRecord(
+                contradiction_id="c1",
+                ticker="TAMU",
+                document_id="doc-1",
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                summary="Current claim conflicts with later evidence.",
+                source_claim_id="claim-1",
+                section_label="MD&A",
+                evidence_span_id=None,
+                payload_json="{}",
+            )
+        ],
+        next_read_guidance=[
+            NextReadRecord(
+                guidance_id="g1",
+                ticker="TAMU",
+                document_id="doc-1",
+                priority_rank=1,
+                target_document_type="annual_report",
+                target_period_label=None,
+                target_section_label="Legal and Regulatory",
+                reason_class="nuance_review",
+                why_this_matters="Read the legal section first.",
+                evidence_reference_count=0,
+                blocked_by=None,
+                payload_json="{}",
+            )
+        ],
+    )
+
+    assert summary["critical_count"] == 4
+    assert summary["focus_rows"][0]["label"] == "Legal / Regulatory"
+    assert summary["next_action"]["why_this_matters"] == "Read the legal section first."
 
 
 def test_build_uncertainty_rows_marks_regulatory_restriction_context():

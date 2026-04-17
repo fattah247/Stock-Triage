@@ -1256,6 +1256,9 @@ def _build_snapshot_nuance_audit_row(
     next_read_guidance = list(payload.get("next_read_guidance") or [])
     filing_expectations = list(payload.get("filing_expectations") or [])
     top_card = payload.get("top_card") or {}
+    unresolved_summary = payload.get("unresolved_nuance_summary") or {}
+    focus_rows = list(unresolved_summary.get("focus_rows") or [])
+    dominant_focus = focus_rows[0] if focus_rows else None
 
     contradiction_count = len(contradiction_rows)
     critical_contradictions = sum(1 for row in contradiction_rows if str(row.get("severity") or "") == "critical")
@@ -1322,6 +1325,9 @@ def _build_snapshot_nuance_audit_row(
         "document_count": int(documents.get("document_count") or 0),
         "analyzed_document_count": int(documents.get("analyzed_count") or 0),
         "reasons": reasons[:3],
+        "dominant_focus_label": dominant_focus.get("label") if dominant_focus else None,
+        "dominant_focus_count": dominant_focus.get("count") if dominant_focus else 0,
+        "next_action": (unresolved_summary.get("next_action") or {}).get("why_this_matters"),
         "updated_at": updated_at,
     }
 

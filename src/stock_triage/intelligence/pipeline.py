@@ -2851,6 +2851,138 @@ def _section_priority(section_label: str | None) -> int:
     return order.get(str(section_label or ""), 9)
 
 
+def _build_unresolved_nuance_summary(
+    *,
+    filing_expectations: list[FilingExpectationRecord],
+    nuance_findings: list[NuanceFindingRecord],
+    uncertainty_rows: list[UncertaintyRecord],
+    contradiction_rows: list[ContradictionRecord],
+    next_read_guidance: list[NextReadRecord],
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+
+    for finding in nuance_findings:
+        if not finding.requires_human_review:
+            continue
+        entries.append(
+            {
+                "focus_key": _focus_bucket_for_class(finding.nuance_class),
+                "severity": finding.severity,
+                "summary": finding.summary,
+                "section_label": finding.section_label,
+            }
+        )
+    for row in uncertainty_rows:
+        if not row.requires_human_review:
+            continue
+        entries.append(
+            {
+                "focus_key": _focus_bucket_for_class(row.uncertainty_class),
+                "severity": row.severity,
+                "summary": row.summary,
+                "section_label": row.section_label,
+            }
+        )
+    for row in contradiction_rows:
+        entries.append(
+            {
+                "focus_key": _focus_bucket_for_class(row.contradiction_class),
+                "severity": row.severity,
+                "summary": row.summary,
+                "section_label": row.section_label,
+            }
+        )
+    for item in filing_expectations:
+        if item.state not in {"late", "due"} or item.satisfied_document_id is not None:
+            continue
+        entries.append(
+            {
+                "focus_key": "filing_coverage",
+                "severity": "critical" if item.state == "late" else "warning",
+                "summary": f"{item.obligation_type.replace('_', ' ')} for {item.period_label} is {item.state}.",
+                "section_label": None,
+            }
+        )
+
+    grouped: dict[str, dict[str, Any]] = {}
+    severity_rank = {"critical": 3, "warning": 2, "info": 1, "ok": 0}
+    for entry in entries:
+        focus_key = str(entry["focus_key"])
+        group = grouped.setdefault(
+            focus_key,
+            {
+                "focus_key": focus_key,
+                "label": _focus_bucket_label(focus_key),
+                "count": 0,
+                "severity": "info",
+                "example_summary": entry["summary"],
+                "sections": [],
+            },
+        )
+        group["count"] += 1
+        if severity_rank.get(str(entry["severity"]), 0) > severity_rank.get(str(group["severity"]), 0):
+            group["severity"] = entry["severity"]
+            group["example_summary"] = entry["summary"]
+        if entry["section_label"] and entry["section_label"] not in group["sections"]:
+            group["sections"].append(entry["section_label"])
+
+    focus_rows = sorted(
+        grouped.values(),
+        key=lambda item: (-severity_rank.get(str(item["severity"]), 0), -int(item["count"]), str(item["label"])),
+    )[:4]
+    next_action = None
+    if next_read_guidance:
+        first = next_read_guidance[0]
+        next_action = {
+            "reason_class": first.reason_class,
+            "target_section_label": first.target_section_label,
+            "why_this_matters": first.why_this_matters,
+        }
+
+    return {
+        "critical_count": sum(1 for entry in entries if str(entry["severity"]) == "critical"),
+        "human_review_count": len(entries),
+        "focus_rows": focus_rows,
+        "next_action": next_action,
+    }
+
+
+def _focus_bucket_for_class(class_name: str | None) -> str:
+    value = str(class_name or "")
+    if any(token in value for token in ("legal", "regulatory", "lawsuit", "special_supervision", "business_restriction")):
+        return "legal_regulatory"
+    if any(token in value for token in ("audit", "going_concern", "liability", "claim_credibility")):
+        return "accounting_audit"
+    if any(token in value for token in ("covenant", "debt_covenant", "filing_gap", "baseline_gap")):
+        return "liquidity_balance_sheet"
+    if any(token in value for token in ("capital", "proceeds", "funding_use", "dilution", "rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue")):
+        return "capital_allocation"
+    if any(token in value for token in ("related_party", "governance")):
+        return "governance_related_party"
+    if "segment" in value:
+        return "segment_concentration"
+    if any(token in value for token in ("claim", "contradiction")):
+        return "claim_credibility"
+    if "filing" in value:
+        return "filing_coverage"
+    return "general_analysis"
+
+
+def _focus_bucket_label(focus_key: str) -> str:
+    labels = {
+        "legal_regulatory": "Legal / Regulatory",
+        "accounting_audit": "Audit / Accounting",
+        "liquidity_balance_sheet": "Liquidity / Balance Sheet",
+        "capital_allocation": "Capital Allocation",
+        "governance_related_party": "Governance / Related Party",
+        "segment_concentration": "Segment / Concentration",
+        "claim_credibility": "Claim / Credibility",
+        "filing_coverage": "Filing / Coverage",
+        "general_analysis": "General Follow-up",
+    }
+    return labels.get(focus_key, focus_key.replace("_", " ").title())
+
+
 def _build_snapshot_payload_json(
     *,
     profile: CompanyProfile,
@@ -2910,6 +3042,13 @@ def _build_snapshot_payload_json(
         top_card=health,
         peer_view=peer_view,
     )
+    unresolved_nuance_summary = _build_unresolved_nuance_summary(
+        filing_expectations=filing_expectations,
+        nuance_findings=nuance_findings,
+        uncertainty_rows=uncertainty_rows,
+        contradiction_rows=contradiction_rows,
+        next_read_guidance=next_read_guidance,
+    )
     payload = {
         "ticker": profile.ticker,
         "issuer_name": profile.issuer_name,
@@ -2947,6 +3086,7 @@ def _build_snapshot_payload_json(
         "top_card": health,
         "decision_panel": decision_panel,
         "recommendation": decision_panel.get("recommendation"),
+        "unresolved_nuance_summary": unresolved_nuance_summary,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "fiscal_year_end_source": profile.fiscal_year_end_source,
         "filing_expectations": [
