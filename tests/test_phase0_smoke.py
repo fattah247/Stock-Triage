@@ -36,45 +36,46 @@ def test_phase0_end_to_end(tmp_config):
     # 1. Migrations apply via the writer queue.
     with WriterQueue(cfg) as wq:
         applied = wq.submit(run_migrations)
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
         # 2. Re-running is a no-op.
         again = wq.submit(run_migrations)
         assert again == []
 
-        # 3. Store a sample PDF in the content-addressed file store.
-        store = FileStore(cfg.paths.files_dir)
-        stored = store.put_bytes(SAMPLE_PDF)
-        assert stored.local_path.exists()
-        assert store.verify(stored.sha256)
+    # 3. Store a sample PDF in the content-addressed file store.
+    store = FileStore(cfg.paths.files_dir)
+    stored = store.put_bytes(SAMPLE_PDF)
+    assert stored.local_path.exists()
+    assert store.verify(stored.sha256)
 
-        # 4. Insert a documents row referencing it (through the writer queue).
-        now = datetime.now(timezone.utc).isoformat()
+    # 4. Insert a documents row referencing it (through the writer queue).
+    now = datetime.now(timezone.utc).isoformat()
 
-        def _insert(conn):
-            conn.execute(
-                """
-                INSERT INTO documents (
-                    document_id, source_name, source_record_id,
-                    retrieved_at, local_path, sha256, mime_type,
-                    document_type, process_state, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "doc_smoke_1",
-                    "smoke",
-                    "rec-1",
-                    now,
-                    str(stored.local_path),
-                    stored.sha256,
-                    "application/pdf",
-                    "other",
-                    "downloaded",
-                    now,
-                    now,
-                ),
-            )
+    def _insert(conn):
+        conn.execute(
+            """
+            INSERT INTO documents (
+                document_id, source_name, source_record_id,
+                retrieved_at, local_path, sha256, mime_type,
+                document_type, process_state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "doc_smoke_1",
+                "smoke",
+                "rec-1",
+                now,
+                str(stored.local_path),
+                stored.sha256,
+                "application/pdf",
+                "other",
+                "downloaded",
+                now,
+                now,
+            ),
+        )
 
+    with WriterQueue(cfg) as wq:
         wq.submit(_insert)
 
     # 5. Read it back through a fresh read-only connection (separate from the writer).
@@ -92,7 +93,7 @@ def test_phase0_end_to_end(tmp_config):
         version = rconn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     finally:
         rconn.close()
 

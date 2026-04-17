@@ -12,6 +12,7 @@ from argparse import _SubParsersAction
 
 from . import (
     alerts_canary,
+    coverage as coverage_cmd,
     dashboard as dashboard_cmd,
     hardening as hardening_cmd,
     intelligence as intelligence_cmd,
@@ -22,6 +23,7 @@ from . import (
 _MODULES = (
     pipeline,
     summary_cmd,
+    coverage_cmd,
     dashboard_cmd,
     alerts_canary,
     hardening_cmd,

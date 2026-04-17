@@ -15,6 +15,7 @@
     intelligence_kpis: {},
     observability: {},
     golden_rows: [],
+    coverage_status: {},
     rerun_preview: null,
     company_rerun_preview: null,
     backlog_rows: [],
@@ -617,6 +618,10 @@
 
     if (marketMonitor) {
       const counts = marketData.counts || {};
+      const coverage = marketData.coverage_status || {};
+      const coverageSummary = coverage.summary || {};
+      const coverageGapRows = (marketData.coverage_gap_leaders || []).slice(0, 4);
+      const undercoveredRows = (marketData.undercovered_watchlist || []).slice(0, 4);
       const pickRows = (marketData.stock_pick_candidates || []).slice(0, 4);
       const avoidRows = (marketData.avoid_candidates || []).slice(0, 4);
       const riskRows = (marketData.highest_risk_changes || []).slice(0, 4);
@@ -634,6 +639,9 @@
           <div class="stat"><div class="summaryLabel">New since last sync</div><strong>${esc(counts.new_disclosures_since_sync || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Material events since sync</div><strong>${esc(counts.material_event_filings_since_sync || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Potential late periodic</div><strong>${esc(counts.late_periodic_filings || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage expected</div><strong>${esc(counts.coverage_expected || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage analyzed</div><strong>${esc(counts.coverage_analyzed || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage blocked</div><strong>${esc(counts.coverage_blocked || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Stock-pick candidates</div><strong>${esc(counts.stock_pick_candidates || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Avoid candidates</div><strong>${esc(counts.avoid_candidates || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Auditor changes 7d</div><strong>${esc(counts.auditor_changes_7d || 0)}</strong></div>
@@ -641,6 +649,57 @@
           <div class="stat"><div class="summaryLabel">Debt restructurings 7d</div><strong>${esc(counts.debt_restructurings_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Rights issues 7d</div><strong>${esc(counts.rights_issues_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Legal / regulatory 7d</div><strong>${esc(counts.lawsuits_regulatory_7d || 0)}</strong></div>
+        </div>
+        <div class="docGroups">
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Coverage gap leaders</h3>
+                <div class="meta">Current coverage range ${esc(coverage.date_from || "—")} to ${esc(coverage.date_to || "—")}. These obligations are still under-covered.</div>
+              </div>
+            </div>
+            ${
+              coverageGapRows.length
+                ? `<div class="findingStack">${coverageGapRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-${item.actual_state === "blocked" ? "critical" : item.expected_state === "late" ? "warning" : "info"} ${item.ticker ? "clickableCard" : ""}" ${
+                          item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
+                        }>
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.period_label)} · due ${esc(item.deadline_at)} · actual ${esc(item.actual_state)}</div>
+                          <div class="meta">candidates ${esc(item.candidate_count || 0)} · downloaded ${esc(item.downloaded_count || 0)} · analyzed ${esc(item.analyzed_count || 0)}</div>
+                          <div class="meta">${esc(item.blocked_reason || `knowledge source ${item.knowledge_source || "unknown"}`)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No v3.4 coverage rows yet.</strong> Run <code>coverage-status</code> or <code>coverage-preview</code> to materialize the coverage ledger.</div>`
+            }
+          </section>
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Under-covered watchlist</h3>
+                <div class="meta">Watchlist issuers with the clearest missing, blocked, or not-yet-analyzed obligations.</div>
+              </div>
+            </div>
+            ${
+              undercoveredRows.length
+                ? `<div class="findingStack">${undercoveredRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-${item.actual_state === "blocked" ? "critical" : "warning"} clickableCard" data-focus-ticker="${esc(item.ticker)}">
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">${esc(item.period_label)} · expected ${esc(item.expected_state)} · actual ${esc(item.actual_state)}</div>
+                          <div class="meta">${esc(item.blocked_reason || "Missing download or processing coverage.")}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No under-covered watchlist issuers right now.</strong> If this stays empty, either the watchlist is clear or coverage has not been materialized yet.</div>`
+            }
+          </section>
         </div>
         <div class="boardSummaryRow">
           <div class="boardSummaryCard">
@@ -1502,6 +1561,8 @@
       const summary = observability.summary || {};
       const recommendationBuckets = observability.recommendation_buckets || {};
       const latestGolden = observability.latest_golden_run || null;
+      const coverageStatus = data.coverage_status || {};
+      const coverageSummary = coverageStatus.summary || {};
       observabilityList.innerHTML = `
         <div class="statsGrid">
           <div class="stat"><div class="summaryLabel">Snapshots</div><strong>${esc(summary.snapshot_count || 0)}</strong></div>
@@ -1509,8 +1570,12 @@
           <div class="stat"><div class="summaryLabel">Late filings</div><strong>${esc(summary.late_filing_companies || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Low-conf event cos</div><strong>${esc(summary.low_confidence_event_companies || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">FY overrides</div><strong>${esc(summary.fiscal_year_override_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage expected</div><strong>${esc(coverageSummary.expected_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage analyzed</div><strong>${esc(coverageSummary.analyzed_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage blocked</div><strong>${esc(coverageSummary.blocked_count || 0)}</strong></div>
         </div>
         <div class="meta">Recommendation buckets: ${Object.entries(recommendationBuckets).map(([name, count]) => `${name}=${count}`).join(" · ") || "none"}</div>
+        <div class="meta">Coverage range: ${esc(coverageStatus.date_from || "—")} to ${esc(coverageStatus.date_to || "—")} · tickers ${esc(coverageStatus.ticker_count || 0)}</div>
         <div class="meta">Latest golden run: ${
           latestGolden
             ? latestGolden.case_count > 0
@@ -1650,6 +1715,7 @@
       if (detail.source_sync_rows) data.source_sync_rows = detail.source_sync_rows;
       if (detail.observability) data.observability = detail.observability;
       if (detail.golden_rows) data.golden_rows = detail.golden_rows;
+      if (detail.coverage_status) data.coverage_status = detail.coverage_status;
       if (section === "ops") fetchRerunPreview();
       state._sectionLoaded[section] = true;
       render();

@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..canary import load_canary_status
 from ..config import Config
+from ..coverage import default_coverage_range, load_coverage_status_from_conn
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
@@ -181,12 +182,19 @@ def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
     if section == "ops":
         backlog = load_backlog(cfg)
         canary = load_canary_status(cfg)
+        conn = connect(cfg.paths.db_path, read_only=True)
+        try:
+            configure_pragmas(conn, cfg)
+            coverage = load_coverage_status_from_conn(conn, cfg, scope="all", limit=10)
+        finally:
+            conn.close()
         return {
             "backlog_rows": [row.__dict__ for row in backlog.rows],
             "canary_rows": [row.__dict__ for row in canary.rows],
             "source_sync_rows": _load_source_sync_rows_from_cfg(cfg),
             "observability": load_intelligence_observability(cfg),
             "golden_rows": load_latest_golden_runs(cfg, limit=5),
+            "coverage_status": coverage,
         }
 
     return {}
@@ -280,6 +288,15 @@ def _load_documents_for_ticker(
 def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     week_start = now - timedelta(days=7)
+    coverage_from, coverage_to = default_coverage_range(now.date())
+    coverage_status = load_coverage_status_from_conn(
+        conn,
+        cfg,
+        date_from=coverage_from,
+        date_to=coverage_to,
+        scope="all",
+        limit=10,
+    )
     source_syncs = {row["source_name"]: row for row in _load_source_sync_rows(conn)}
     disclosure_sync = _parse_iso_datetime(source_syncs.get("idx_disclosures", {}).get("updated_at"))
     disclosure_window_start = disclosure_sync or week_start
@@ -573,10 +590,14 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             "avoid_candidates": len(avoid_candidates),
             "stock_pick_displayed": len(stock_pick_display_rows),
             "avoid_displayed": len(avoid_display_rows),
+            "coverage_expected": coverage_status["summary"]["expected_count"],
+            "coverage_analyzed": coverage_status["summary"]["analyzed_count"],
+            "coverage_blocked": coverage_status["summary"]["blocked_count"],
             **major_event_counts,
         },
         "source_syncs": list(source_syncs.values()),
         "staleness_warning": any(bool(row.get("stale")) for row in source_syncs.values()),
+        "coverage_status": coverage_status,
         "sector_heatmap": sector_heatmap,
         "stock_pick_candidates": stock_pick_display_rows,
         "avoid_candidates": avoid_display_rows,
@@ -596,6 +617,8 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
                 str(item["ticker"]),
             ),
         )[:10],
+        "coverage_gap_leaders": coverage_status["gap_leaders"][:10],
+        "undercovered_watchlist": coverage_status["undercovered_watchlist"][:10],
     }
 
 
