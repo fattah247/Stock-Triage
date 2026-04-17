@@ -432,13 +432,17 @@ def _select_snapshot_tickers(conn: sqlite3.Connection, *, ticker: str | None, li
         SELECT ticker
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
+          AND derived_version = ?
         GROUP BY ticker
         ORDER BY MAX(updated_at) DESC, ticker ASC
         LIMIT ?
         """,
-        (limit,),
+        (DERIVED_VERSION, limit),
     ).fetchall()
-    return [row["ticker"] for row in rows]
+    tickers = [row["ticker"] for row in rows]
+    if tickers:
+        return tickers
+    return _select_tickers(conn, ticker=None, limit=limit)
 
 
 def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> CompanyIntelligenceBundle | None:

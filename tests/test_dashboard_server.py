@@ -515,6 +515,287 @@ def test_dashboard_server_updates_company_fiscal_year_override(tmp_config) -> No
         thread.join(timeout=5)
 
 
+def test_market_monitor_falls_back_to_closest_recommendation_setups(tmp_config) -> None:
+    from stock_triage.intelligence.pipeline import DERIVED_VERSION
+
+    _seed_phase8_data(tmp_config)
+    current_ts = "2026-04-17T08:00:00+00:00"
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+
+        def _seed_snapshots(conn):
+            companies = [
+                ("PICK1", "PT Pick One Tbk"),
+                ("PICK2", "PT Pick Two Tbk"),
+                ("PICK3", "PT Pick Three Tbk"),
+                ("PICK4", "PT Pick Four Tbk"),
+            ]
+            for ticker, issuer_name in companies:
+                conn.execute(
+                    """
+                    INSERT INTO companies (
+                        ticker, issuer_name, listing_date, active_status, sector, subsector, industry,
+                        listing_board, source_urls, raw_metadata, first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker) DO UPDATE SET issuer_name = excluded.issuer_name
+                    """,
+                    (
+                        ticker,
+                        issuer_name,
+                        "2020-01-01",
+                        "listed",
+                        "Banking",
+                        "Banks",
+                        "Financials",
+                        "main",
+                        json.dumps(["https://example.com"]),
+                        json.dumps({}),
+                        current_ts,
+                        current_ts,
+                    ),
+                )
+            rows = [
+                (
+                    "PICK1",
+                    {
+                        "issuer_name": "PT Pick One Tbk",
+                        "top_card": {
+                            "decision_state": "Watch",
+                            "overall_state": "stable",
+                            "thesis_state": "holding",
+                            "positive_factors": ["Revenue improved"],
+                            "negative_factors": [],
+                        },
+                        "decision_panel": {
+                            "confidence": "medium",
+                            "recommendation": {
+                                "bucket": "neither",
+                                "reasons": ["Revenue improved.", "The baseline is comparable.", "Review work is clear."],
+                                "decision_constraints": ["Current stance is Watch."],
+                                "evidence_ref_count": 3,
+                                "ranking_inputs": {
+                                    "stance": "Watch",
+                                    "confidence": "medium",
+                                    "overall_state": "stable",
+                                    "thesis_state": "holding",
+                                    "credibility_band": "acceptable",
+                                    "data_completeness_pct": 80.0,
+                                    "open_review_count": 0,
+                                    "critical_review_count": 0,
+                                    "critical_signal_count": 0,
+                                    "warning_signal_count": 0,
+                                    "positive_factor_count": 2,
+                                    "negative_factor_count": 0,
+                                    "quality_flag_count": 0,
+                                    "peer_anomaly_count": 0,
+                                    "pick_score": 88,
+                                    "avoid_score": 12,
+                                },
+                            },
+                        },
+                        "peer_comparison": {"anomalies": []},
+                    },
+                ),
+                (
+                    "PICK2",
+                    {
+                        "issuer_name": "PT Pick Two Tbk",
+                        "top_card": {
+                            "decision_state": "Watch",
+                            "overall_state": "review_required",
+                            "thesis_state": "none",
+                            "positive_factors": ["Margins held"],
+                            "negative_factors": ["Debt signal active"],
+                        },
+                        "decision_panel": {
+                            "confidence": "low",
+                            "recommendation": {
+                                "bucket": "neither",
+                                "reasons": ["Debt signals remain active.", "One review item remains open.", "The stance is still Watch."],
+                                "decision_constraints": ["Resolve the open review item."],
+                                "evidence_ref_count": 3,
+                                "ranking_inputs": {
+                                    "stance": "Watch",
+                                    "confidence": "low",
+                                    "overall_state": "review_required",
+                                    "thesis_state": "none",
+                                    "credibility_band": "acceptable",
+                                    "data_completeness_pct": 74.0,
+                                    "open_review_count": 1,
+                                    "critical_review_count": 0,
+                                    "critical_signal_count": 0,
+                                    "warning_signal_count": 1,
+                                    "positive_factor_count": 1,
+                                    "negative_factor_count": 1,
+                                    "quality_flag_count": 0,
+                                    "peer_anomaly_count": 0,
+                                    "pick_score": 64,
+                                    "avoid_score": 31,
+                                },
+                            },
+                        },
+                        "peer_comparison": {"anomalies": []},
+                    },
+                ),
+                (
+                    "PICK3",
+                    {
+                        "issuer_name": "PT Pick Three Tbk",
+                        "top_card": {
+                            "decision_state": "Review manually",
+                            "overall_state": "critical",
+                            "thesis_state": "none",
+                            "positive_factors": [],
+                            "negative_factors": ["Legal risk active"],
+                        },
+                        "decision_panel": {
+                            "confidence": "high",
+                            "recommendation": {
+                                "bucket": "neither",
+                                "reasons": ["Legal risk is active.", "The thesis is not broken yet.", "The stance is still Review manually."],
+                                "decision_constraints": ["Wait for the legal issue to resolve."],
+                                "evidence_ref_count": 3,
+                                "ranking_inputs": {
+                                    "stance": "Review manually",
+                                    "confidence": "high",
+                                    "overall_state": "critical",
+                                    "thesis_state": "none",
+                                    "credibility_band": "acceptable",
+                                    "data_completeness_pct": 83.0,
+                                    "open_review_count": 1,
+                                    "critical_review_count": 0,
+                                    "critical_signal_count": 1,
+                                    "warning_signal_count": 2,
+                                    "positive_factor_count": 0,
+                                    "negative_factor_count": 1,
+                                    "quality_flag_count": 1,
+                                    "peer_anomaly_count": 0,
+                                    "pick_score": 20,
+                                    "avoid_score": 95,
+                                },
+                            },
+                        },
+                        "peer_comparison": {"anomalies": []},
+                    },
+                ),
+                (
+                    "PICK4",
+                    {
+                        "issuer_name": "PT Pick Four Tbk",
+                        "top_card": {
+                            "decision_state": "Watch",
+                            "overall_state": "watch",
+                            "thesis_state": "none",
+                            "positive_factors": ["Cash remained positive"],
+                            "negative_factors": [],
+                        },
+                        "decision_panel": {
+                            "confidence": "low",
+                            "recommendation": {
+                                "bucket": "neither",
+                                "reasons": ["Cash remained positive.", "The stance is still Watch.", "Coverage is thin."],
+                                "decision_constraints": ["Wait for one more comparable filing."],
+                                "evidence_ref_count": 3,
+                                "ranking_inputs": {
+                                    "stance": "Watch",
+                                    "confidence": "low",
+                                    "overall_state": "watch",
+                                    "thesis_state": "none",
+                                    "credibility_band": "acceptable",
+                                    "data_completeness_pct": 68.0,
+                                    "open_review_count": 0,
+                                    "critical_review_count": 0,
+                                    "critical_signal_count": 0,
+                                    "warning_signal_count": 0,
+                                    "positive_factor_count": 1,
+                                    "negative_factor_count": 0,
+                                    "quality_flag_count": 0,
+                                    "peer_anomaly_count": 0,
+                                    "pick_score": 55,
+                                    "avoid_score": 8,
+                                },
+                            },
+                        },
+                        "peer_comparison": {"anomalies": []},
+                    },
+                ),
+            ]
+            for ticker, payload in rows:
+                conn.execute(
+                    """
+                    INSERT INTO documents (
+                        document_id, source_name, source_record_id, source_file_id, retrieved_at, original_url,
+                        local_path, sha256, mime_type, document_type, language_variant, process_state,
+                        created_at, updated_at, ticker, version_group_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"doc-{ticker.lower()}",
+                        "idx_financial_reports",
+                        f"{ticker.lower()}-record",
+                        f"{ticker.lower()}-file",
+                        current_ts,
+                        f"https://example.com/{ticker.lower()}",
+                        str(tmp_config.paths.data_dir / f"{ticker.lower()}.pdf"),
+                        f"sha-{ticker.lower()}",
+                        "application/pdf",
+                        "financial_statement",
+                        "id",
+                        "analyzed",
+                        current_ts,
+                        current_ts,
+                        ticker,
+                        None,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO company_snapshots (
+                        snapshot_id, ticker, snapshot_kind, as_of_document_id, as_of_date,
+                        latest_analysis_run_id, payload_json, derived_version, created_at, updated_at
+                    ) VALUES (?, ?, 'current', ?, ?, NULL, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, snapshot_kind, derived_version)
+                    DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        as_of_document_id = excluded.as_of_document_id,
+                        as_of_date = excluded.as_of_date,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        f"snapshot-{ticker}",
+                        ticker,
+                        f"doc-{ticker.lower()}",
+                        current_ts,
+                        json.dumps(payload),
+                        DERIVED_VERSION,
+                        current_ts,
+                        current_ts,
+                    ),
+                )
+
+        wq.submit(_seed_snapshots)
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        snapshot = json.loads(urlopen(f"{handle.url}/api/snapshot").read().decode("utf-8"))
+        market = snapshot["market_monitor"]
+        assert market["counts"]["stock_pick_candidates"] == 0
+        assert market["counts"]["avoid_candidates"] == 0
+        assert len(market["stock_pick_candidates"]) >= 3
+        assert len(market["avoid_candidates"]) >= 3
+        assert all(row["qualification"] == "closest" for row in market["stock_pick_candidates"][:3])
+        assert all(row["qualification"] == "closest" for row in market["avoid_candidates"][:3])
+        assert market["stock_pick_candidates"][0]["blockers"]
+        assert market["avoid_candidates"][0]["blockers"]
+    finally:
+        handle.server.shutdown()
+        handle.server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> None:
     monkeypatch.setattr("stock_triage.commands.dashboard.load_config", lambda: tmp_config)
     seen = {}

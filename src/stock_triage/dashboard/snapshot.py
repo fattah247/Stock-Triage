@@ -407,8 +407,11 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
         SELECT ticker, as_of_date, payload_json, updated_at
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
+          AND derived_version = ?
         ORDER BY updated_at DESC, ticker ASC
         """
+        ,
+        (DERIVED_VERSION,),
     ).fetchall()
     highest_risk_changes = [
         {
@@ -438,6 +441,7 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             LEFT JOIN company_snapshots cs
               ON cs.ticker = rqi.ticker
              AND cs.snapshot_kind = 'current'
+             AND cs.derived_version = ?
             WHERE rqi.status = 'open'
               AND rqi.updated_at >= ?
             ORDER BY
@@ -446,17 +450,20 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
               rqi.review_item_id ASC
             LIMIT 10
             """,
-            (week_start.isoformat(),),
+            (DERIVED_VERSION, week_start.isoformat()),
         ).fetchall()
     ]
     stock_pick_candidates: list[dict[str, object]] = []
     avoid_candidates: list[dict[str, object]] = []
+    stock_pick_fallbacks: list[dict[str, object]] = []
+    avoid_fallbacks: list[dict[str, object]] = []
     most_improved: list[dict[str, object]] = []
     for row in snapshot_rows:
         payload = json.loads(row["payload_json"] or "{}")
         top_card = payload.get("top_card", {})
         decision_panel = payload.get("decision_panel", {})
         recommendation = decision_panel.get("recommendation") or payload.get("recommendation") or {}
+        ranking_inputs = recommendation.get("ranking_inputs") or {}
         ticker = str(row["ticker"])
         peer_anomalies = len(payload.get("peer_comparison", {}).get("anomalies") or [])
         open_reviews = review_counts.get(ticker, 0)
@@ -488,11 +495,32 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             "evidence_ref_count": recommendation.get("evidence_ref_count", 0),
             "as_of_document_id": recommendation.get("as_of_document_id") or row["ticker"],
             "as_of_date": row["as_of_date"] or row["updated_at"],
+            "ranking_inputs": ranking_inputs,
+            "qualification": "strict",
+            "qualification_label": "Qualified",
+            "blockers": [],
         }
         if recommendation.get("bucket") == "stock_pick_candidate":
             stock_pick_candidates.append(candidate_row)
         elif recommendation.get("bucket") == "avoid_candidate":
             avoid_candidates.append(candidate_row)
+        else:
+            pick_fallback = _build_recommendation_fallback_row(
+                candidate_row,
+                top_card=top_card,
+                recommendation=recommendation,
+                target="pick",
+            )
+            if pick_fallback is not None:
+                stock_pick_fallbacks.append(pick_fallback)
+            avoid_fallback = _build_recommendation_fallback_row(
+                candidate_row,
+                top_card=top_card,
+                recommendation=recommendation,
+                target="avoid",
+            )
+            if avoid_fallback is not None:
+                avoid_fallbacks.append(avoid_fallback)
         if improvement_score > 0 and top_card.get("overall_state") != "critical":
             most_improved.append(
                 {
@@ -526,6 +554,14 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             {"major_contract_win", "major_contract_loss", "contract_change"},
         ),
     }
+    stock_pick_display_rows = _combine_recommendation_rows(
+        strict_rows=stock_pick_candidates,
+        fallback_rows=stock_pick_fallbacks,
+    )
+    avoid_display_rows = _combine_recommendation_rows(
+        strict_rows=avoid_candidates,
+        fallback_rows=avoid_fallbacks,
+    )
 
     return {
         "as_of": now.isoformat(),
@@ -535,19 +571,15 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             "late_periodic_filings": len(late_periodic_rows),
             "stock_pick_candidates": len(stock_pick_candidates),
             "avoid_candidates": len(avoid_candidates),
+            "stock_pick_displayed": len(stock_pick_display_rows),
+            "avoid_displayed": len(avoid_display_rows),
             **major_event_counts,
         },
         "source_syncs": list(source_syncs.values()),
         "staleness_warning": any(bool(row.get("stale")) for row in source_syncs.values()),
         "sector_heatmap": sector_heatmap,
-        "stock_pick_candidates": sorted(
-            stock_pick_candidates,
-            key=lambda item: (-int(item["score"]), str(item["ticker"])),
-        )[:10],
-        "avoid_candidates": sorted(
-            avoid_candidates,
-            key=lambda item: (-int(item["score"]), str(item["ticker"])),
-        )[:10],
+        "stock_pick_candidates": stock_pick_display_rows,
+        "avoid_candidates": avoid_display_rows,
         "highest_risk_changes": sorted(
             highest_risk_changes,
             key=lambda item: (-int(item["risk_score"]), str(item["ticker"])),
@@ -565,6 +597,138 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             ),
         )[:10],
     }
+
+
+def _combine_recommendation_rows(
+    *,
+    strict_rows: list[dict[str, object]],
+    fallback_rows: list[dict[str, object]],
+    limit: int = 10,
+    minimum_display: int = 3,
+) -> list[dict[str, object]]:
+    strict_sorted = sorted(
+        strict_rows,
+        key=lambda item: (-int(item.get("score") or 0), str(item.get("ticker") or "")),
+    )
+    rows = strict_sorted[:limit]
+    if len(rows) >= minimum_display:
+        return rows
+    seen = {str(item.get("ticker") or "") for item in rows}
+    for item in sorted(
+        fallback_rows,
+        key=lambda row: (-int(row.get("score") or 0), str(row.get("ticker") or "")),
+    ):
+        ticker = str(item.get("ticker") or "")
+        if ticker in seen:
+            continue
+        rows.append(item)
+        seen.add(ticker)
+        if len(rows) >= max(minimum_display, min(limit, len(strict_rows) + len(fallback_rows))):
+            break
+    return rows[:limit]
+
+
+def _build_recommendation_fallback_row(
+    candidate_row: dict[str, object],
+    *,
+    top_card: dict[str, object],
+    recommendation: dict[str, object],
+    target: str,
+) -> dict[str, object] | None:
+    ranking_inputs = recommendation.get("ranking_inputs") or {}
+    if target == "pick":
+        if str(top_card.get("overall_state") or "") == "critical":
+            return None
+        score = int(ranking_inputs.get("pick_score") or 0)
+        if score <= 0:
+            return None
+        blockers = _build_pick_blockers(ranking_inputs)
+        if not blockers:
+            return None
+        row = dict(candidate_row)
+        row.update(
+            {
+                "score": score,
+                "qualification": "closest",
+                "qualification_label": "Closest current setup",
+                "blockers": blockers[:3],
+            }
+        )
+        return row
+    if target == "avoid":
+        score = int(ranking_inputs.get("avoid_score") or 0)
+        if score <= 0:
+            return None
+        blockers = _build_avoid_blockers(ranking_inputs)
+        if not blockers:
+            return None
+        row = dict(candidate_row)
+        row.update(
+            {
+                "score": score,
+                "qualification": "closest",
+                "qualification_label": "Closest current setup",
+                "blockers": blockers[:3],
+            }
+        )
+        return row
+    return None
+
+
+def _build_pick_blockers(ranking_inputs: dict[str, object]) -> list[str]:
+    blockers: list[str] = []
+    stance = str(ranking_inputs.get("stance") or "Watch")
+    confidence = str(ranking_inputs.get("confidence") or "low")
+    overall_state = str(ranking_inputs.get("overall_state") or "stable")
+    thesis_state = str(ranking_inputs.get("thesis_state") or "none")
+    credibility_band = str(ranking_inputs.get("credibility_band") or "unknown")
+    data_completeness_pct = float(ranking_inputs.get("data_completeness_pct") or 0.0)
+    open_review_count = int(ranking_inputs.get("open_review_count") or 0)
+    critical_signal_count = int(ranking_inputs.get("critical_signal_count") or 0)
+    quality_flag_count = int(ranking_inputs.get("quality_flag_count") or 0)
+    if stance != "Buy":
+        blockers.append(f"Current stance is {stance}, not Buy.")
+    if confidence != "high":
+        blockers.append(f"Confidence is {confidence}, not high.")
+    if overall_state != "stable":
+        blockers.append(f"Overall state is {overall_state}, not stable.")
+    if thesis_state != "improving":
+        blockers.append(f"Thesis state is {thesis_state}, not improving.")
+    if credibility_band not in {"high", "acceptable"}:
+        blockers.append(f"Credibility band is {credibility_band}.")
+    if open_review_count > 0:
+        blockers.append(f"{open_review_count} open review item(s) still need judgment.")
+    if critical_signal_count > 0:
+        blockers.append(f"{critical_signal_count} critical signal(s) remain active.")
+    if quality_flag_count > 1:
+        blockers.append(f"{quality_flag_count} quality flags exceed the pick threshold.")
+    if data_completeness_pct < 75.0:
+        blockers.append(f"Data completeness is only {data_completeness_pct:.1f}%.")
+    return blockers
+
+
+def _build_avoid_blockers(ranking_inputs: dict[str, object]) -> list[str]:
+    blockers: list[str] = []
+    stance = str(ranking_inputs.get("stance") or "Watch")
+    confidence = str(ranking_inputs.get("confidence") or "low")
+    overall_state = str(ranking_inputs.get("overall_state") or "stable")
+    thesis_state = str(ranking_inputs.get("thesis_state") or "none")
+    credibility_band = str(ranking_inputs.get("credibility_band") or "unknown")
+    critical_signal_count = int(ranking_inputs.get("critical_signal_count") or 0)
+    critical_review_count = int(ranking_inputs.get("critical_review_count") or 0)
+    open_review_count = int(ranking_inputs.get("open_review_count") or 0)
+    quality_flag_count = int(ranking_inputs.get("quality_flag_count") or 0)
+    if stance != "Avoid":
+        blockers.append(f"Current stance is {stance}, not Avoid.")
+    if confidence not in {"high", "medium"}:
+        blockers.append(f"Confidence is {confidence}, below the avoid threshold.")
+    if overall_state not in {"critical", "review_required"} and thesis_state != "broken" and credibility_band != "poor":
+        blockers.append("Stress is visible, but it has not crossed the strict avoid gate yet.")
+    if critical_signal_count == 0 and critical_review_count == 0 and thesis_state != "broken" and credibility_band != "poor" and quality_flag_count < 2:
+        blockers.append("Signals are negative, but not strong enough for a strict avoid call yet.")
+    if open_review_count > 0 and critical_review_count == 0:
+        blockers.append(f"{open_review_count} open review item(s) are still unresolved.")
+    return blockers
 
 
 def _load_source_sync_rows_from_cfg(cfg: Config) -> list[dict[str, object]]:
@@ -989,8 +1153,11 @@ def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]
         SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
+          AND derived_version = ?
         ORDER BY updated_at DESC, ticker ASC
         """
+        ,
+        (DERIVED_VERSION,),
     ).fetchall()
     snapshots: list[dict[str, object]] = []
     for row in rows:
@@ -1017,11 +1184,12 @@ def _load_company_snapshot_for_ticker(
         SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
+          AND derived_version = ?
           AND ticker = ?
         ORDER BY updated_at DESC
         LIMIT 1
         """,
-        (ticker,),
+        (DERIVED_VERSION, ticker),
     ).fetchone()
     if row is None:
         return None
@@ -1039,8 +1207,11 @@ def _load_sector_rollups(conn: sqlite3.Connection) -> list[dict[str, object]]:
         """
         SELECT sector, subsector, rollup_key, payload_json, updated_at
         FROM sector_rollups
+        WHERE derived_version = ?
         ORDER BY updated_at DESC, sector ASC, COALESCE(subsector, '') ASC
         """
+        ,
+        (DERIVED_VERSION,),
     ).fetchall()
     return [
         {
@@ -1082,10 +1253,11 @@ def _load_sector_rollup_for_ticker(
         FROM sector_rollups
         WHERE rollup_key = 'peer_intelligence'
           AND sector = ?
+          AND derived_version = ?
         ORDER BY updated_at DESC
         LIMIT 1
         """,
-        (sector,),
+        (sector, DERIVED_VERSION),
     ).fetchone()
     if row is None:
         return None

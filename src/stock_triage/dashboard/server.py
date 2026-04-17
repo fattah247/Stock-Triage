@@ -751,12 +751,16 @@ def _load_rerun_preview(cfg: Config, *, ticker: str | None) -> dict[str, object]
     if ticker:
         ticker_upper = ticker.upper()
         company_detail = load_company_detail(cfg, ticker_upper)
+        documents = company_detail.get("documents") or []
         review_rows = load_review_queue(cfg, status="open", limit=100, ticker=ticker_upper).rows
         company_snapshot = company_detail.get("company_snapshot")
         return {
             "scope": "ticker",
             "ticker": ticker_upper,
-            "document_count": len(company_detail.get("documents") or []),
+            "document_count": len(documents),
+            "analyzed_count": sum(1 for item in documents if item.get("process_state") == "analyzed"),
+            "failed_count": sum(1 for item in documents if item.get("process_state") == "failed"),
+            "latest_document_type": documents[0].get("document_type") if documents else None,
             "open_review_count": len(review_rows),
             "snapshot_updated_at": company_snapshot.get("updated_at") if company_snapshot else None,
             "actions": ["rederive_company", "golden"],

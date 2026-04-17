@@ -220,7 +220,8 @@
           <article class="findingCard">
             <div class="findingClaim">Rerun impact for ${esc(preview.ticker || "selected issuer")}</div>
             <div class="meta">Documents in scope: ${esc(preview.document_count ?? 0)} · open review groups: ${esc(preview.open_review_count ?? 0)}</div>
-            <div class="meta">Current snapshot: ${preview.snapshot_updated_at ? renderTimestamp(preview.snapshot_updated_at) : "No derived snapshot yet."}</div>
+            <div class="meta">Analyzed: ${esc(preview.analyzed_count ?? 0)} · failed: ${esc(preview.failed_count ?? 0)} · latest type: ${esc(preview.latest_document_type || "unknown")}</div>
+            <div class="meta">Current snapshot: ${preview.snapshot_updated_at ? renderTimestamp(preview.snapshot_updated_at) : "No current v3 snapshot yet."}</div>
             <div class="meta">Available actions: ${(preview.actions || []).map(actionLabel).join(" · ") || "none"}</div>
           </article>
         </div>
@@ -395,7 +396,7 @@
         ${
           reasons.length
             ? reasons.map(esc).join(" · ")
-            : "Use Company view to inspect filings, findings, claims, and thesis state for this issuer."
+            : "Open Company to inspect filings, signals, claims, and thesis state."
         }
       </div>
     `;
@@ -404,20 +405,29 @@
   function renderHistory() {
     if (!actionHistory) return;
     const rows = (data.action_history || []).slice(0, 10);
-    state.lastFailedHistory = rows.find((item) => item.ok === false) || null;
+    state.lastFailedHistory = rows.length && rows[0].ok === false ? rows[0] : null;
     actionHistory.innerHTML = rows.length
-      ? rows
+      ? `<div class="historyList">${rows
           .map(
             (item) =>
-              `<div class="historyItem ${item.ok === false ? "failed" : ""}"><div><strong>${esc(actionLabel(item.action))}</strong> <span class="meta">${renderTimestamp(
-                item.timestamp
-              )}</span></div><div class="meta">${esc((item.command || []).join(" "))}</div><div class="meta">exit=${esc(
-                item.returncode
-              )}${item.duration_ms ? ` · ${esc(Math.max(1, Math.round(item.duration_ms / 1000)))}s` : ""}</div></div>`
+              `<div class="historyItem ${item.ok === false ? "failed" : ""}">
+                <div class="historyMetaLine">
+                  <strong>${esc(actionLabel(item.action))}</strong>
+                  <span class="statusPill ${item.ok === false ? "failed" : "ok"}">${item.ok === false ? "failed" : "ok"}</span>
+                  <span class="meta">${renderTimestamp(item.timestamp)}</span>
+                </div>
+                <div class="historyCommand">${esc((item.command || []).join(" "))}</div>
+                <div class="meta">exit=${esc(item.returncode)}${item.duration_ms ? ` · ${esc(Math.max(1, Math.round(item.duration_ms / 1000)))}s` : ""}</div>
+              </div>`
           )
-          .join("")
+          .join("")}</div>`
       : `<div class="meta">No action has been run from this dashboard yet.</div>`;
     renderActionError();
+  }
+
+  function updateActionOutputState(isIdle) {
+    if (!actionOutput) return;
+    actionOutput.classList.toggle("terminalIdle", Boolean(isIdle));
   }
 
   function renderActionError() {
@@ -484,10 +494,10 @@
     const hint = document.getElementById("sidebarHint");
     if (hint) {
       const hints = {
-        home: "Start with the decision board, then open one issuer.",
-        company: "Use local company modes to move from summary to filings, signals, and context.",
+        home: "Start with ranked names, then open one issuer.",
+        company: "Move from summary to filings, signals, and context.",
         review: "Resolve or snooze grouped issue families here.",
-        ops: "Run actions, inspect health, and audit golden checks in separate modes.",
+        ops: "Run actions, inspect system health, and audit checks here.",
       };
       hint.textContent = hints[view] || "";
     }
@@ -496,22 +506,22 @@
         home: {
           eyebrow: "Decision Flow",
           title: "Start from ranked market decisions, not from raw documents.",
-          lead: "Use Home in three passes: Decision Board for ranked names, Watchlist for your narrow list, then Recent Changes for feed and digest context.",
+          lead: "Use Home in three passes: ranked board first, watchlist second, recent changes last.",
         },
         company: {
           eyebrow: "Company Workspace",
           title: "Work one issuer through Summary, Filings, Signals, and Context.",
-          lead: "The company screen is now split into local modes so you can inspect one layer at a time instead of scrolling through the whole research stack.",
+          lead: "Inspect one layer at a time instead of scrolling through the full research stack.",
         },
         review: {
           eyebrow: "Human Review Loop",
           title: "Clear grouped exceptions without leaving the queue.",
-          lead: "Review is the dedicated human judgment screen for contradictions, broken theses, revised filings, and other unresolved issue families.",
+          lead: "This is the judgment screen for contradictions, broken theses, revised filings, and unresolved issue families.",
         },
         ops: {
           eyebrow: "Operations",
           title: "Run, inspect health, and audit the system in separate modes.",
-          lead: "Ops is split so you can trigger actions, inspect health, and run audits without mixing them into one long control page.",
+          lead: "Trigger actions, inspect health, and run audits without mixing them into one long control page.",
         },
       };
       const current = copy[view] || copy.home;
@@ -572,7 +582,7 @@
           );
         }) || null
       : null;
-    const inboxRows = (data.inbox_rows || []).slice(0, 20);
+    const inboxRows = (data.inbox_rows || []).slice(0, 12);
     const marketData = data.market_monitor || {};
     const sourceSyncRows = data.source_sync_rows || marketData.source_syncs || [];
     const digestRows = data.digest_rows || [];
@@ -607,12 +617,12 @@
 
     if (marketMonitor) {
       const counts = marketData.counts || {};
-      const pickRows = marketData.stock_pick_candidates || [];
-      const avoidRows = marketData.avoid_candidates || [];
-      const riskRows = marketData.highest_risk_changes || [];
-      const improvedRows = marketData.most_improved || [];
-      const sectorRows = marketData.sector_heatmap || [];
-      const lateRows = marketData.late_periodic_rows || [];
+      const pickRows = (marketData.stock_pick_candidates || []).slice(0, 4);
+      const avoidRows = (marketData.avoid_candidates || []).slice(0, 4);
+      const riskRows = (marketData.highest_risk_changes || []).slice(0, 4);
+      const improvedRows = (marketData.most_improved || []).slice(0, 4);
+      const sectorRows = (marketData.sector_heatmap || []).slice(0, 5);
+      const lateRows = (marketData.late_periodic_rows || []).slice(0, 5);
       const staleWarning = marketData.staleness_warning;
       marketMonitor.innerHTML = `
         ${
@@ -632,12 +642,37 @@
           <div class="stat"><div class="summaryLabel">Rights issues 7d</div><strong>${esc(counts.rights_issues_7d || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Legal / regulatory 7d</div><strong>${esc(counts.lawsuits_regulatory_7d || 0)}</strong></div>
         </div>
+        <div class="boardSummaryRow">
+          <div class="boardSummaryCard">
+            <div class="summaryLabel">Top picks</div>
+            <strong>${pickRows.map((item) => esc(item.ticker)).join(" · ") || "none"}</strong>
+            <div class="meta">${
+              (counts.stock_pick_candidates || 0) >= 3
+                ? "Cleanest high-confidence Buy candidates right now."
+                : "Strict candidates first. When the board is sparse, it fills with the closest current setups and shows the blockers."
+            }</div>
+          </div>
+          <div class="boardSummaryCard">
+            <div class="summaryLabel">Top avoids</div>
+            <strong>${avoidRows.map((item) => esc(item.ticker)).join(" · ") || "none"}</strong>
+            <div class="meta">${
+              (counts.avoid_candidates || 0) >= 3
+                ? "Highest-conviction avoid signals right now."
+                : "Strict avoids first. When none qualify yet, the board shows the closest current stress setups and explains what still blocks the call."
+            }</div>
+          </div>
+          <div class="boardSummaryCard">
+            <div class="summaryLabel">Open next</div>
+            <strong>${pickRows[0]?.ticker || riskRows[0]?.ticker || "Choose a ranked issuer"}</strong>
+            <div class="meta">Open one issuer and verify the thesis against filings and evidence.</div>
+          </div>
+        </div>
         <div class="docGroups">
           <section class="docGroup">
             <div class="docGroupHeader">
               <div>
                 <h3>Stock-pick candidates</h3>
-                <div class="meta">Deterministic Buy candidates only. Requires high-confidence Buy stance, improving thesis, no open review queue, and evidence-backed reasons.</div>
+                <div class="meta">Strict Buy candidates first. If fewer than 3 qualify, the board fills with the nearest current setups and shows their blockers.</div>
               </div>
             </div>
             ${
@@ -649,22 +684,26 @@
                           item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
                         }>
                           <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
-                          <div class="meta">${esc(item.decision_state || "Buy")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
+                          <div class="meta">${esc(item.decision_state || "Buy")} · ${esc(item.qualification_label || "Qualified")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
                           <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No deterministic reasons captured."}</div>
-                          <div class="meta">${(item.decision_constraints || []).map(esc).join(" · ") || "No immediate constraints."}</div>
+                          <div class="meta">${
+                            item.qualification === "closest"
+                              ? `Blockers: ${(item.blockers || []).map(esc).join(" · ") || "No explicit blockers captured."}`
+                              : (item.decision_constraints || []).map(esc).join(" · ") || "No immediate constraints."
+                          }</div>
                           <div class="meta">${renderTimestamp(item.as_of_date)}</div>
                         </article>
                       `
                     )
-                    .join("")}</div>`
-                : `<div class="emptyState"><strong>No stock-pick candidates right now.</strong> The list only populates when the deterministic eligibility gates are met.</div>`
+                    .join("")}</div><div class="docGroupHeader compactNote"><div class="meta">Strict candidates shown first. ${esc(Math.max(0, (counts.stock_pick_candidates || 0)))} strict name${(counts.stock_pick_candidates || 0) === 1 ? "" : "s"} currently qualify.</div></div>`
+                : `<div class="emptyState"><strong>No stock-pick setups right now.</strong> Rebuild intelligence after more filings land, or inspect the highest-risk and most-improved lists below.</div>`
             }
           </section>
           <section class="docGroup">
             <div class="docGroupHeader">
               <div>
                 <h3>Avoid candidates</h3>
-                <div class="meta">Deterministic avoid calls only. Requires an Avoid stance with evidence-backed stress such as broken theses, critical signals, or poor credibility.</div>
+                <div class="meta">Strict avoid calls first. If fewer than 3 qualify, the board fills with the nearest current stress setups and shows what still blocks the avoid gate.</div>
               </div>
             </div>
             ${
@@ -676,15 +715,19 @@
                           item.ticker ? `data-focus-ticker="${esc(item.ticker)}"` : ""
                         }>
                           <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
-                          <div class="meta">${esc(item.decision_state || "Avoid")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
+                          <div class="meta">${esc(item.decision_state || "Avoid")} · ${esc(item.qualification_label || "Qualified")} · confidence ${esc(item.confidence || "high")} · score ${esc(item.score || 0)} · evidence ${esc(item.evidence_ref_count || 0)}</div>
                           <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No deterministic reasons captured."}</div>
-                          <div class="meta">${(item.decision_constraints || []).map(esc).join(" · ") || "No decision constraints captured."}</div>
+                          <div class="meta">${
+                            item.qualification === "closest"
+                              ? `Blockers: ${(item.blockers || []).map(esc).join(" · ") || "No explicit blockers captured."}`
+                              : (item.decision_constraints || []).map(esc).join(" · ") || "No decision constraints captured."
+                          }</div>
                           <div class="meta">${renderTimestamp(item.as_of_date)}</div>
                         </article>
                       `
                     )
-                    .join("")}</div>`
-                : `<div class="emptyState"><strong>No avoid candidates right now.</strong> The list only populates when the deterministic avoid gates are met.</div>`
+                    .join("")}</div><div class="docGroupHeader compactNote"><div class="meta">Strict avoids shown first. ${esc(Math.max(0, (counts.avoid_candidates || 0)))} strict name${(counts.avoid_candidates || 0) === 1 ? "" : "s"} currently qualify.</div></div>`
+                : `<div class="emptyState"><strong>No avoid setups right now.</strong> Rebuild intelligence after more filings land, or inspect the highest-risk changes below.</div>`
             }
           </section>
         </div>
@@ -742,20 +785,20 @@
             }
           </section>
         </div>
-        <div class="docGroups">
+        <div class="docGroups marketTails">
           <section class="docGroup">
             <div class="docGroupHeader">
               <div>
-                <h3>Sector heatmap</h3>
-                <div class="meta">Disclosure intensity and warning density over the last 7 days.</div>
+                <h3>Sector pressure snapshot</h3>
+                <div class="meta">Top sectors by disclosure intensity and warning density over the last 7 days.</div>
               </div>
             </div>
             ${
               sectorRows.length
-                ? `<table class="metricTable"><thead><tr><th>Sector</th><th>Signal count</th><th>Disclosures</th><th>Material events</th><th>Warnings</th><th>Critical</th></tr></thead><tbody>${sectorRows
+                ? `<table class="metricTable"><thead><tr><th>Sector</th><th>Signals</th><th>Events</th><th>Warnings</th><th>Critical</th></tr></thead><tbody>${sectorRows
                     .map(
                       (item) =>
-                        `<tr><td>${esc(item.sector)}</td><td>${esc(item.signal_count_7d || 0)}</td><td>${esc(item.disclosures_7d)}</td><td>${esc(item.material_events_7d)}</td><td>${esc(item.warning_signals_7d)}</td><td>${esc(item.critical_signals_7d)}</td></tr>`
+                        `<tr><td>${esc(item.sector)}</td><td>${esc(item.signal_count_7d || 0)}</td><td>${esc(item.material_events_7d)}</td><td>${esc(item.warning_signals_7d)}</td><td>${esc(item.critical_signals_7d)}</td></tr>`
                     )
                     .join("")}</tbody></table>`
                 : `<div class="emptyState"><strong>No sector heatmap yet.</strong></div>`
@@ -764,16 +807,16 @@
           <section class="docGroup">
             <div class="docGroupHeader">
               <div>
-                <h3>Potential late / missing periodic filings</h3>
-                <div class="meta">Heuristic based on the absence of a recent annual or periodic financial filing.</div>
+                <h3>Late or missing filing watch</h3>
+                <div class="meta">Top issuers with the clearest late / missing periodic filing pressure.</div>
               </div>
             </div>
             ${
               lateRows.length
-                ? `<table class="metricTable"><thead><tr><th>Ticker</th><th>Issuer</th><th>Expected</th><th>Due date</th><th>Latest periodic</th></tr></thead><tbody>${lateRows
+                ? `<table class="metricTable"><thead><tr><th>Ticker</th><th>Expected</th><th>Due date</th><th>Latest periodic</th></tr></thead><tbody>${lateRows
                     .map(
                       (item) =>
-                        `<tr><td>${esc(item.ticker)}</td><td>${esc(item.issuer_name || "")}</td><td>${esc(item.expected_label || "Periodic filing")}</td><td>${esc(item.expected_due_date || "—")}</td><td>${item.latest_periodic_at ? renderTimestamp(item.latest_periodic_at) : "Never"}</td></tr>`
+                        `<tr><td>${esc(item.ticker)}<div class="meta">${esc(item.issuer_name || "")}</div></td><td>${esc(item.expected_label || "Periodic filing")}</td><td>${esc(item.expected_due_date || "—")}</td><td>${item.latest_periodic_at ? renderTimestamp(item.latest_periodic_at) : "Never"}</td></tr>`
                     )
                     .join("")}</tbody></table>`
                 : `<div class="emptyState"><strong>No potentially late periodic issuers right now.</strong></div>`
@@ -787,9 +830,9 @@
       ? issuers
           .map(
             (item) => `
-              <button class="issuerCard ${item.ticker === state.selectedTicker ? "active" : ""}" type="button" data-ticker="${esc(
+              <article class="issuerCard ${item.ticker === state.selectedTicker ? "active" : ""}" data-ticker="${esc(
                 item.ticker
-              )}">
+              )}" role="button" tabindex="0">
                 <div class="issuerLine">
                   <div class="issuerTicker">${esc(item.ticker)}</div>
                   <button class="starButton ${watchlist.has(item.ticker.toUpperCase()) ? "starred" : ""}" type="button" data-star-ticker="${esc(item.ticker)}" title="Toggle watchlist">${watchlist.has(item.ticker.toUpperCase()) ? "\u2605" : "\u2606"}</button>
@@ -801,7 +844,7 @@
                   <span>${esc(item.latest_document_at || item.last_seen_at || "")}</span>
                 </div>
                 <div class="issuerCta">${item.ticker === state.selectedTicker ? "Open in company workspace" : "Select issuer"}</div>
-              </button>
+              </article>
             `
           )
           .join("")
@@ -1001,11 +1044,35 @@
       const topCard = payload.top_card || {};
       const decisionPanel = payload.decision_panel || {};
       const latestFiling = docs[0] || null;
+      const hasDocuments = docs.length > 0;
+      const hasDerivedSnapshot = Boolean(companySnapshot);
+      const hasNormalizedFacts = metrics.length > 0;
+      const summaryEmptyHtml = hasDocuments
+        ? analyzedCount > 0
+          ? `<div class="emptyState"><strong>No current v3 snapshot yet.</strong> This issuer already has ${analyzedCount} analyzed filing(s), so the missing piece is the derived intelligence layer. Use <strong>rebuild company intelligence</strong> first.</div>`
+          : `<div class="emptyState"><strong>No analyzed filing yet.</strong> Local documents exist for this issuer, but none are in the analyzed state. Run parse, extract, and rules on the newest filing before expecting a company snapshot.</div>`
+        : `<div class="emptyState"><strong>No filings downloaded for this issuer yet.</strong> Run discovery and download first. The company workspace only becomes useful after at least one filing is available locally.</div>`;
+      const claimsEmptyHtml = hasDerivedSnapshot
+        ? `<div class="emptyState"><strong>No claim or thesis state yet.</strong> This issuer has a snapshot, but no stable narrative or thesis evaluation has been generated yet. Generate summaries or wait for a newer filing.</div>`
+        : `<div class="emptyState"><strong>Claims and thesis are waiting on a derived snapshot.</strong> Build the decision layer first, then this panel will show management credibility and thesis status.</div>`;
+      const contextEmptyHtml = hasDerivedSnapshot
+        ? `<div class="emptyState"><strong>No peer or sector context yet.</strong> Comparative data is still thin for this issuer. Rebuild intelligence again after more peer issuers have current filings.</div>`
+        : `<div class="emptyState"><strong>No peer or sector explorer yet.</strong> The context view appears once this issuer has a derived snapshot and enough peer data to compare against.</div>`;
+      const metricsEmptyHtml = hasDocuments
+        ? analyzedCount > 0
+          ? `<div class="emptyState"><strong>No normalized metrics yet.</strong> The issuer has analyzed filings, so extraction likely did not map any stable fields yet. Re-run extract on the newest filing if that looks wrong.</div>`
+          : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Run parse and extract on the newest filing to populate revenue, cash flow, debt, and other normalized facts here.</div>`
+        : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Download a filing for this issuer before expecting metrics.</div>`;
+      const signalsEmptyHtml = hasNormalizedFacts || hasDocuments
+        ? analyzedCount > 0
+          ? `<div class="emptyState"><strong>No findings yet.</strong> The issuer has analyzed filings, but rules or summaries have not surfaced signals yet. Re-run rules or summarize on the latest analyzed filing if this looks incomplete.</div>`
+          : `<div class="emptyState"><strong>No findings yet.</strong> The issuer has local filings, but they are not analyzed yet. Parse, extract, and rules must finish before findings appear.</div>`
+        : `<div class="emptyState"><strong>No findings yet.</strong> Findings appear after at least one filing is downloaded and processed.</div>`;
 
-        companyOverview.innerHTML = `
+      companyOverview.innerHTML = `
         <div class="sectionEyebrow">Selected Company</div>
         <h2 class="focusTitle">${esc(selectedIssuer.issuer_name)}</h2>
-        <div class="focusSubtitle">${esc(selectedIssuer.ticker)} is the active focus. Start with the current stance, then verify it against filings and evidence below.</div>
+        <div class="focusSubtitle">${esc(selectedIssuer.ticker)} is the active focus. Start with the stance, then verify it against filings and evidence.</div>
         ${
           companySnapshot
             ? `<div class="findingStack">
@@ -1017,6 +1084,23 @@
                   <div class="meta"><strong>What to watch next:</strong> ${(decisionPanel.what_to_watch || []).map(esc).join(" · ") || "No follow-up watch items yet."}</div>
                 </article>
               </div>`
+            : hasDocuments
+              ? `<div class="findingStack">
+                  <article class="findingCard sev-${analyzedCount > 0 ? "warning" : "info"}">
+                    <div class="findingClaim">Snapshot readiness</div>
+                    <div class="meta">Documents: ${docs.length} · analyzed: ${analyzedCount} · failed: ${failedCount}</div>
+                    <div class="meta">${
+                      analyzedCount > 0
+                        ? "The source filings are analyzed, but the current derived intelligence layer has not been rebuilt for this issuer yet."
+                        : "The issuer has local filings, but none have reached analyzed state yet."
+                    }</div>
+                    <div class="meta">${
+                      analyzedCount > 0
+                        ? "Next action: rebuild company intelligence."
+                        : "Next action: parse, extract, and run rules on the newest filing before rebuilding intelligence."
+                    }</div>
+                  </article>
+                </div>`
             : ""
         }
         <div class="heroBar">
@@ -1056,13 +1140,13 @@
           "No rerun preview yet. Wait for the company scope to load."
         );
       }
+      const segmentSummary = (payload.segment_summary || []).slice(0, 6);
       if (companySnapshot) {
         const baseline = payload.baseline || {};
         const management = payload.management_credibility || {};
         const thesis = (payload.thesis_evaluations || []).slice(0, 3);
         const reviewRequired = (payload.review_required || []).slice(0, 6);
         const filingExpectations = (payload.filing_expectations || []).slice(0, 6);
-        const segmentSummary = (payload.segment_summary || []).slice(0, 6);
         const narrativeSignals = (payload.narrative_signals || []).slice(0, 4);
         const recentEvents = (payload.events || []).slice(0, 6);
         const peerComparison = payload.peer_comparison || {};
@@ -1239,9 +1323,9 @@
           }
         `;
       } else {
-        snapshotList.innerHTML = `<div class="emptyState"><strong>No v3 snapshot yet.</strong> Run intelligence for this issuer to generate the decision snapshot.</div>`;
-        claimsList.innerHTML = `<div class="emptyState"><strong>No claim or thesis state yet.</strong> Run intelligence after rules and summary generation.</div>`;
-        sectorExplorer.innerHTML = `<div class="emptyState"><strong>No peer or sector explorer yet.</strong> Run intelligence to populate comparative views.</div>`;
+        snapshotList.innerHTML = summaryEmptyHtml;
+        claimsList.innerHTML = claimsEmptyHtml;
+        sectorExplorer.innerHTML = contextEmptyHtml;
       }
       documentList.innerHTML = docs.length
         ? `<div class="docGroups">${Array.from(groupedDocs.entries())
@@ -1345,7 +1429,7 @@
                 )}</td><td>${esc(item.fiscal_year || "")} ${esc(item.fiscal_period || "")}</td></tr>`
             )
             .join("")}</tbody></table>`
-        : `<div class="emptyState"><strong>No normalized metrics yet.</strong> Run parse and extract to populate the fact layer for this issuer.</div>`;
+        : metricsEmptyHtml;
       revisionList.innerHTML = revisions.length
         ? `<table class="metricTable"><thead><tr><th>Source Record</th><th>Revisions</th><th>Latest</th></tr></thead><tbody>${revisions
             .map(
@@ -1375,7 +1459,7 @@
               `
             )
             .join("")}</div>`
-        : `<div class="emptyState"><strong>No findings yet.</strong> Run rules or summary generation after parsing and extraction to surface issuer-level signals here.</div>`;
+        : signalsEmptyHtml;
     }
 
     if (syncStatusList) {
@@ -1576,6 +1660,7 @@
     if (actionOutput) {
       actionOutput.textContent = "Starting daily sweep.\n";
     }
+    updateActionOutputState(false);
     if (actionErrorPanel) {
       actionErrorPanel.hidden = true;
     }
@@ -1623,6 +1708,7 @@
     if (actionOutput && !options.preserveOutput) {
       actionOutput.textContent = "";
     }
+    updateActionOutputState(false);
     if (actionErrorPanel) {
       actionErrorPanel.hidden = true;
     }
@@ -1667,6 +1753,7 @@
       throw new Error(result.error || `Review update failed: ${response.status}`);
     }
     await refreshSnapshot();
+    await fetchSectionDetail("review");
     if (actionStatus) {
       actionStatus.textContent = `Updated ${result.updated_count || ids.length} review item(s) to ${status}.`;
     }
@@ -1702,6 +1789,7 @@
           actionOutput.textContent = `${(payload.command || []).join(" ")}\n\n`;
         }
       }
+      updateActionOutputState(false);
     });
 
     source.addEventListener("stdout", (event) => {
@@ -1773,11 +1861,13 @@
           state.queueIndex = 0;
           state.queueTotal = 0;
           state.queuedActions = [];
+          updateActionOutputState(true);
           setActionButtonsDisabled(false);
           startPolling();
           return;
         }
 
+        updateActionOutputState(true);
         setActionButtonsDisabled(false);
         if (actionStatus) {
           if (fallbackMessage) {
