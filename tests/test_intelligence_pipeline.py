@@ -953,8 +953,10 @@ def test_build_nuance_findings_uses_section_cues_without_events():
         ticker="TAMU",
         latest_document=latest_document,
         latest_analysis=None,
+        latest_metrics=[],
         events=[],
         triggered_rules=[],
+        claims=[],
         claim_outcomes=[],
         segment_summary=[],
         evidence_context={},
@@ -977,6 +979,117 @@ def test_build_nuance_findings_uses_section_cues_without_events():
     assert json.loads(row_map["legal_note_focus"].payload_json)["page_start"] == 44
     assert json.loads(row_map["legal_note_focus"].payload_json)["stage"] == "active_process"
     assert json.loads(row_map["legal_note_focus"].payload_json)["severity_context"] == "developing"
+
+
+def test_build_nuance_findings_adds_capital_allocation_signals():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_disclosures",
+        source_record_id="disc-1",
+        ticker="TAMU",
+        title="Keterbukaan Informasi",
+        document_type="disclosure",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+    rows = _build_nuance_findings(
+        ticker="TAMU",
+        latest_document=latest_document,
+        latest_analysis=None,
+        latest_metrics=[
+            MetricPoint(
+                metric_id="m1",
+                document_id="doc-1",
+                metric_name="operating_cash_flow",
+                value_normalized=-1000000.0,
+                raw_value_text="-1000000",
+                currency="IDR",
+                unit_scale="units",
+                fiscal_year=2025,
+                fiscal_period="Annual",
+                period_end_date="2025-12-31",
+                audit_status=None,
+                consolidation_scope=None,
+                evidence_span_id=None,
+            ),
+            MetricPoint(
+                metric_id="m2",
+                document_id="doc-1",
+                metric_name="free_cash_flow",
+                value_normalized=-500000.0,
+                raw_value_text="-500000",
+                currency="IDR",
+                unit_scale="units",
+                fiscal_year=2025,
+                fiscal_period="Annual",
+                period_end_date="2025-12-31",
+                audit_status=None,
+                consolidation_scope=None,
+                evidence_span_id=None,
+            ),
+        ],
+        events=[
+            EventSignal(
+                event_id="ev-raise",
+                event_type="rights_issue",
+                severity="warning",
+                impact_direction="negative",
+                confidence=0.9,
+                rationale="Issuer launched a rights issue.",
+                evidence_span_id="span-raise",
+                payload_json=None,
+                detected_at="2026-04-17T00:00:00+00:00",
+            ),
+            EventSignal(
+                event_id="ev-proceeds",
+                event_type="use_of_proceeds",
+                severity="info",
+                impact_direction="mixed",
+                confidence=0.8,
+                rationale="Issuer updated proceeds deployment.",
+                evidence_span_id="span-proceeds",
+                payload_json=None,
+                detected_at="2026-04-17T00:00:00+00:00",
+            ),
+        ],
+        triggered_rules=[],
+        claims=[
+            ClaimRecord(
+                claim_id="claim-1",
+                ticker="TAMU",
+                source_document_id="doc-1",
+                claim_text="Use of proceeds will fund working capital needs.",
+                claim_type="funding_use",
+                claim_topic="funding",
+                claim_subject="use_of_proceeds",
+                claim_date=None,
+                claim_time_horizon=None,
+                claim_confidence=0.8,
+                evidence_span_id=None,
+                status="open",
+                payload_json=json.dumps({"qualitative_only": True}, sort_keys=True),
+            )
+        ],
+        claim_outcomes=[],
+        segment_summary=[],
+            evidence_context={
+                "span-proceeds": EvidenceContext(
+                    span_id="span-proceeds",
+                    document_id="doc-1",
+                    section_label="Use of Proceeds",
+                    excerpt_text="The proceeds will be used for working capital and debt repayment and may be reallocated later.",
+                )
+            },
+        section_cues=[],
+    )
+
+    row_map = {row.nuance_class: row for row in rows}
+    assert "dilution_dependence" in row_map
+    assert "proceeds_redeployment" in row_map
+    assert json.loads(row_map["proceeds_redeployment"].payload_json)["working_capital_use"] is True
+    assert json.loads(row_map["proceeds_redeployment"].payload_json)["revision_signal"] is True
 
 
 def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():

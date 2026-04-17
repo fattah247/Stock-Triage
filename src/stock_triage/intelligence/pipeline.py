@@ -642,8 +642,10 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         ticker=ticker,
         latest_document=latest_document,
         latest_analysis=latest_analysis,
+        latest_metrics=latest_metrics,
         events=latest_events,
         triggered_rules=latest_rules,
+        claims=claims,
         claim_outcomes=claim_outcomes,
         segment_summary=segment_summary,
         evidence_context=evidence_context,
@@ -1496,8 +1498,10 @@ def _build_nuance_findings(
     ticker: str,
     latest_document: CompanyDocument,
     latest_analysis: AnalysisSummary | None,
+    latest_metrics: list[MetricPoint],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
+    claims: list[ClaimRecord],
     claim_outcomes: list[ClaimOutcomeRecord],
     segment_summary: list[dict[str, Any]],
     evidence_context: dict[str, EvidenceContext],
@@ -1631,8 +1635,19 @@ def _build_nuance_findings(
                     },
                     sort_keys=True,
                 ),
+                )
             )
+
+    findings.extend(
+        _build_capital_allocation_findings(
+            ticker=ticker,
+            latest_document=latest_document,
+            latest_metrics=latest_metrics,
+            events=events,
+            claims=claims,
+            evidence_context=evidence_context,
         )
+    )
 
     if latest_analysis:
         for index, item in enumerate(latest_analysis.what_to_verify[:3], start=1):
@@ -1695,6 +1710,192 @@ def _build_nuance_findings(
         )
 
     return findings[:8]
+
+
+def _build_capital_allocation_findings(
+    *,
+    ticker: str,
+    latest_document: CompanyDocument,
+    latest_metrics: list[MetricPoint],
+    events: list[EventSignal],
+    claims: list[ClaimRecord],
+    evidence_context: dict[str, EvidenceContext],
+) -> list[NuanceFindingRecord]:
+    findings: list[NuanceFindingRecord] = []
+    metric_by_name = _metric_map(latest_metrics)
+    event_types = {event.event_type for event in events}
+    claim_types = {claim.claim_type for claim in claims}
+    funding_events = [
+        event
+        for event in events
+        if event.event_type in {"rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue", "use_of_proceeds"}
+    ]
+    if not funding_events:
+        return findings
+
+    dilution_events = [
+        event for event in funding_events if event.event_type in {"rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue"}
+    ]
+    operating_cash_flow = metric_by_name.get("operating_cash_flow")
+    free_cash_flow = metric_by_name.get("free_cash_flow")
+    share_count = metric_by_name.get("share_count")
+
+    if dilution_events and (
+        (operating_cash_flow is not None and operating_cash_flow < 0)
+        or (free_cash_flow is not None and free_cash_flow < 0)
+    ):
+        driver = "free cash flow remains negative" if free_cash_flow is not None and free_cash_flow < 0 else "operating cash flow remains negative"
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "capital", "dilution_dependence", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class="dilution_dependence",
+                severity="warning",
+                confidence=None,
+                section_label=None,
+                summary=f"Equity funding appears alongside cash-flow stress; {driver}, so the raise may be supporting the balance sheet rather than self-funded growth.",
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "capital_allocation",
+                        "event_types": [event.event_type for event in dilution_events],
+                        "operating_cash_flow": operating_cash_flow,
+                        "free_cash_flow": free_cash_flow,
+                        "share_count": share_count,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    if dilution_events and "use_of_proceeds" not in event_types and "funding_use" in claim_types:
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "capital", "proceeds_followup_open", DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class="proceeds_followup_open",
+                severity="warning",
+                confidence=None,
+                section_label="Use of Proceeds",
+                summary="Funding-use claims exist, but the latest filing still lacks an explicit proceeds update. Verify where the raised capital was actually deployed.",
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "capital_allocation",
+                        "event_types": [event.event_type for event in dilution_events],
+                        "claim_types": sorted(claim_types),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    for event in funding_events:
+        if event.event_type not in {"use_of_proceeds", "rights_issue", "private_placement", "capital_raise", "share_issue", "warrant_issue"}:
+            continue
+        context = _evidence_context_for(
+            evidence_context,
+            event.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        capital_context = _classify_capital_allocation_context(
+            text=context.excerpt_text if context and context.excerpt_text else event.rationale or ""
+        )
+        if not capital_context["flag_summary"]:
+            continue
+        findings.append(
+            NuanceFindingRecord(
+                nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "capital", event.event_id, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                nuance_class=capital_context["nuance_class"],
+                severity=capital_context["severity"],
+                confidence=event.confidence,
+                section_label=context.section_label if context else "Use of Proceeds",
+                summary=capital_context["flag_summary"],
+                evidence_span_id=event.evidence_span_id,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "capital_allocation",
+                        "event_type": event.event_type,
+                        "context_class": capital_context["context_class"],
+                        "working_capital_use": capital_context["working_capital_use"],
+                        "debt_repayment_use": capital_context["debt_repayment_use"],
+                        "capex_use": capital_context["capex_use"],
+                        "revision_signal": capital_context["revision_signal"],
+                        "excerpt_text": context.excerpt_text if context else None,
+                        "section_label": context.section_label if context else None,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    deduped: list[NuanceFindingRecord] = []
+    seen_classes: set[str] = set()
+    for finding in findings:
+        if finding.nuance_class in seen_classes:
+            continue
+        seen_classes.add(finding.nuance_class)
+        deduped.append(finding)
+    return deduped
+
+
+def _classify_capital_allocation_context(*, text: str) -> dict[str, Any]:
+    lowered = (text or "").lower()
+    working_capital_use = bool(re.search(r"working capital|modal kerja", lowered, flags=re.IGNORECASE))
+    debt_repayment_use = bool(re.search(r"repay|pelunasan|repayment|bayar.*utang|debt repayment", lowered, flags=re.IGNORECASE))
+    capex_use = bool(re.search(r"capex|belanja modal|ekspansi|fleet upgrade|acquisition|investasi", lowered, flags=re.IGNORECASE))
+    revision_signal = bool(re.search(r"revisi|reallocate|realokasi|change in use|perubahan penggunaan", lowered, flags=re.IGNORECASE))
+
+    if revision_signal:
+        return {
+            "nuance_class": "proceeds_redeployment",
+            "severity": "warning",
+            "context_class": "reallocation",
+            "working_capital_use": working_capital_use,
+            "debt_repayment_use": debt_repayment_use,
+            "capex_use": capex_use,
+            "revision_signal": revision_signal,
+            "flag_summary": "Use-of-proceeds language suggests a revision or reallocation. Read the old versus new deployment plan directly.",
+        }
+    if working_capital_use or debt_repayment_use:
+        return {
+            "nuance_class": "funding_use_quality",
+            "severity": "warning",
+            "context_class": "defensive_use",
+            "working_capital_use": working_capital_use,
+            "debt_repayment_use": debt_repayment_use,
+            "capex_use": capex_use,
+            "revision_signal": revision_signal,
+            "flag_summary": "Raised capital appears directed to working capital or debt repayment. Verify whether the funding is defensive rather than growth-oriented.",
+        }
+    if capex_use:
+        return {
+            "nuance_class": "funding_use_execution",
+            "severity": "info",
+            "context_class": "expansion_use",
+            "working_capital_use": working_capital_use,
+            "debt_repayment_use": debt_repayment_use,
+            "capex_use": capex_use,
+            "revision_signal": revision_signal,
+            "flag_summary": "",
+        }
+    return {
+        "nuance_class": "funding_use_unclear",
+        "severity": "warning",
+        "context_class": "unclear",
+        "working_capital_use": working_capital_use,
+        "debt_repayment_use": debt_repayment_use,
+        "capex_use": capex_use,
+        "revision_signal": revision_signal,
+        "flag_summary": "Funding language is present, but the end use is still unclear. Read the proceeds note directly before assuming deployment quality.",
+    }
 
 
 def _nuance_summary_for_event(*, event: EventSignal, context: EvidenceContext | None) -> str:
