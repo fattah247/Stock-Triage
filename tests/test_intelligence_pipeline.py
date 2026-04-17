@@ -21,6 +21,7 @@ from stock_triage.intelligence.pipeline import (
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
     _build_narrative_signals,
+    _build_next_read_guidance,
     _build_uncertainty_rows,
     _rank_next_read_rows,
     _build_recommendation_summary,
@@ -875,6 +876,7 @@ def test_build_uncertainty_rows_adds_note_level_scope_rows():
         peer_view={},
         filing_expectations=[],
         evidence_context=evidence_context,
+        section_cues=[],
     )
 
     row_map = {row.uncertainty_class: row for row in rows}
@@ -883,6 +885,96 @@ def test_build_uncertainty_rows_adds_note_level_scope_rows():
     assert "Focus on Auditor Report" in row_map["audit_qualification_scope"].summary
     assert row_map["related_party_scope"].section_label == "Notes to Financial Statements"
     assert row_map["related_party_scope"].severity == "warning"
+
+
+def test_build_uncertainty_rows_uses_section_cues_without_events():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+    baseline = BaselineChoice(
+        kind="prior_period",
+        document=latest_document,
+        comparable=True,
+        reason="Comparable prior filing exists.",
+    )
+
+    rows = _build_uncertainty_rows(
+        ticker="TAMU",
+        latest_document=latest_document,
+        baseline=baseline,
+        events=[],
+        review_items=[],
+        peer_view={},
+        filing_expectations=[],
+        evidence_context={},
+        section_cues=[
+            type("Cue", (), {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "section_label": "Notes to Financial Statements",
+                "text": "The notes discuss related party transactions and contingent liabilities in detail.",
+                "excerpt_text": "The notes discuss related party transactions and contingent liabilities in detail.",
+            })()
+        ],
+    )
+
+    row_map = {row.uncertainty_class: row for row in rows}
+    assert row_map["related_party_scope"].section_label == "Notes to Financial Statements"
+    assert row_map["contingent_liability_scope"].section_label == "Notes to Financial Statements"
+
+
+def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+
+    rows = _build_next_read_guidance(
+        ticker="TAMU",
+        latest_document=latest_document,
+        filing_expectations=[],
+        nuance_findings=[],
+        uncertainty_rows=[],
+        contradiction_rows=[],
+        latest_analysis=None,
+        section_cues=[
+            type("Cue", (), {
+                "chunk_id": "chunk-a",
+                "document_id": "doc-1",
+                "section_label": "Auditor Report",
+                "text": "Independent auditor report text.",
+                "excerpt_text": "Independent auditor report text.",
+            })(),
+            type("Cue", (), {
+                "chunk_id": "chunk-b",
+                "document_id": "doc-1",
+                "section_label": "MD&A",
+                "text": "Management discussion text.",
+                "excerpt_text": "Management discussion text.",
+            })(),
+        ],
+    )
+
+    assert rows[0].reason_class == "section_focus"
+    assert rows[0].target_section_label == "Auditor Report"
+    assert json.loads(rows[0].payload_json)["excerpt_text"] == "Independent auditor report text."
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

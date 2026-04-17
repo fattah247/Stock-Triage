@@ -330,6 +330,15 @@ class ContradictionRecord:
 
 
 @dataclass(frozen=True)
+class SectionCue:
+    chunk_id: str
+    document_id: str
+    section_label: str | None
+    text: str
+    excerpt_text: str
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -622,6 +631,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         claims=claims,
         credibility_summary=credibility_summary,
     )
+    section_cues = _load_section_cues(conn, document_id=latest_document.document_id)
     evidence_context = _load_evidence_contexts(
         conn,
         document_ids=[document.document_id for document in documents],
@@ -645,6 +655,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         peer_view=peer_view,
         filing_expectations=filing_expectations,
         evidence_context=evidence_context,
+        section_cues=section_cues,
     )
     contradiction_rows = _build_contradiction_rows(
         ticker=ticker,
@@ -662,6 +673,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         uncertainty_rows=uncertainty_rows,
         contradiction_rows=contradiction_rows,
         latest_analysis=latest_analysis,
+        section_cues=section_cues,
     )
     snapshot_payload_json = _build_snapshot_payload_json(
         profile=profile,
@@ -892,6 +904,32 @@ def _load_evidence_contexts(
         )
         for row in rows
     }
+
+
+def _load_section_cues(
+    conn: sqlite3.Connection,
+    *,
+    document_id: str,
+) -> list[SectionCue]:
+    rows = conn.execute(
+        """
+        SELECT chunk_id, document_id, section_label, text
+        FROM document_chunks
+        WHERE document_id = ?
+        ORDER BY ord
+        """,
+        (document_id,),
+    ).fetchall()
+    return [
+        SectionCue(
+            chunk_id=row["chunk_id"],
+            document_id=row["document_id"],
+            section_label=row["section_label"],
+            text=row["text"],
+            excerpt_text=(row["text"] or "")[:240],
+        )
+        for row in rows
+    ]
 
 
 def _evidence_context_for(
@@ -1643,6 +1681,7 @@ def _build_uncertainty_rows(
     peer_view: dict[str, Any],
     filing_expectations: list[FilingExpectationRecord],
     evidence_context: dict[str, EvidenceContext],
+    section_cues: list[SectionCue],
 ) -> list[UncertaintyRecord]:
     rows: list[UncertaintyRecord] = []
 
@@ -1790,6 +1829,34 @@ def _build_uncertainty_rows(
             )
         )
 
+    existing_note_scope = {row.uncertainty_class for row in rows}
+    for clue in _build_note_section_clues(section_cues):
+        if clue["uncertainty_class"] in existing_note_scope:
+            continue
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, clue["uncertainty_class"], clue["section_label"], DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class=str(clue["uncertainty_class"]),
+                severity=str(clue["severity"]),
+                summary=str(clue["summary"]),
+                confidence=None,
+                section_label=str(clue["section_label"]) if clue.get("section_label") else None,
+                evidence_span_id=None,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "section_cue",
+                        "section_label": clue.get("section_label"),
+                        "excerpt_text": clue.get("excerpt_text"),
+                        "matched_keywords": clue.get("matched_keywords"),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
     comparability_warnings = peer_view.get("comparability_warnings") or []
     if comparability_warnings:
         rows.append(
@@ -1873,6 +1940,88 @@ def _build_uncertainty_rows(
         seen_uncertainty.add(key)
         deduped.append(row)
     return deduped[:8]
+
+
+def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, Any]]:
+    cues: list[dict[str, Any]] = []
+    patterns = [
+        (
+            "audit_qualification_scope",
+            "critical",
+            {"Auditor Report"},
+            [r"qualified opinion", r"wajar dengan pengecualian", r"adverse opinion", r"disclaimer of opinion"],
+            "Auditor qualification language appears in this section. Read the opinion basis directly.",
+        ),
+        (
+            "going_concern_scope",
+            "critical",
+            {"Auditor Report", "Notes to Financial Statements"},
+            [r"going concern", r"kelangsungan usaha", r"substantial doubt", r"material uncertainty"],
+            "Going-concern language appears in this section. Read the assumptions and liquidity note directly.",
+        ),
+        (
+            "debt_covenant_scope",
+            "warning",
+            {"Notes to Financial Statements", "Risk Factors"},
+            [r"covenant", r"waiver", r"breach", r"pelanggaran", r"persyaratan pinjaman"],
+            "Debt covenant language appears in this section. Read the waiver/breach detail directly.",
+        ),
+        (
+            "related_party_scope",
+            "warning",
+            {"Notes to Financial Statements", "Governance"},
+            [r"related party", r"pihak berelasi", r"transaksi afiliasi"],
+            "Related-party language appears in this section. Read the transaction terms and balances directly.",
+        ),
+        (
+            "contingent_liability_scope",
+            "warning",
+            {"Notes to Financial Statements", "Legal and Regulatory"},
+            [r"contingent liabilit", r"liabilitas kontinjensi", r"commitments and contingencies", r"komitmen dan kontinjensi"],
+            "Contingent-liability language appears in this section. Read the exposure triggers and amounts directly.",
+        ),
+        (
+            "legal_severity_scope",
+            "critical",
+            {"Legal and Regulatory", "Notes to Financial Statements"},
+            [r"lawsuit", r"litigation", r"gugatan", r"sengketa hukum"],
+            "Legal dispute language appears in this section. Read the claim stage and monetary exposure directly.",
+        ),
+        (
+            "regulatory_severity_scope",
+            "critical",
+            {"Legal and Regulatory", "Governance"},
+            [r"regulatory", r"sanksi", r"otoritas jasa keuangan", r"special supervision", r"pembatasan kegiatan usaha"],
+            "Regulatory restriction language appears in this section. Read the sanction scope and remediation directly.",
+        ),
+    ]
+    seen: set[tuple[str, str | None]] = set()
+    for cue in section_cues:
+        section_label = cue.section_label
+        if not section_label:
+            continue
+        lowered = cue.text.lower()
+        for uncertainty_class, severity, sections, regexes, summary in patterns:
+            if section_label not in sections:
+                continue
+            matched = [regex for regex in regexes if re.search(regex, lowered, flags=re.IGNORECASE)]
+            if not matched:
+                continue
+            key = (uncertainty_class, section_label)
+            if key in seen:
+                continue
+            seen.add(key)
+            cues.append(
+                {
+                    "uncertainty_class": uncertainty_class,
+                    "severity": severity,
+                    "section_label": section_label,
+                    "summary": summary,
+                    "excerpt_text": cue.excerpt_text,
+                    "matched_keywords": matched,
+                }
+            )
+    return cues
 
 
 def _build_contradiction_rows(
@@ -1998,6 +2147,7 @@ def _build_next_read_guidance(
     uncertainty_rows: list[UncertaintyRecord],
     contradiction_rows: list[ContradictionRecord],
     latest_analysis: AnalysisSummary | None,
+    section_cues: list[SectionCue],
 ) -> list[NextReadRecord]:
     rows: list[NextReadRecord] = []
 
@@ -2063,6 +2213,7 @@ def _build_next_read_guidance(
     for row in uncertainty_rows:
         if not row.requires_human_review:
             continue
+        details = json.loads(row.payload_json)
         rows.append(
             NextReadRecord(
                 guidance_id=_stable_id("next-read", ticker, "uncertainty", row.uncertainty_id, DERIVED_VERSION),
@@ -2081,6 +2232,7 @@ def _build_next_read_guidance(
                         "source": "uncertainty",
                         "uncertainty_class": row.uncertainty_class,
                         "severity": row.severity,
+                        "excerpt_text": details.get("excerpt_text"),
                     },
                     sort_keys=True,
                 ),
@@ -2090,6 +2242,7 @@ def _build_next_read_guidance(
             return _rank_next_read_rows(rows)
 
     for row in contradiction_rows:
+        details = json.loads(row.payload_json)
         rows.append(
             NextReadRecord(
                 guidance_id=_stable_id("next-read", ticker, "contradiction", row.contradiction_id, DERIVED_VERSION),
@@ -2108,6 +2261,7 @@ def _build_next_read_guidance(
                         "source": "contradiction",
                         "contradiction_class": row.contradiction_class,
                         "severity": row.severity,
+                        "excerpt_text": details.get("excerpt_text"),
                     },
                     sort_keys=True,
                 ),
@@ -2132,6 +2286,38 @@ def _build_next_read_guidance(
                     evidence_reference_count=0,
                     blocked_by=None,
                     payload_json=json.dumps({"source": "analysis"}, sort_keys=True),
+                )
+            )
+            if len(rows) >= 5:
+                break
+
+    if len(rows) < 5:
+        existing_sections = {row.target_section_label for row in rows if row.target_section_label}
+        for cue in section_cues:
+            if not cue.section_label or cue.section_label in existing_sections:
+                continue
+            if cue.section_label not in {"Auditor Report", "Notes to Financial Statements", "Legal and Regulatory", "Risk Factors"}:
+                continue
+            rows.append(
+                NextReadRecord(
+                    guidance_id=_stable_id("next-read", ticker, "section", cue.chunk_id, DERIVED_VERSION),
+                    ticker=ticker,
+                    document_id=latest_document.document_id,
+                    priority_rank=len(rows) + 1,
+                    target_document_type=latest_document.document_type,
+                    target_period_label=None,
+                    target_section_label=cue.section_label,
+                    reason_class="section_focus",
+                    why_this_matters=f"Read {cue.section_label} directly; this section is present in the latest filing and may hold unresolved detail.",
+                    evidence_reference_count=0,
+                    blocked_by=None,
+                    payload_json=json.dumps(
+                        {
+                            "source": "section_cue",
+                            "excerpt_text": cue.excerpt_text,
+                        },
+                        sort_keys=True,
+                    ),
                 )
             )
             if len(rows) >= 5:
@@ -2182,6 +2368,7 @@ def _reason_priority(reason_class: str | None) -> int:
         "nuance_review": 2,
         "uncertainty_followup": 3,
         "analysis_verify": 4,
+        "section_focus": 5,
     }
     return order.get(str(reason_class or ""), 9)
 

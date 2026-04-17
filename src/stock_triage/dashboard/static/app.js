@@ -1292,7 +1292,7 @@
               ? `<table class="metricTable"><thead><tr><th>Next read</th><th>Target</th><th>Reason</th><th>Evidence refs</th></tr></thead><tbody>${nextReadGuidance
                   .map(
                     (item) =>
-                      `<tr><td>${esc(item.why_this_matters || "")}</td><td>${esc(item.target_document_type || "current filing")}${item.target_section_label ? `<div class="meta">${esc(item.target_section_label)}</div>` : ""}</td><td>${esc(item.reason_class || "")}</td><td>${esc(item.evidence_reference_count ?? 0)}</td></tr>`
+                      `<tr><td>${esc(item.why_this_matters || "")}${item.details?.excerpt_text ? `<div class="meta">${esc(item.details.excerpt_text)}</div>` : ""}</td><td>${esc(item.target_document_type || "current filing")}${item.target_section_label ? `<div class="meta">${esc(item.target_section_label)}</div>` : ""}</td><td>${esc(item.reason_class || "")}</td><td>${esc(item.evidence_reference_count ?? 0)}</td></tr>`
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No next-read guidance yet.</strong></div>`
