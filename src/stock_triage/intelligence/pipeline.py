@@ -1469,7 +1469,7 @@ def _build_nuance_findings(
             event.evidence_span_id,
             document_id=latest_document.document_id,
         )
-        summary = event.rationale or f"{event.event_type.replace('_', ' ')} requires review."
+        summary = _nuance_summary_for_event(event=event, context=context)
         findings.append(
             NuanceFindingRecord(
                 nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "event", event.event_id, DERIVED_VERSION),
@@ -1618,6 +1618,21 @@ def _build_nuance_findings(
     return findings[:8]
 
 
+def _nuance_summary_for_event(*, event: EventSignal, context: EvidenceContext | None) -> str:
+    section = context.section_label if context and context.section_label else None
+    if event.event_type == "qualified_audit_opinion":
+        return f"Auditor qualification appears{f' in {section}' if section else ''}; read the opinion basis before trusting headline results."
+    if event.event_type == "going_concern_warning":
+        return f"Going-concern language appears{f' in {section}' if section else ''}; solvency assumptions need direct note review."
+    if event.event_type == "covenant_stress":
+        return f"Covenant or waiver language appears{f' in {section}' if section else ''}; debt headroom still needs human review."
+    if event.event_type == "related_party_transaction":
+        return f"Related-party activity appears{f' in {section}' if section else ''}; terms and value transfer need note-level review."
+    if event.event_type == "contingent_liability":
+        return f"Contingent liabilities appear{f' in {section}' if section else ''}; exposure size and trigger conditions need note review."
+    return event.rationale or f"{event.event_type.replace('_', ' ')} requires review."
+
+
 def _build_uncertainty_rows(
     *,
     ticker: str,
@@ -1703,6 +1718,78 @@ def _build_uncertainty_rows(
             )
         )
 
+    note_level_uncertainties = {
+        "qualified_audit_opinion": (
+            "audit_qualification_scope",
+            "critical",
+            "Audit opinion is not clean; read the opinion basis and affected balances directly.",
+        ),
+        "going_concern_warning": (
+            "going_concern_scope",
+            "critical",
+            "Going-concern language needs direct reading to judge solvency risk and management assumptions.",
+        ),
+        "covenant_stress": (
+            "debt_covenant_scope",
+            "warning",
+            "Debt covenant language needs note-level reading to judge breach, waiver, and maturity risk.",
+        ),
+        "related_party_transaction": (
+            "related_party_scope",
+            "warning",
+            "Related-party disclosures need note-level reading to judge pricing, terms, and governance risk.",
+        ),
+        "contingent_liability": (
+            "contingent_liability_scope",
+            "warning",
+            "Contingent liabilities need note-level reading to judge size, triggers, and timing.",
+        ),
+        "lawsuit": (
+            "legal_severity_scope",
+            "critical",
+            "Legal disclosures need direct reading to judge claim size, stage, and operational risk.",
+        ),
+        "regulatory_action": (
+            "regulatory_severity_scope",
+            "critical",
+            "Regulatory disclosures need direct reading to judge restriction scope and remediation burden.",
+        ),
+    }
+    for event in events:
+        if event.event_type not in note_level_uncertainties:
+            continue
+        uncertainty_class, severity, base_summary = note_level_uncertainties[event.event_type]
+        context = _evidence_context_for(
+            evidence_context,
+            event.evidence_span_id,
+            document_id=latest_document.document_id,
+        )
+        section = context.section_label if context and context.section_label else None
+        summary = base_summary if section is None else f"{base_summary} Focus on {section}."
+        rows.append(
+            UncertaintyRecord(
+                uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, event.event_id, uncertainty_class, DERIVED_VERSION),
+                ticker=ticker,
+                document_id=latest_document.document_id,
+                uncertainty_class=uncertainty_class,
+                severity=severity,
+                summary=summary,
+                confidence=event.confidence,
+                section_label=section,
+                evidence_span_id=event.evidence_span_id,
+                requires_human_review=True,
+                payload_json=json.dumps(
+                    {
+                        "source": "event_note_scope",
+                        "event_type": event.event_type,
+                        "section_label": section,
+                        "impact_direction": event.impact_direction,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
     comparability_warnings = peer_view.get("comparability_warnings") or []
     if comparability_warnings:
         rows.append(
@@ -1777,7 +1864,15 @@ def _build_uncertainty_rows(
             )
         )
 
-    return rows[:6]
+    deduped: list[UncertaintyRecord] = []
+    seen_uncertainty: set[tuple[str, str | None]] = set()
+    for row in rows:
+        key = (row.uncertainty_class, row.section_label)
+        if key in seen_uncertainty:
+            continue
+        seen_uncertainty.add(key)
+        deduped.append(row)
+    return deduped[:8]
 
 
 def _build_contradiction_rows(

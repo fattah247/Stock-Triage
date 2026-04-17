@@ -11,12 +11,17 @@ from stock_triage.intelligence import DERIVED_VERSION, rederive_intelligence, ru
 from stock_triage.intelligence.claims import ClaimCredibilitySummary, ClaimRecord
 from stock_triage.intelligence.pipeline import (
     AnalysisSummary,
+    BaselineChoice,
+    CompanyDocument,
+    EvidenceContext,
     EventSignal,
+    FilingExpectationRecord,
     MetricPoint,
     NextReadRecord,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
     _build_narrative_signals,
+    _build_uncertainty_rows,
     _rank_next_read_rows,
     _build_recommendation_summary,
     _build_segment_summary,
@@ -801,6 +806,83 @@ def test_rank_next_read_rows_prioritizes_reason_and_section():
 
     assert [row.guidance_id for row in ranked] == ["g-3", "g-2", "g-1"]
     assert [row.priority_rank for row in ranked] == [1, 2, 3]
+
+
+def test_build_uncertainty_rows_adds_note_level_scope_rows():
+    latest_document = CompanyDocument(
+        document_id="doc-1",
+        source_name="idx_financial_reports",
+        source_record_id="fin-1",
+        ticker="TAMU",
+        title="Annual Report 2024",
+        document_type="annual_report",
+        version_group_id=None,
+        source_modified_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+        created_at="2026-04-17T00:00:00+00:00",
+    )
+    baseline = BaselineChoice(
+        kind="prior_period",
+        document=latest_document,
+        comparable=True,
+        reason="Comparable prior filing exists.",
+    )
+    events = [
+        EventSignal(
+            event_id="event-audit",
+            event_type="qualified_audit_opinion",
+            severity="critical",
+            impact_direction="negative",
+            confidence=0.98,
+            rationale="Qualified opinion detected.",
+            evidence_span_id="span-audit",
+            payload_json="{}",
+            detected_at="2026-04-17T00:00:00+00:00",
+        ),
+        EventSignal(
+            event_id="event-rpt",
+            event_type="related_party_transaction",
+            severity="warning",
+            impact_direction="mixed",
+            confidence=0.88,
+            rationale="Related-party transaction detected.",
+            evidence_span_id="span-rpt",
+            payload_json="{}",
+            detected_at="2026-04-17T00:00:00+00:00",
+        ),
+    ]
+    evidence_context = {
+        "span-audit": EvidenceContext(
+            span_id="span-audit",
+            document_id="doc-1",
+            section_label="Auditor Report",
+            excerpt_text="Qualified opinion...",
+        ),
+        "span-rpt": EvidenceContext(
+            span_id="span-rpt",
+            document_id="doc-1",
+            section_label="Notes to Financial Statements",
+            excerpt_text="Related party transactions...",
+        ),
+    }
+
+    rows = _build_uncertainty_rows(
+        ticker="TAMU",
+        latest_document=latest_document,
+        baseline=baseline,
+        events=events,
+        review_items=[],
+        peer_view={},
+        filing_expectations=[],
+        evidence_context=evidence_context,
+    )
+
+    row_map = {row.uncertainty_class: row for row in rows}
+    assert row_map["audit_qualification_scope"].section_label == "Auditor Report"
+    assert row_map["audit_qualification_scope"].requires_human_review is True
+    assert "Focus on Auditor Report" in row_map["audit_qualification_scope"].summary
+    assert row_map["related_party_scope"].section_label == "Notes to Financial Statements"
+    assert row_map["related_party_scope"].severity == "warning"
 
 
 def _seed_phase10_inputs(tmp_config) -> None:
