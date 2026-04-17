@@ -922,6 +922,8 @@ def test_build_uncertainty_rows_uses_section_cues_without_events():
                 "chunk_id": "chunk-1",
                 "document_id": "doc-1",
                 "section_label": "Notes to Financial Statements",
+                "page_start": 12,
+                "page_end": 13,
                 "text": "The notes discuss related party transactions and contingent liabilities in detail.",
                 "excerpt_text": "The notes discuss related party transactions and contingent liabilities in detail.",
             })()
@@ -961,6 +963,8 @@ def test_build_nuance_findings_uses_section_cues_without_events():
                 "chunk_id": "chunk-1",
                 "document_id": "doc-1",
                 "section_label": "Legal and Regulatory",
+                "page_start": 44,
+                "page_end": 45,
                 "text": "The company discusses a lawsuit and regulatory sanction in this section.",
                 "excerpt_text": "The company discusses a lawsuit and regulatory sanction in this section.",
             })()
@@ -970,6 +974,7 @@ def test_build_nuance_findings_uses_section_cues_without_events():
     row_map = {row.nuance_class: row for row in rows}
     assert row_map["legal_note_focus"].section_label == "Legal and Regulatory"
     assert json.loads(row_map["legal_note_focus"].payload_json)["excerpt_text"] == "The company discusses a lawsuit and regulatory sanction in this section."
+    assert json.loads(row_map["legal_note_focus"].payload_json)["page_start"] == 44
 
 
 def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
@@ -999,6 +1004,8 @@ def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
                 "chunk_id": "chunk-a",
                 "document_id": "doc-1",
                 "section_label": "Auditor Report",
+                "page_start": 3,
+                "page_end": 4,
                 "text": "Independent auditor report text.",
                 "excerpt_text": "Independent auditor report text.",
             })(),
@@ -1006,6 +1013,8 @@ def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
                 "chunk_id": "chunk-b",
                 "document_id": "doc-1",
                 "section_label": "MD&A",
+                "page_start": 8,
+                "page_end": 8,
                 "text": "Management discussion text.",
                 "excerpt_text": "Management discussion text.",
             })(),
@@ -1015,6 +1024,7 @@ def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
     assert rows[0].reason_class == "section_focus"
     assert rows[0].target_section_label == "Auditor Report"
     assert json.loads(rows[0].payload_json)["excerpt_text"] == "Independent auditor report text."
+    assert json.loads(rows[0].payload_json)["page_start"] == 3
 
 
 def test_build_next_read_guidance_carries_nuance_excerpt():
@@ -1044,7 +1054,7 @@ def test_build_next_read_guidance_carries_nuance_excerpt():
                 "evidence_span_id": None,
                 "nuance_class": "audit_note_focus",
                 "severity": "critical",
-                "payload_json": json.dumps({"excerpt_text": "Basis for qualified opinion paragraph."}, sort_keys=True),
+                "payload_json": json.dumps({"excerpt_text": "Basis for qualified opinion paragraph.", "page_start": 7, "page_end": 8}, sort_keys=True),
             })()
         ],
         uncertainty_rows=[],
@@ -1055,6 +1065,7 @@ def test_build_next_read_guidance_carries_nuance_excerpt():
 
     assert rows[0].reason_class == "nuance_review"
     assert json.loads(rows[0].payload_json)["excerpt_text"] == "Basis for qualified opinion paragraph."
+    assert json.loads(rows[0].payload_json)["page_start"] == 7
 
 
 def _seed_phase10_inputs(tmp_config) -> None:

@@ -334,6 +334,8 @@ class SectionCue:
     chunk_id: str
     document_id: str
     section_label: str | None
+    page_start: int | None
+    page_end: int | None
     text: str
     excerpt_text: str
 
@@ -914,7 +916,7 @@ def _load_section_cues(
 ) -> list[SectionCue]:
     rows = conn.execute(
         """
-        SELECT chunk_id, document_id, section_label, text
+        SELECT chunk_id, document_id, section_label, page_start, page_end, text
         FROM document_chunks
         WHERE document_id = ?
         ORDER BY ord
@@ -926,6 +928,8 @@ def _load_section_cues(
             chunk_id=row["chunk_id"],
             document_id=row["document_id"],
             section_label=row["section_label"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
             text=row["text"],
             excerpt_text=(row["text"] or "")[:240],
         )
@@ -1678,6 +1682,8 @@ def _build_nuance_findings(
                         "section_label": clue.get("section_label"),
                         "excerpt_text": clue.get("excerpt_text"),
                         "matched_keywords": clue.get("matched_keywords"),
+                        "page_start": clue.get("page_start"),
+                        "page_end": clue.get("page_end"),
                     },
                     sort_keys=True,
                 ),
@@ -1791,6 +1797,8 @@ def _build_section_nuance_clues(
                     "summary": summary,
                     "excerpt_text": cue.excerpt_text,
                     "matched_keywords": matched,
+                    "page_start": cue.page_start,
+                    "page_end": cue.page_end,
                 }
             )
     return clues
@@ -1976,6 +1984,8 @@ def _build_uncertainty_rows(
                         "section_label": clue.get("section_label"),
                         "excerpt_text": clue.get("excerpt_text"),
                         "matched_keywords": clue.get("matched_keywords"),
+                        "page_start": clue.get("page_start"),
+                        "page_end": clue.get("page_end"),
                     },
                     sort_keys=True,
                 ),
@@ -2144,6 +2154,8 @@ def _build_note_section_clues(section_cues: list[SectionCue]) -> list[dict[str, 
                     "summary": summary,
                     "excerpt_text": cue.excerpt_text,
                     "matched_keywords": matched,
+                    "page_start": cue.page_start,
+                    "page_end": cue.page_end,
                 }
             )
     return cues
@@ -2329,6 +2341,8 @@ def _build_next_read_guidance(
                         "nuance_class": finding.nuance_class,
                         "severity": finding.severity,
                         "excerpt_text": details.get("excerpt_text"),
+                        "page_start": details.get("page_start"),
+                        "page_end": details.get("page_end"),
                     },
                     sort_keys=True,
                 ),
@@ -2360,6 +2374,8 @@ def _build_next_read_guidance(
                         "uncertainty_class": row.uncertainty_class,
                         "severity": row.severity,
                         "excerpt_text": details.get("excerpt_text"),
+                        "page_start": details.get("page_start"),
+                        "page_end": details.get("page_end"),
                     },
                     sort_keys=True,
                 ),
@@ -2389,6 +2405,8 @@ def _build_next_read_guidance(
                         "contradiction_class": row.contradiction_class,
                         "severity": row.severity,
                         "excerpt_text": details.get("excerpt_text"),
+                        "page_start": details.get("page_start"),
+                        "page_end": details.get("page_end"),
                     },
                     sort_keys=True,
                 ),
@@ -2442,6 +2460,8 @@ def _build_next_read_guidance(
                         {
                             "source": "section_cue",
                             "excerpt_text": cue.excerpt_text,
+                            "page_start": cue.page_start,
+                            "page_end": cue.page_end,
                         },
                         sort_keys=True,
                     ),

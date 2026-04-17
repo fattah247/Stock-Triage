@@ -312,6 +312,14 @@
     return "info";
   }
 
+  function renderPageRange(details) {
+    const start = details?.page_start;
+    const end = details?.page_end;
+    if (start == null && end == null) return "";
+    if (start != null && end != null && start !== end) return `Pages ${esc(start)}-${esc(end)}`;
+    return `Page ${esc(start != null ? start : end)}`;
+  }
+
   function findingSeverity(item) {
     const level = normalizeSeverity(item?.name, "");
     if (level) return level;
@@ -1293,7 +1301,7 @@
               ? `<table class="metricTable"><thead><tr><th>Next read</th><th>Target</th><th>Reason</th><th>Evidence refs</th></tr></thead><tbody>${nextReadGuidance
                   .map(
                     (item) =>
-                      `<tr><td>${esc(item.why_this_matters || "")}${item.details?.excerpt_text ? `<div class="meta">${esc(item.details.excerpt_text)}</div>` : ""}</td><td>${esc(item.target_document_type || "current filing")}${item.target_section_label ? `<div class="meta">${esc(item.target_section_label)}</div>` : ""}</td><td>${esc(item.reason_class || "")}</td><td>${esc(item.evidence_reference_count ?? 0)}</td></tr>`
+                      `<tr><td>${esc(item.why_this_matters || "")}${item.details?.excerpt_text ? `<div class="meta">${esc(item.details.excerpt_text)}</div>` : ""}${renderPageRange(item.details) ? `<div class="meta">${renderPageRange(item.details)}</div>` : ""}</td><td>${esc(item.target_document_type || "current filing")}${item.target_section_label ? `<div class="meta">${esc(item.target_section_label)}</div>` : ""}</td><td>${esc(item.reason_class || "")}</td><td>${esc(item.evidence_reference_count ?? 0)}</td></tr>`
                   )
                   .join("")}</tbody></table>`
               : `<div class="emptyState"><strong>No next-read guidance yet.</strong></div>`
@@ -1548,6 +1556,7 @@
                       <div class="findingClaim">${esc(item.summary || "")}</div>
                       <div class="meta">Section: ${esc(item.section_label || "unknown")} · confidence ${esc(formatPct(item.confidence != null ? Number(item.confidence) * 100 : null, 0) || "—")}</div>
                       ${item.details?.excerpt_text ? `<div class="meta">${esc(item.details.excerpt_text)}</div>` : ""}
+                      ${renderPageRange(item.details) ? `<div class="meta">${renderPageRange(item.details)}</div>` : ""}
                       <div class="meta">${item.requires_human_review ? "Needs human read." : "System-level nuance only."}</div>
                     </article>
                   `
