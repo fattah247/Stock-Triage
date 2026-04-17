@@ -13,6 +13,7 @@ from stock_triage.intelligence.pipeline import (
     AnalysisSummary,
     BaselineChoice,
     CompanyDocument,
+    ContradictionHistoryRow,
     ContradictionRecord,
     EvidenceContext,
     EventSignal,
@@ -26,6 +27,7 @@ from stock_triage.intelligence.pipeline import (
     _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
+    _build_persistent_contradiction_signals,
     _build_persistent_risk_signals,
     _build_unresolved_nuance_summary,
     _build_uncertainty_rows,
@@ -1282,10 +1284,21 @@ def test_build_unresolved_nuance_summary_groups_focuses():
             )
         ],
         persistent_risk_signals=[],
+        persistent_contradiction_signals=[
+            {
+                "contradiction_class": "claim_vs_outcome",
+                "label": "Claim vs Outcome",
+                "repeat_count": 2,
+                "summary": "Claim credibility contradiction persists across 2 recent analyzed filings.",
+                "severity": "critical",
+            }
+        ],
     )
 
-    assert summary["critical_count"] == 4
-    assert summary["focus_rows"][0]["label"] == "Legal / Regulatory"
+    assert summary["critical_count"] == 5
+    assert summary["focus_rows"][0]["label"] == "Claim / Credibility"
+    assert {item["label"] for item in summary["focus_rows"]} >= {"Claim / Credibility", "Legal / Regulatory"}
+    assert summary["persistent_contradictions"][0]["label"] == "Claim vs Outcome"
     assert summary["next_action"]["why_this_matters"] == "Read the legal section first."
 
 
@@ -1322,6 +1335,52 @@ def test_build_persistent_risk_signals_repeats_focus_across_filings():
     assert rows[0]["focus_key"] == "accounting_audit"
     assert rows[0]["repeat_count"] == 2
     assert rows[1]["focus_key"] == "capital_allocation"
+    assert rows[1]["repeat_count"] == 2
+
+
+def test_build_persistent_contradiction_signals_repeats_across_filings():
+    rows = _build_persistent_contradiction_signals(
+        [
+            ContradictionHistoryRow(
+                document_id="doc-1",
+                document_type="annual_report",
+                as_of="2026-04-01T00:00:00+00:00",
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                source_claim_id="claim-1",
+            ),
+            ContradictionHistoryRow(
+                document_id="doc-2",
+                document_type="financial_statement",
+                as_of="2025-12-31T00:00:00+00:00",
+                contradiction_class="claim_vs_outcome",
+                severity="critical",
+                source_claim_id="claim-2",
+            ),
+            ContradictionHistoryRow(
+                document_id="doc-3",
+                document_type="annual_report",
+                as_of="2025-06-30T00:00:00+00:00",
+                contradiction_class="mixed_contract_signals",
+                severity="warning",
+                source_claim_id=None,
+            ),
+            ContradictionHistoryRow(
+                document_id="doc-4",
+                document_type="annual_report",
+                as_of="2024-12-31T00:00:00+00:00",
+                contradiction_class="mixed_contract_signals",
+                severity="warning",
+                source_claim_id=None,
+            ),
+        ]
+    )
+
+    assert rows[0]["contradiction_class"] == "claim_vs_outcome"
+    assert rows[0]["repeat_count"] == 2
+    assert rows[0]["severity"] == "critical"
+    assert "persists across 2 recent analyzed filings" in rows[0]["summary"]
+    assert rows[1]["contradiction_class"] == "mixed_contract_signals"
     assert rows[1]["repeat_count"] == 2
 
 

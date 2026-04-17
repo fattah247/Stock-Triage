@@ -349,6 +349,16 @@ class FocusHistoryRow:
 
 
 @dataclass(frozen=True)
+class ContradictionHistoryRow:
+    document_id: str
+    document_type: str | None
+    as_of: str
+    contradiction_class: str
+    severity: str
+    source_claim_id: str | None
+
+
+@dataclass(frozen=True)
 class ComparableCompanyState:
     ticker: str
     issuer_name: str
@@ -680,6 +690,12 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         events=latest_events,
         evidence_context=evidence_context,
     )
+    contradiction_history = _load_contradiction_history(
+        conn,
+        documents=documents[:5],
+        current_rows=contradiction_rows,
+    )
+    persistent_contradiction_signals = _build_persistent_contradiction_signals(contradiction_history)
     next_read_guidance = _build_next_read_guidance(
         ticker=ticker,
         latest_document=latest_document,
@@ -705,6 +721,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         next_read_guidance=next_read_guidance,
         contradiction_rows=contradiction_rows,
         persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
         deltas=deltas,
         events=latest_events,
         triggered_rules=latest_rules,
@@ -1147,6 +1164,59 @@ def _load_focus_history(
                     focus_keys=tuple(sorted(focus_keys)),
                 )
             )
+    return rows
+
+
+def _load_contradiction_history(
+    conn: sqlite3.Connection,
+    *,
+    documents: list[CompanyDocument],
+    current_rows: list[ContradictionRecord],
+) -> list[ContradictionHistoryRow]:
+    if not documents:
+        return []
+    rows: list[ContradictionHistoryRow] = []
+    latest_document = documents[0]
+    for row in current_rows:
+        rows.append(
+            ContradictionHistoryRow(
+                document_id=latest_document.document_id,
+                document_type=latest_document.document_type,
+                as_of=latest_document.source_modified_at or latest_document.updated_at,
+                contradiction_class=row.contradiction_class,
+                severity=row.severity,
+                source_claim_id=row.source_claim_id,
+            )
+        )
+    prior_documents = documents[1:]
+    if not prior_documents:
+        return rows
+    prior_document_map = {document.document_id: document for document in prior_documents}
+    placeholders = ",".join("?" for _ in prior_documents)
+    fetched = conn.execute(
+        f"""
+        SELECT document_id, contradiction_class, severity, source_claim_id
+        FROM contradiction_rows
+        WHERE derived_version = ?
+          AND document_id IN ({placeholders})
+        ORDER BY updated_at DESC, contradiction_id ASC
+        """,
+        (DERIVED_VERSION, *(document.document_id for document in prior_documents)),
+    ).fetchall()
+    for item in fetched:
+        document = prior_document_map.get(item["document_id"])
+        if document is None:
+            continue
+        rows.append(
+            ContradictionHistoryRow(
+                document_id=item["document_id"],
+                document_type=document.document_type,
+                as_of=document.source_modified_at or document.updated_at,
+                contradiction_class=item["contradiction_class"],
+                severity=item["severity"],
+                source_claim_id=item["source_claim_id"],
+            )
+        )
     return rows
 
 
@@ -2899,6 +2969,7 @@ def _build_unresolved_nuance_summary(
     contradiction_rows: list[ContradictionRecord],
     next_read_guidance: list[NextReadRecord],
     persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
@@ -2944,6 +3015,15 @@ def _build_unresolved_nuance_summary(
                 "section_label": None,
             }
         )
+    for item in persistent_contradiction_signals:
+        entries.append(
+            {
+                "focus_key": _focus_bucket_for_class(str(item["contradiction_class"])),
+                "severity": item["severity"],
+                "summary": item["summary"],
+                "section_label": None,
+            }
+        )
 
     grouped: dict[str, dict[str, Any]] = {}
     severity_rank = {"critical": 3, "warning": 2, "info": 1, "ok": 0}
@@ -2981,6 +3061,16 @@ def _build_unresolved_nuance_summary(
         }
         for item in persistent_risk_signals[:3]
     ]
+    persistent_contradictions = [
+        {
+            "contradiction_class": item["contradiction_class"],
+            "label": item["label"],
+            "repeat_count": item["repeat_count"],
+            "summary": item["summary"],
+            "severity": item["severity"],
+        }
+        for item in persistent_contradiction_signals[:3]
+    ]
     next_action = None
     if next_read_guidance:
         first = next_read_guidance[0]
@@ -2995,6 +3085,7 @@ def _build_unresolved_nuance_summary(
         "human_review_count": len(entries),
         "focus_rows": focus_rows,
         "persistent_focus": persistent_focus,
+        "persistent_contradictions": persistent_contradictions,
         "next_action": next_action,
     }
 
@@ -3035,6 +3126,15 @@ def _focus_bucket_label(focus_key: str) -> str:
     return labels.get(focus_key, focus_key.replace("_", " ").title())
 
 
+def _contradiction_label(contradiction_class: str) -> str:
+    labels = {
+        "claim_vs_outcome": "Claim vs Outcome",
+        "current_positive_claim_vs_critical_risk": "Positive Claim vs Critical Risk",
+        "mixed_contract_signals": "Mixed Contract Signals",
+    }
+    return labels.get(contradiction_class, contradiction_class.replace("_", " ").title())
+
+
 def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[dict[str, Any]]:
     grouped: dict[str, list[FocusHistoryRow]] = {}
     for row in history_rows:
@@ -3065,6 +3165,43 @@ def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[
     return rows
 
 
+def _build_persistent_contradiction_signals(history_rows: list[ContradictionHistoryRow]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[ContradictionHistoryRow]] = {}
+    for row in history_rows:
+        grouped.setdefault(row.contradiction_class, []).append(row)
+    severity_rank = {"critical": 2, "warning": 1, "info": 0}
+    rows: list[dict[str, Any]] = []
+    for contradiction_class, items in grouped.items():
+        unique_documents = sorted({item.document_id for item in items})
+        if len(unique_documents) < 2:
+            continue
+        items_sorted = sorted(items, key=lambda item: (item.as_of, item.document_id), reverse=True)
+        severity = max(items, key=lambda item: severity_rank.get(item.severity, 0)).severity
+        repeated_claim_carry = contradiction_class == "claim_vs_outcome" and any(item.source_claim_id for item in items)
+        summary = f"{_contradiction_label(contradiction_class)} contradiction remains unresolved across {len(unique_documents)} recent analyzed filings."
+        if repeated_claim_carry:
+            summary = f"Claim credibility contradiction persists across {len(unique_documents)} recent analyzed filings."
+        rows.append(
+            {
+                "contradiction_class": contradiction_class,
+                "label": _contradiction_label(contradiction_class),
+                "repeat_count": len(unique_documents),
+                "severity": severity,
+                "summary": summary,
+                "document_ids": [item.document_id for item in items_sorted[:3]],
+                "latest_as_of": items_sorted[0].as_of,
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            0 if item["severity"] == "critical" else 1,
+            -int(item["repeat_count"]),
+            str(item["contradiction_class"]),
+        )
+    )
+    return rows
+
+
 def _build_snapshot_payload_json(
     *,
     profile: CompanyProfile,
@@ -3081,6 +3218,7 @@ def _build_snapshot_payload_json(
     next_read_guidance: list[NextReadRecord],
     contradiction_rows: list[ContradictionRecord],
     persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
     deltas: list[DeltaRecord],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
@@ -3132,6 +3270,7 @@ def _build_snapshot_payload_json(
         contradiction_rows=contradiction_rows,
         next_read_guidance=next_read_guidance,
         persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
     )
     payload = {
         "ticker": profile.ticker,
@@ -3172,6 +3311,7 @@ def _build_snapshot_payload_json(
         "recommendation": decision_panel.get("recommendation"),
         "unresolved_nuance_summary": unresolved_nuance_summary,
         "persistent_risk_signals": persistent_risk_signals,
+        "persistent_contradiction_signals": persistent_contradiction_signals,
         "fiscal_year_end_month": profile.fiscal_year_end_month,
         "fiscal_year_end_source": profile.fiscal_year_end_source,
         "filing_expectations": [

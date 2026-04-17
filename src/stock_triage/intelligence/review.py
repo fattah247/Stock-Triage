@@ -1261,6 +1261,8 @@ def _build_snapshot_nuance_audit_row(
     dominant_focus = focus_rows[0] if focus_rows else None
     persistent_signals = list(payload.get("persistent_risk_signals") or [])
     persistent_top = persistent_signals[0] if persistent_signals else None
+    persistent_contradictions = list(payload.get("persistent_contradiction_signals") or [])
+    persistent_contradiction_top = persistent_contradictions[0] if persistent_contradictions else None
 
     contradiction_count = len(contradiction_rows)
     critical_contradictions = sum(1 for row in contradiction_rows if str(row.get("severity") or "") == "critical")
@@ -1296,6 +1298,10 @@ def _build_snapshot_nuance_audit_row(
     )
     if persistent_top:
         score += int(persistent_top.get("repeat_count") or 0) * (6 if str(persistent_top.get("severity")) == "critical" else 3)
+    if persistent_contradiction_top:
+        score += int(persistent_contradiction_top.get("repeat_count") or 0) * (
+            7 if str(persistent_contradiction_top.get("severity")) == "critical" else 4
+        )
     reasons: list[str] = []
     if critical_contradictions:
         reasons.append(f"{critical_contradictions} critical contradiction row(s) need review")
@@ -1311,6 +1317,10 @@ def _build_snapshot_nuance_audit_row(
         reasons.append(f"{blocked_coverage_count} blocked coverage obligation(s) limit confidence")
     if persistent_top:
         reasons.append(str(persistent_top.get("summary") or "A risk focus repeats across recent filings"))
+    if persistent_contradiction_top:
+        reasons.append(
+            str(persistent_contradiction_top.get("summary") or "A contradiction pattern repeats across recent filings")
+        )
     if not reasons and next_read_guidance:
         reasons.append(f"{len(next_read_guidance)} ranked next-read target(s) remain open")
 
@@ -1335,6 +1345,8 @@ def _build_snapshot_nuance_audit_row(
         "dominant_focus_count": dominant_focus.get("count") if dominant_focus else 0,
         "persistent_focus_label": persistent_top.get("label") if persistent_top else None,
         "persistent_focus_repeat_count": persistent_top.get("repeat_count") if persistent_top else 0,
+        "persistent_contradiction_label": persistent_contradiction_top.get("label") if persistent_contradiction_top else None,
+        "persistent_contradiction_repeat_count": persistent_contradiction_top.get("repeat_count") if persistent_contradiction_top else 0,
         "next_action": (unresolved_summary.get("next_action") or {}).get("why_this_matters"),
         "updated_at": updated_at,
     }
