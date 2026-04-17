@@ -443,6 +443,8 @@ def test_recommendation_summary_classifies_pick_and_avoid_candidates():
         triggered_rules=[],
         peer_anomaly_count=0,
         decision_constraints=["Keep leverage stable.", "Debt surge appears.", "Watch the next H1 filing window."],
+        persistent_risk_signals=[],
+        persistent_contradiction_signals=[],
     )
     assert pick["bucket"] == RECOMMENDATION_BUCKET_STOCK_PICK
     assert pick["score"] > 0
@@ -473,12 +475,54 @@ def test_recommendation_summary_classifies_pick_and_avoid_candidates():
         triggered_rules=[],
         peer_anomaly_count=1,
         decision_constraints=["Clear critical rules.", "Debt surge appears.", "Resolve the active debt stress before revisiting the name."],
+        persistent_risk_signals=[],
+        persistent_contradiction_signals=[],
     )
     assert avoid["bucket"] == RECOMMENDATION_BUCKET_AVOID
     assert avoid["score"] > 0
     assert avoid["reason_1"]
     assert avoid["reason_2"]
     assert avoid["reason_3"]
+
+
+def test_recommendation_summary_demotes_pick_when_persistent_critical_risk_is_active():
+    recommendation = _build_recommendation_summary(
+        ticker="GOOD",
+        issuer_name="PT Good Shipping Tbk",
+        as_of_document_id="doc-good-a",
+        stance="Buy",
+        confidence="high",
+        overall_state="stable",
+        thesis_state="improving",
+        credibility_band="high",
+        data_completeness_pct=88.0,
+        why=["Comparable baseline is clean", "Improving thesis conditions are matched", "No review queue remains open"],
+        what_changed=["Revenue changed +24.0% versus baseline.", "Operating profit changed +18.0% versus baseline."],
+        what_to_watch=["Watch the next H1 filing window."],
+        must_improve=["Keep leverage stable."],
+        thesis_breakers=["Debt surge appears."],
+        quality_flags=[],
+        positive_factors=["revenue increased", "operating_profit increased"],
+        negative_factors=[],
+        review_items=[],
+        events=[],
+        triggered_rules=[],
+        peer_anomaly_count=0,
+        decision_constraints=["Keep leverage stable.", "Debt surge appears.", "Watch the next H1 filing window."],
+        persistent_risk_signals=[
+            {
+                "label": "Legal / Regulatory",
+                "severity": "critical",
+                "persistence_state": "active",
+                "repeat_count": 2,
+            }
+        ],
+        persistent_contradiction_signals=[],
+    )
+
+    assert recommendation["bucket"] == "neither"
+    assert recommendation["ranking_inputs"]["persistent_active_critical_count"] == 1
+    assert recommendation["eligible"] is False
 
 
 def test_next_expected_filing_window_matches_v3_2_deadline_table():

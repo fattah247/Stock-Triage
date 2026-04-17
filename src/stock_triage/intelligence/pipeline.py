@@ -3307,6 +3307,29 @@ def _build_snapshot_payload_json(
         credibility_summary=credibility_summary,
         thesis_evaluations=thesis_evaluations,
     )
+    health["watchlist_priority"] = _watchlist_priority_with_persistence(
+        current_priority=str(health.get("watchlist_priority") or "low"),
+        persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
+    )
+    health["negative_factors"] = _dedupe_keep_order(
+        [
+            *[str(item) for item in health.get("negative_factors") or []],
+            *_persistence_negative_factors(
+                persistent_risk_signals=persistent_risk_signals,
+                persistent_contradiction_signals=persistent_contradiction_signals,
+            ),
+        ]
+    )[:5]
+    health["reasons"] = _dedupe_keep_order(
+        [
+            *[str(item) for item in health.get("reasons") or []],
+            *_persistence_reason_texts(
+                persistent_risk_signals=persistent_risk_signals,
+                persistent_contradiction_signals=persistent_contradiction_signals,
+            ),
+        ]
+    )[:8]
     delta_counts: dict[str, int] = {}
     for delta in deltas:
         delta_counts[delta.delta_kind] = delta_counts.get(delta.delta_kind, 0) + 1
@@ -3326,6 +3349,8 @@ def _build_snapshot_payload_json(
         profile=profile,
         top_card=health,
         peer_view=peer_view,
+        persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
     )
     unresolved_nuance_summary = _build_unresolved_nuance_summary(
         filing_expectations=filing_expectations,
@@ -3840,6 +3865,8 @@ def _build_decision_panel(
     review_items: list[ReviewQueueItem],
     top_card: dict[str, Any],
     peer_view: dict[str, Any],
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
 ) -> dict[str, Any]:
     why = list(top_card.get("reasons") or [])[:3]
     what_changed = _summarize_deltas(deltas, limit=3)
@@ -3891,6 +3918,8 @@ def _build_decision_panel(
         triggered_rules=triggered_rules,
         peer_anomaly_count=len(peer_view.get("anomalies") or []),
         decision_constraints=decision_constraints,
+        persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
     )
     return {
         "stance": top_card.get("decision_state"),
@@ -3949,6 +3978,8 @@ def _build_recommendation_summary(
     triggered_rules: list[TriggeredRule],
     peer_anomaly_count: int,
     decision_constraints: list[str],
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
 ) -> dict[str, Any]:
     open_review_count = len(review_items)
     critical_review_count = sum(1 for item in review_items if item.priority == "high")
@@ -3958,6 +3989,31 @@ def _build_recommendation_summary(
     warning_event_count = sum(1 for event in events if (event.severity or "") == "warning")
     critical_signal_count = critical_rule_count + critical_event_count
     warning_signal_count = warning_rule_count + warning_event_count
+    persistent_active_count = sum(
+        1
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+        if str(item.get("persistence_state") or "") == "active"
+    )
+    persistent_reappeared_count = sum(
+        1
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+        if str(item.get("persistence_state") or "") == "reappeared"
+    )
+    persistent_stale_count = sum(
+        1
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+        if str(item.get("persistence_state") or "") == "stale"
+    )
+    persistent_active_critical_count = sum(
+        1
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+        if str(item.get("persistence_state") or "") == "active" and str(item.get("severity") or "") == "critical"
+    )
+    persistent_reappeared_critical_count = sum(
+        1
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+        if str(item.get("persistence_state") or "") == "reappeared" and str(item.get("severity") or "") == "critical"
+    )
     positive_factor_count = len(positive_factors)
     negative_factor_count = len(negative_factors)
     quality_flag_count = len(quality_flags)
@@ -3996,6 +4052,8 @@ def _build_recommendation_summary(
             credibility_band in {"high", "acceptable"},
             open_review_count == 0,
             critical_signal_count == 0,
+            persistent_active_critical_count == 0,
+            persistent_reappeared_critical_count == 0,
             quality_flag_count <= _MAX_PICK_QUALITY_FLAGS,
             data_completeness_pct >= _MIN_PICK_DATA_COMPLETENESS_PCT,
             evidence_ref_count >= _MIN_PICK_EVIDENCE_REF_COUNT,
@@ -4013,6 +4071,8 @@ def _build_recommendation_summary(
                 or thesis_state == "broken"
                 or credibility_band == "poor"
                 or quality_flag_count >= 2
+                or persistent_active_critical_count > 0
+                or persistent_reappeared_critical_count > 0
             ),
             evidence_ref_count >= _MIN_AVOID_EVIDENCE_REF_COUNT,
             len(avoid_reasons) >= 3,
@@ -4031,6 +4091,9 @@ def _build_recommendation_summary(
         - (peer_anomaly_count * 5)
         - (open_review_count * 20)
         - (critical_signal_count * 40)
+        - (persistent_active_count * 25)
+        - (persistent_reappeared_count * 18)
+        - (persistent_stale_count * 4)
     )
     avoid_score = (
         (110 if stance == "Avoid" else 0)
@@ -4045,6 +4108,9 @@ def _build_recommendation_summary(
         + (quality_flag_count * 6)
         + (peer_anomaly_count * 4)
         + (evidence_ref_count * 2)
+        + (persistent_active_count * 14)
+        + (persistent_reappeared_count * 10)
+        + (persistent_stale_count * 2)
         - (positive_factor_count * 5)
     )
     if avoid_eligible:
@@ -4097,6 +4163,11 @@ def _build_recommendation_summary(
             "negative_factor_count": negative_factor_count,
             "quality_flag_count": quality_flag_count,
             "peer_anomaly_count": peer_anomaly_count,
+            "persistent_active_count": persistent_active_count,
+            "persistent_reappeared_count": persistent_reappeared_count,
+            "persistent_stale_count": persistent_stale_count,
+            "persistent_active_critical_count": persistent_active_critical_count,
+            "persistent_reappeared_critical_count": persistent_reappeared_critical_count,
             "pick_score": pick_score,
             "avoid_score": avoid_score,
         },
@@ -4878,6 +4949,59 @@ def _watchlist_priority_for(
     if review_items or thesis_state in {"weakening", "improving"} or overall_state in {"review_required", "watch"}:
         return "medium"
     return "low"
+
+
+def _watchlist_priority_with_persistence(
+    *,
+    current_priority: str,
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
+) -> str:
+    order = {"low": 0, "medium": 1, "high": 2}
+    priority = str(current_priority or "low")
+    active_critical = any(
+        str(item.get("persistence_state") or "") == "active" and str(item.get("severity") or "") == "critical"
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+    )
+    reappeared_any = any(
+        str(item.get("persistence_state") or "") == "reappeared"
+        for item in [*persistent_risk_signals, *persistent_contradiction_signals]
+    )
+    if active_critical:
+        return "high"
+    if reappeared_any and order.get(priority, 0) < order["medium"]:
+        return "medium"
+    return priority
+
+
+def _persistence_reason_texts(
+    *,
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
+) -> list[str]:
+    rows: list[str] = []
+    for item in [*persistent_risk_signals[:2], *persistent_contradiction_signals[:2]]:
+        state = str(item.get("persistence_state") or "")
+        label = str(item.get("label") or "Persistent signal")
+        if state == "active":
+            rows.append(f"{label} remains active across recent filings.")
+        elif state == "reappeared":
+            rows.append(f"{label} reappeared after a quiet period.")
+    return _dedupe_keep_order(rows)[:2]
+
+
+def _persistence_negative_factors(
+    *,
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
+) -> list[str]:
+    rows: list[str] = []
+    for item in [*persistent_risk_signals[:2], *persistent_contradiction_signals[:2]]:
+        state = str(item.get("persistence_state") or "")
+        label = str(item.get("label") or "persistent issue").replace(" / ", "_").replace(" ", "_").lower()
+        if state in {"active", "reappeared"}:
+            rows.append(f"{label} persisted")
+    return _dedupe_keep_order(rows)[:2]
 
 
 def _compare_numeric(value: float, operator: str, threshold: float) -> bool:
