@@ -16,6 +16,7 @@ from ..hardening import load_backlog
 from ..intelligence.pipeline import DERIVED_VERSION
 from ..intelligence.review import (
     load_intelligence_kpis,
+    load_nuance_audit,
     load_intelligence_observability,
     load_latest_digests,
     load_latest_golden_runs,
@@ -193,6 +194,7 @@ def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
             "canary_rows": [row.__dict__ for row in canary.rows],
             "source_sync_rows": _load_source_sync_rows_from_cfg(cfg),
             "observability": load_intelligence_observability(cfg),
+            "nuance_audit": load_nuance_audit(cfg, limit=8),
             "golden_rows": load_latest_golden_runs(cfg, limit=5),
             "coverage_status": coverage,
         }

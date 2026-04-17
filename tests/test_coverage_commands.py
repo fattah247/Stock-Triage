@@ -64,6 +64,16 @@ def test_coverage_status_materializes_rows_and_prints_summary(tmp_config, monkey
 def test_coverage_preview_and_nuance_audit_commands_are_scoped(tmp_config, monkeypatch, capsys):
     _seed_phase10_inputs(tmp_config)
     _write_phase12_theses(tmp_config)
+    load_coverage_status(
+        tmp_config,
+        date_from=None,
+        date_to=None,
+        scope="ticker-set",
+        ticker="TAMU",
+        tickers=None,
+        limit=10,
+        materialize=True,
+    )
     monkeypatch.setattr("stock_triage.commands.coverage.load_config", lambda: tmp_config)
 
     preview_exit = cmd_coverage_preview(
@@ -88,6 +98,10 @@ def test_coverage_preview_and_nuance_audit_commands_are_scoped(tmp_config, monke
     assert audit_exit == 0
     assert "nuance-audit:" in audit_out
     assert "target_ticker=TAMU" in audit_out
+    audit_payload = json.loads(audit_out.strip().splitlines()[-1])
+    assert audit_payload["audit"]["scope"] == "ticker"
+    assert audit_payload["audit"]["target_ticker"] == "TAMU"
+    assert "summary" in audit_payload["audit"]
 
 
 def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
@@ -118,6 +132,8 @@ def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
         ops = json.loads(urlopen(f"{handle.url}/api/detail?section=ops").read().decode("utf-8"))
         assert "coverage_status" in ops
         assert "summary" in ops["coverage_status"]
+        assert "nuance_audit" in ops
+        assert "summary" in ops["nuance_audit"]
     finally:
         handle.server.shutdown()
         handle.server.server_close()

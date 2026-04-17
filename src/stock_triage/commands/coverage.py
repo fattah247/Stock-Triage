@@ -14,7 +14,7 @@ from ..coverage import (
     run_coverage_action,
 )
 from ..db import WriterQueue, run_migrations
-from ..intelligence.review import load_intelligence_observability
+from ..intelligence.review import load_intelligence_observability, load_nuance_audit
 from ..logging_setup import setup_logging
 
 
@@ -110,19 +110,22 @@ def cmd_nuance_audit(args: argparse.Namespace) -> int:
     setup_logging(cfg)
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
-    report = load_intelligence_observability(cfg)
+    observability = load_intelligence_observability(cfg)
+    audit = load_nuance_audit(cfg, ticker=args.ticker, limit=args.limit)
     output = {
-        "scope": "ticker" if args.ticker else "global",
-        "target_ticker": args.ticker.upper() if args.ticker else None,
+        "scope": audit["scope"],
+        "target_ticker": audit["target_ticker"],
         "limit": args.limit,
-        "observability": report,
+        "observability": observability,
+        "audit": audit,
     }
     print(
         "nuance-audit: "
         f"scope={output['scope']} "
         f"target_ticker={output['target_ticker'] or '-'} "
-        f"low_confidence_event_companies={report.get('low_confidence_event_companies', 0)} "
-        f"missing_recommendations={report.get('missing_recommendations', 0)}"
+        f"leaders={audit['summary'].get('leader_count', 0)} "
+        f"coverage_bridge={audit['summary'].get('coverage_bridge_count', 0)} "
+        f"low_confidence_event_companies={observability.get('summary', {}).get('low_confidence_event_companies', 0)}"
     )
     print(json.dumps(output, sort_keys=True))
     return 0

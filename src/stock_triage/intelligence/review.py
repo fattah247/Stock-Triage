@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..alerts.pipeline import _SEVERITY_ORDER
 from ..config import Config
+from ..coverage import COVERAGE_VERSION, default_coverage_range
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import load_fiscal_year_overrides
 from .pipeline import DERIVED_VERSION
@@ -197,6 +198,23 @@ def load_intelligence_observability(cfg: Config) -> dict[str, object]:
     try:
         configure_pragmas(conn, cfg)
         return _load_observability(conn, cfg)
+    finally:
+        conn.close()
+
+
+def load_nuance_audit(
+    cfg: Config,
+    *,
+    ticker: str | None = None,
+    limit: int = 20,
+) -> dict[str, object]:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        return _load_nuance_audit(conn, ticker=ticker, limit=limit)
     finally:
         conn.close()
 
@@ -1070,6 +1088,342 @@ def _load_observability(conn, cfg: Config) -> dict[str, object]:
             if latest_golden
             else None
         ),
+    }
+
+
+def _load_nuance_audit(
+    conn,
+    *,
+    ticker: str | None,
+    limit: int,
+) -> dict[str, object]:
+    target_ticker = ticker.upper() if ticker else None
+    range_start, range_end = default_coverage_range()
+    params: list[object] = [DERIVED_VERSION]
+    snapshot_sql = """
+        SELECT ticker, payload_json, updated_at
+        FROM company_snapshots
+        WHERE snapshot_kind = 'current'
+          AND derived_version = ?
+    """
+    if target_ticker:
+        snapshot_sql += " AND ticker = ?"
+        params.append(target_ticker)
+    snapshot_sql += " ORDER BY updated_at DESC, ticker ASC"
+    snapshot_rows = conn.execute(snapshot_sql, tuple(params)).fetchall()
+
+    coverage_params: list[object] = [
+        COVERAGE_VERSION,
+        range_start.isoformat(),
+        range_end.isoformat(),
+    ]
+    coverage_sql = """
+        SELECT
+            fc.ticker,
+            COUNT(*) AS gap_count,
+            SUM(CASE WHEN fc.actual_state = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
+            SUM(CASE WHEN fc.expected_state = 'late' THEN 1 ELSE 0 END) AS late_count,
+            GROUP_CONCAT(DISTINCT COALESCE(fc.blocked_reason, fc.actual_state)) AS blocked_reasons
+        FROM filing_coverage fc
+        WHERE fc.coverage_version = ?
+          AND date(fc.deadline_at) BETWEEN date(?) AND date(?)
+          AND fc.actual_state != 'analyzed'
+    """
+    if target_ticker:
+        coverage_sql += " AND fc.ticker = ?"
+        coverage_params.append(target_ticker)
+    coverage_sql += " GROUP BY fc.ticker"
+    coverage_rows = conn.execute(coverage_sql, tuple(coverage_params)).fetchall()
+    coverage_by_ticker = {
+        str(row["ticker"]): {
+            "gap_count": int(row["gap_count"] or 0),
+            "blocked_count": int(row["blocked_count"] or 0),
+            "late_count": int(row["late_count"] or 0),
+            "blocked_reasons": [part.strip() for part in str(row["blocked_reasons"] or "").split(",") if part.strip()],
+        }
+        for row in coverage_rows
+    }
+
+    doc_params: list[object] = []
+    doc_sql = """
+        SELECT
+            ticker,
+            COUNT(*) AS document_count,
+            SUM(CASE WHEN process_state = 'analyzed' THEN 1 ELSE 0 END) AS analyzed_count,
+            SUM(CASE WHEN process_state = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            MAX(updated_at) AS latest_document_at
+        FROM documents
+    """
+    if target_ticker:
+        doc_sql += " WHERE ticker = ?"
+        doc_params.append(target_ticker)
+    doc_sql += " GROUP BY ticker"
+    document_rows = conn.execute(doc_sql, tuple(doc_params)).fetchall()
+    documents_by_ticker = {
+        str(row["ticker"]): {
+            "document_count": int(row["document_count"] or 0),
+            "analyzed_count": int(row["analyzed_count"] or 0),
+            "failed_count": int(row["failed_count"] or 0),
+            "latest_document_at": row["latest_document_at"],
+        }
+        for row in document_rows
+    }
+
+    issuer_rows = conn.execute(
+        "SELECT ticker, issuer_name FROM companies"
+        + (" WHERE ticker = ?" if target_ticker else ""),
+        ((target_ticker,) if target_ticker else ()),
+    ).fetchall()
+    issuer_names = {str(row["ticker"]): row["issuer_name"] for row in issuer_rows}
+
+    leaders: list[dict[str, object]] = []
+    for row in snapshot_rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        row_ticker = str(row["ticker"])
+        coverage = coverage_by_ticker.get(row_ticker, {})
+        entry = _build_snapshot_nuance_audit_row(
+            ticker=row_ticker,
+            issuer_name=str(payload.get("issuer_name") or issuer_names.get(row_ticker) or ""),
+            payload=payload,
+            updated_at=str(row["updated_at"] or ""),
+            coverage=coverage,
+            documents=documents_by_ticker.get(row_ticker, {}),
+        )
+        if entry["score"] > 0:
+            leaders.append(entry)
+
+    leaders.sort(key=lambda item: (-int(item["score"]), str(item["ticker"])))
+
+    bridge_rows: list[dict[str, object]] = []
+    covered_tickers = set(coverage_by_ticker)
+    covered_tickers.update(str(row["ticker"]) for row in snapshot_rows)
+    if target_ticker:
+        covered_tickers.add(target_ticker)
+    for row_ticker in sorted(covered_tickers):
+        coverage = coverage_by_ticker.get(row_ticker, {})
+        documents = documents_by_ticker.get(row_ticker, {})
+        snapshot_entry = next((item for item in leaders if str(item["ticker"]) == row_ticker), None)
+        bridge = _build_coverage_bridge_row(
+            ticker=row_ticker,
+            issuer_name=str(issuer_names.get(row_ticker) or (snapshot_entry or {}).get("issuer_name") or ""),
+            coverage=coverage,
+            documents=documents,
+            snapshot_entry=snapshot_entry,
+        )
+        if bridge:
+            bridge_rows.append(bridge)
+    bridge_rows.sort(key=lambda item: (-int(item["score"]), str(item["ticker"])))
+
+    target = _build_target_nuance_audit(
+        ticker=target_ticker,
+        leaders=leaders,
+        bridge_rows=bridge_rows,
+        documents=documents_by_ticker.get(target_ticker or "", {}),
+        issuer_name=str(issuer_names.get(target_ticker or "") or ""),
+    )
+
+    return {
+        "scope": "ticker" if target_ticker else "global",
+        "target_ticker": target_ticker,
+        "date_from": range_start.isoformat(),
+        "date_to": range_end.isoformat(),
+        "summary": {
+            "snapshot_company_count": len(snapshot_rows),
+            "leader_count": len(leaders),
+            "coverage_bridge_count": len(bridge_rows),
+            "note_scope_company_count": sum(1 for item in leaders if int(item["note_scope_count"]) > 0),
+            "contradiction_company_count": sum(1 for item in leaders if int(item["contradiction_count"]) > 0),
+            "coverage_gap_company_count": len([1 for item in bridge_rows if int(item["coverage_gap_count"]) > 0]),
+        },
+        "leaders": leaders[:limit],
+        "coverage_bridge": bridge_rows[:limit],
+        "target": target,
+    }
+
+
+def _build_snapshot_nuance_audit_row(
+    *,
+    ticker: str,
+    issuer_name: str,
+    payload: dict[str, object],
+    updated_at: str,
+    coverage: dict[str, object],
+    documents: dict[str, object],
+) -> dict[str, object]:
+    nuance_findings = list(payload.get("nuance_findings") or [])
+    uncertainty_rows = list(payload.get("uncertainty_rows") or [])
+    contradiction_rows = list(payload.get("contradiction_rows") or [])
+    next_read_guidance = list(payload.get("next_read_guidance") or [])
+    filing_expectations = list(payload.get("filing_expectations") or [])
+    top_card = payload.get("top_card") or {}
+
+    contradiction_count = len(contradiction_rows)
+    critical_contradictions = sum(1 for row in contradiction_rows if str(row.get("severity") or "") == "critical")
+    critical_uncertainty = sum(
+        1
+        for row in uncertainty_rows
+        if bool(row.get("requires_human_review")) and str(row.get("severity") or "") == "critical"
+    )
+    warning_uncertainty = sum(
+        1
+        for row in uncertainty_rows
+        if bool(row.get("requires_human_review")) and str(row.get("severity") or "") == "warning"
+    )
+    note_scope_count = sum(
+        1 for row in uncertainty_rows if str(row.get("uncertainty_class") or "").endswith("_scope")
+    )
+    critical_nuance = sum(1 for row in nuance_findings if str(row.get("severity") or "") == "critical")
+    warning_nuance = sum(1 for row in nuance_findings if str(row.get("severity") or "") == "warning")
+    late_filing_count = sum(1 for item in filing_expectations if str(item.get("state") or "") == "late")
+    coverage_gap_count = int(coverage.get("gap_count") or 0)
+    blocked_coverage_count = int(coverage.get("blocked_count") or 0)
+
+    score = (
+        critical_contradictions * 7
+        + critical_uncertainty * 5
+        + note_scope_count * 3
+        + warning_uncertainty * 2
+        + critical_nuance * 2
+        + warning_nuance
+        + late_filing_count * 2
+        + blocked_coverage_count * 2
+        + max(0, coverage_gap_count - blocked_coverage_count)
+    )
+    reasons: list[str] = []
+    if critical_contradictions:
+        reasons.append(f"{critical_contradictions} critical contradiction row(s) need review")
+    if note_scope_count:
+        reasons.append(f"{note_scope_count} note-level scope row(s) still need human read")
+    if critical_uncertainty or warning_uncertainty:
+        reasons.append(
+            f"{critical_uncertainty + warning_uncertainty} unresolved uncertainty row(s) still require analyst judgment"
+        )
+    if late_filing_count:
+        reasons.append(f"{late_filing_count} filing expectation(s) are already late")
+    if blocked_coverage_count:
+        reasons.append(f"{blocked_coverage_count} blocked coverage obligation(s) limit confidence")
+    if not reasons and next_read_guidance:
+        reasons.append(f"{len(next_read_guidance)} ranked next-read target(s) remain open")
+
+    return {
+        "ticker": ticker,
+        "issuer_name": issuer_name,
+        "score": score,
+        "decision_state": top_card.get("decision_state"),
+        "confidence": top_card.get("confidence"),
+        "overall_state": top_card.get("overall_state"),
+        "contradiction_count": contradiction_count,
+        "note_scope_count": note_scope_count,
+        "uncertainty_count": len(uncertainty_rows),
+        "nuance_count": len(nuance_findings),
+        "late_filing_count": late_filing_count,
+        "coverage_gap_count": coverage_gap_count,
+        "blocked_coverage_count": blocked_coverage_count,
+        "document_count": int(documents.get("document_count") or 0),
+        "analyzed_document_count": int(documents.get("analyzed_count") or 0),
+        "reasons": reasons[:3],
+        "updated_at": updated_at,
+    }
+
+
+def _build_coverage_bridge_row(
+    *,
+    ticker: str,
+    issuer_name: str,
+    coverage: dict[str, object],
+    documents: dict[str, object],
+    snapshot_entry: dict[str, object] | None,
+) -> dict[str, object] | None:
+    coverage_gap_count = int(coverage.get("gap_count") or 0)
+    blocked_coverage_count = int(coverage.get("blocked_count") or 0)
+    late_count = int(coverage.get("late_count") or 0)
+    analyzed_document_count = int(documents.get("analyzed_count") or 0)
+    document_count = int(documents.get("document_count") or 0)
+    failed_count = int(documents.get("failed_count") or 0)
+    snapshot_ready = snapshot_entry is not None
+    score = blocked_coverage_count * 4 + late_count * 3 + coverage_gap_count
+    if snapshot_entry:
+        score += int(snapshot_entry.get("score") or 0)
+    elif document_count > 0 and analyzed_document_count == 0:
+        score += 3
+    elif document_count == 0 and coverage_gap_count > 0:
+        score += 2
+    if score <= 0:
+        return None
+
+    blockers: list[str] = []
+    if blocked_coverage_count:
+        blockers.append(f"{blocked_coverage_count} blocked coverage obligation(s)")
+    if late_count:
+        blockers.append(f"{late_count} obligation(s) already late")
+    if not snapshot_ready and document_count == 0:
+        blockers.append("No local documents yet, so nuance cannot be judged")
+    elif not snapshot_ready and analyzed_document_count == 0:
+        blockers.append("Local documents exist, but none are analyzed yet")
+    elif snapshot_entry and int(snapshot_entry.get("note_scope_count") or 0) > 0:
+        blockers.append(f"{snapshot_entry['note_scope_count']} note-level scope row(s) still unresolved")
+    if failed_count:
+        blockers.append(f"{failed_count} failed document(s) reduce confidence")
+    if not blockers and coverage.get("blocked_reasons"):
+        blockers.extend(list(coverage["blocked_reasons"])[:2])
+
+    return {
+        "ticker": ticker,
+        "issuer_name": issuer_name,
+        "score": score,
+        "coverage_gap_count": coverage_gap_count,
+        "blocked_coverage_count": blocked_coverage_count,
+        "late_count": late_count,
+        "snapshot_ready": snapshot_ready,
+        "document_count": document_count,
+        "analyzed_document_count": analyzed_document_count,
+        "blockers": blockers[:3],
+        "latest_document_at": documents.get("latest_document_at"),
+    }
+
+
+def _build_target_nuance_audit(
+    *,
+    ticker: str | None,
+    leaders: list[dict[str, object]],
+    bridge_rows: list[dict[str, object]],
+    documents: dict[str, object],
+    issuer_name: str,
+) -> dict[str, object] | None:
+    if not ticker:
+        return None
+    leader = next((item for item in leaders if str(item.get("ticker")) == ticker), None)
+    bridge = next((item for item in bridge_rows if str(item.get("ticker")) == ticker), None)
+    if leader:
+        return {
+            "ticker": ticker,
+            "issuer_name": issuer_name or leader.get("issuer_name"),
+            "state": "snapshot_ready",
+            "leader": leader,
+            "bridge": bridge,
+        }
+    document_count = int(documents.get("document_count") or 0)
+    analyzed_count = int(documents.get("analyzed_count") or 0)
+    failed_count = int(documents.get("failed_count") or 0)
+    state = "no_local_docs"
+    guidance = "Run discovery and download before nuance audit can say anything useful."
+    if document_count > 0 and analyzed_count == 0:
+        state = "docs_not_analyzed"
+        guidance = "Run parse, extract, and rules before nuance audit can score this issuer."
+    elif document_count > 0:
+        state = "derived_snapshot_missing"
+        guidance = "Run intelligence-rederive so nuance audit can rank current unresolved signals."
+    if bridge:
+        guidance = "Coverage gaps exist; clear the missing or blocked obligations before trusting the nuance read."
+    return {
+        "ticker": ticker,
+        "issuer_name": issuer_name,
+        "state": state,
+        "document_count": document_count,
+        "analyzed_document_count": analyzed_count,
+        "failed_document_count": failed_count,
+        "guidance": guidance,
+        "bridge": bridge,
     }
 
 

@@ -78,6 +78,7 @@
   const canaryList = document.getElementById("canaryList");
   const syncStatusList = document.getElementById("syncStatusList");
   const observabilityList = document.getElementById("observabilityList");
+  const nuanceAuditList = document.getElementById("nuanceAuditList");
   const goldenList = document.getElementById("goldenList");
   const rerunPreviewList = document.getElementById("rerunPreviewList");
   const companyRerunPreview = document.getElementById("companyRerunPreview");
@@ -1663,6 +1664,70 @@
             : ""}`
         : `<div class="emptyState"><strong>No golden checks run yet.</strong> Use Run Golden Checks from Ops or from a company workspace.</div>`;
     }
+    if (nuanceAuditList) {
+      const audit = data.nuance_audit || {};
+      const summary = audit.summary || {};
+      const leaders = (audit.leaders || []).slice(0, 5);
+      const bridgeRows = (audit.coverage_bridge || []).slice(0, 5);
+      nuanceAuditList.innerHTML = `
+        <div class="statsGrid">
+          <div class="stat"><div class="summaryLabel">Leaders</div><strong>${esc(summary.leader_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Coverage bridge</div><strong>${esc(summary.coverage_bridge_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Note-scope cos</div><strong>${esc(summary.note_scope_company_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Contradiction cos</div><strong>${esc(summary.contradiction_company_count || 0)}</strong></div>
+        </div>
+        <div class="meta">Audit range: ${esc(audit.date_from || "—")} to ${esc(audit.date_to || "—")}.</div>
+        <div class="docGroups">
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Unresolved nuance leaders</h3>
+                <div class="meta">Current snapshot names with the heaviest unresolved contradiction, uncertainty, and note-reading pressure.</div>
+              </div>
+            </div>
+            ${
+              leaders.length
+                ? `<div class="findingStack">${leaders
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-${(item.contradiction_count || 0) > 0 || (item.blocked_coverage_count || 0) > 0 ? "critical" : "warning"} clickableCard" data-focus-ticker="${esc(item.ticker)}">
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">score ${esc(item.score || 0)} · ${esc(item.decision_state || "—")} · confidence ${esc(item.confidence || "—")} · overall ${esc(item.overall_state || "—")}</div>
+                          <div class="meta">${(item.reasons || []).map(esc).join(" · ") || "No explicit unresolved reasons captured."}</div>
+                          <div class="meta">note scopes ${esc(item.note_scope_count || 0)} · contradictions ${esc(item.contradiction_count || 0)} · coverage gaps ${esc(item.coverage_gap_count || 0)}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No ranked nuance leaders yet.</strong> Rebuild intelligence for more issuers before using this audit.</div>`
+            }
+          </section>
+          <section class="docGroup">
+            <div class="docGroupHeader">
+              <div>
+                <h3>Under-covered risk bridge</h3>
+                <div class="meta">Names where missing or blocked coverage still limits how much nuance the system can safely infer.</div>
+              </div>
+            </div>
+            ${
+              bridgeRows.length
+                ? `<div class="findingStack">${bridgeRows
+                    .map(
+                      (item) => `
+                        <article class="findingCard sev-${(item.blocked_coverage_count || 0) > 0 || !item.snapshot_ready ? "warning" : "info"} clickableCard" data-focus-ticker="${esc(item.ticker)}">
+                          <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                          <div class="meta">score ${esc(item.score || 0)} · coverage gaps ${esc(item.coverage_gap_count || 0)} · blocked ${esc(item.blocked_coverage_count || 0)} · snapshot ${item.snapshot_ready ? "ready" : "missing"}</div>
+                          <div class="meta">${(item.blockers || []).map(esc).join(" · ") || "No explicit blockers captured."}</div>
+                        </article>
+                      `
+                    )
+                    .join("")}</div>`
+                : `<div class="emptyState"><strong>No coverage-linked nuance blockers right now.</strong></div>`
+            }
+          </section>
+        </div>
+      `;
+    }
     if (rerunPreviewList) {
       rerunPreviewList.innerHTML = renderRerunPreview(
         data.rerun_preview,
@@ -1764,6 +1829,7 @@
       if (detail.canary_rows) data.canary_rows = detail.canary_rows;
       if (detail.source_sync_rows) data.source_sync_rows = detail.source_sync_rows;
       if (detail.observability) data.observability = detail.observability;
+      if (detail.nuance_audit) data.nuance_audit = detail.nuance_audit;
       if (detail.golden_rows) data.golden_rows = detail.golden_rows;
       if (detail.coverage_status) data.coverage_status = detail.coverage_status;
       if (section === "ops") fetchRerunPreview();
