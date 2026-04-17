@@ -656,7 +656,7 @@ def test_download_cli_uses_run_downloads(tmp_config, monkeypatch, capsys):
     assert "not_modified=1" in out
 
 
-def test_attachment_downloader_uses_browser_session_for_idx_urls(tmp_config, monkeypatch):
+def test_attachment_downloader_uses_browser_session_for_non_direct_idx_urls(tmp_config, monkeypatch):
     class FakeSession:
         def __init__(self, **_kwargs):
             pass
@@ -664,7 +664,7 @@ def test_attachment_downloader_uses_browser_session_for_idx_urls(tmp_config, mon
         def fetch_resource(self, *, source_id, page_url, resource_url, headers=None, wait_selector=None):
             assert source_id == "idx_financial_reports"
             assert "financial-statements-and-annual-report" in page_url
-            assert resource_url == "https://www.idx.co.id/Portals/0/StaticData/example.pdf"
+            assert resource_url == "https://www.idx.co.id/id/company/non-static-download"
             assert headers is None
             assert wait_selector is None
             return type(
@@ -695,14 +695,14 @@ def test_attachment_downloader_uses_browser_session_for_idx_urls(tmp_config, mon
                 source_record_id="file-1",
                 ticker="BNBR",
                 title="Report",
-                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_url="https://www.idx.co.id/id/company/non-static-download",
                 attachment_filename="example.pdf",
                 upstream_published_at=None,
                 raw_metadata={"report_type": "rdf"},
             ),
             DownloadResource(
                 source_file_id="file-1",
-                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_url="https://www.idx.co.id/id/company/non-static-download",
                 attachment_filename="example.pdf",
             ),
             existing=type("Existing", (), {"etag": '"v1"', "last_modified": None, "document_id": "doc-1"})(),
@@ -713,4 +713,113 @@ def test_attachment_downloader_uses_browser_session_for_idx_urls(tmp_config, mon
     assert fetched is not None
     assert fetched.mime_type == "application/pdf"
     assert fetched.etag == '"v2"'
+    assert fetched.stored_file.local_path.exists()
+
+
+def test_attachment_downloader_uses_http_for_direct_idx_pdf_urls(tmp_config, monkeypatch):
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            raise AssertionError("browser session should not be used for direct IDX PDFs")
+
+    monkeypatch.setattr("stock_triage.download.pipeline.PlaywrightSession", FakeSession)
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "application/pdf", "ETag": '"direct-v1"'},
+                content=b"%PDF-1.4 direct http fetch",
+                request=request,
+            )
+        )
+    )
+    try:
+        downloader = AttachmentDownloader(tmp_config, client=client)
+        fetched = downloader.fetch(
+            DownloadCandidate(
+                candidate_id="idx_financial_reports:file-1",
+                source_name="idx_financial_reports",
+                source_record_id="file-1",
+                ticker="BNBR",
+                title="Report",
+                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_filename="example.pdf",
+                upstream_published_at=None,
+                raw_metadata={"report_type": "rdf"},
+            ),
+            DownloadResource(
+                source_file_id="file-1",
+                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_filename="example.pdf",
+            ),
+            existing=None,
+        )
+    finally:
+        client.close()
+
+    assert fetched is not None
+    assert fetched.mime_type == "application/pdf"
+    assert fetched.etag == '"direct-v1"'
+    assert fetched.stored_file.local_path.exists()
+
+
+def test_attachment_downloader_falls_back_to_browser_after_idx_403(tmp_config, monkeypatch):
+    tmp_config.browser.headless = False
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        def fetch_resource(self, *, source_id, page_url, resource_url, headers=None, wait_selector=None):
+            assert source_id == "idx_financial_reports"
+            assert "financial-statements-and-annual-report" in page_url
+            assert resource_url == "https://www.idx.co.id/Portals/0/StaticData/example.pdf"
+            assert headers is None
+            assert wait_selector is None
+            return type(
+                "BrowserResult",
+                (),
+                {
+                    "status": 200,
+                    "final_url": resource_url,
+                    "content_type": "application/pdf",
+                    "headers": {"etag": '"browser-v1"'},
+                    "body": b"%PDF-1.4 browser fallback fetch",
+                },
+            )()
+
+    monkeypatch.setattr("stock_triage.download.pipeline.PlaywrightSession", FakeSession)
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(403, request=request)
+        )
+    )
+    try:
+        downloader = AttachmentDownloader(tmp_config, client=client)
+        fetched = downloader.fetch(
+            DownloadCandidate(
+                candidate_id="idx_financial_reports:file-1",
+                source_name="idx_financial_reports",
+                source_record_id="file-1",
+                ticker="BNBR",
+                title="Report",
+                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_filename="example.pdf",
+                upstream_published_at=None,
+                raw_metadata={"report_type": "rdf"},
+            ),
+            DownloadResource(
+                source_file_id="file-1",
+                attachment_url="https://www.idx.co.id/Portals/0/StaticData/example.pdf",
+                attachment_filename="example.pdf",
+            ),
+            existing=None,
+        )
+    finally:
+        client.close()
+
+    assert fetched is not None
+    assert fetched.mime_type == "application/pdf"
+    assert fetched.etag == '"browser-v1"'
     assert fetched.stored_file.local_path.exists()

@@ -622,6 +622,10 @@ def _blocked_reason_for(
         return str(failed_documents[0].get("process_error_code") or "document_failed")
     failed_candidates = [candidate for candidate in matched_candidates if str(candidate.get("status") or "").startswith("failed")]
     if failed_candidates:
+        for candidate in failed_candidates:
+            reason = str(candidate.get("last_error_code") or "").strip()
+            if reason and reason.lower() != "error":
+                return reason
         return str(failed_candidates[0].get("last_error_code") or "download_failed")
     return None
 
@@ -660,6 +664,24 @@ def _persist_coverage_rows(conn: sqlite3.Connection, *, rows: list[dict[str, obj
                 candidate_count, downloaded_count, analyzed_count, blocked_reason, knowledge_source,
                 payload_json, coverage_version, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, obligation_type, period_end_date, coverage_version)
+            DO UPDATE SET
+                coverage_id = excluded.coverage_id,
+                source_name = excluded.source_name,
+                document_type = excluded.document_type,
+                fiscal_year = excluded.fiscal_year,
+                period_label = excluded.period_label,
+                window_start = excluded.window_start,
+                deadline_at = excluded.deadline_at,
+                expected_state = excluded.expected_state,
+                actual_state = excluded.actual_state,
+                candidate_count = excluded.candidate_count,
+                downloaded_count = excluded.downloaded_count,
+                analyzed_count = excluded.analyzed_count,
+                blocked_reason = excluded.blocked_reason,
+                knowledge_source = excluded.knowledge_source,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
             """,
             (
                 row["coverage_id"],

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from stock_triage.__main__ import main
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.extract import load_extract_status, run_extract
+from stock_triage.extract.pipeline import _derive_financial_metrics
 from stock_triage.parse import load_parse_status
 
 
@@ -772,3 +773,32 @@ def _insert_parsed_document(
 
         wq.submit(_insert)
     return document_id
+
+
+def test_derive_financial_metrics_handles_missing_debt_leg():
+    class _Metric:
+        def __init__(self, value):
+            self.value_normalized = value
+            self.raw_value_text = str(value)
+            self.currency = "IDR"
+            self.unit_scale = "units"
+            self.fiscal_year = 2024
+            self.fiscal_period = "Annual"
+            self.period_end_date = "2024-12-31"
+            self.audit_status = "audited"
+            self.consolidation_scope = "consolidated"
+            self.language_variant = "id"
+            self.chunk = None
+            self.excerpt_text = ""
+            self.char_start = 0
+            self.char_end = 0
+
+    derived = _derive_financial_metrics(
+        {
+            "cash": _Metric(100.0),
+            "long_term_debt": _Metric(250.0),
+        }
+    )
+
+    net_debt = next(metric for metric in derived if metric.metric_name == "net_debt")
+    assert net_debt.value_normalized == 150.0

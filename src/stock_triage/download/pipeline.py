@@ -153,80 +153,103 @@ class AttachmentDownloader:
 
         retrieved_at = datetime.now(timezone.utc)
         if _requires_browser_session(resource.attachment_url):
-            session = PlaywrightSession(
-                profile_dir=self.cfg.browser.profile_dir,
-                artifacts_dir=self.cfg.browser.artifacts_dir,
-                headless=self.cfg.browser.headless,
-                challenge_timeout_s=self.cfg.browser.challenge_timeout_s,
-                page_settle_ms=self.cfg.browser.page_settle_ms,
-                channel=self.cfg.browser.channel,
-            )
-            fetched = session.fetch_resource(
-                source_id=candidate.source_name,
-                page_url=_source_page_url(candidate.source_name),
-                resource_url=resource.attachment_url,
-                # IDX binary routes succeed via browser navigation, but
-                # conditional headers cause ERR_ABORTED on repeat navigations.
-                headers=None,
-            )
-            if fetched.status == 304:
-                return None
-            if fetched.status >= 400:
-                raise httpx.HTTPStatusError(
-                    f"Client error '{fetched.status}' for url '{resource.attachment_url}'",
-                    request=httpx.Request("GET", resource.attachment_url, headers=headers or None),
-                    response=httpx.Response(fetched.status, headers=fetched.headers, request=httpx.Request("GET", resource.attachment_url)),
-                )
-            _validate_download_bytes(
-                body=fetched.body,
-                mime_type=fetched.content_type,
-                filename=resource.attachment_filename,
-                url=resource.attachment_url,
-            )
-            stored = self.store.put_bytes(fetched.body)
-            if not self.store.verify(stored.sha256):
-                raise CorruptDownloadError(
-                    url=resource.attachment_url,
-                    filename=resource.attachment_filename,
-                    detail="Stored file failed post-write SHA-256 verification",
-                    body=fetched.body,
-                    mime_type=fetched.content_type,
-                )
-            return DownloadedAttachment(
-                original_url=fetched.final_url,
-                retrieved_at=retrieved_at,
-                mime_type=_normalize_mime_type(fetched.content_type, resource.attachment_filename),
-                etag=fetched.headers.get("etag"),
-                last_modified=fetched.headers.get("last-modified"),
-                stored_file=stored,
-            )
+            return self._fetch_via_browser(candidate, resource, headers=headers or None, retrieved_at=retrieved_at)
 
         response = self.client.get(resource.attachment_url, headers=headers or None)
         if response.status_code == 304:
             return None
+        if _should_fallback_to_browser(resource.attachment_url, response.status_code, headless=self.cfg.browser.headless):
+            return self._fetch_via_browser(candidate, resource, headers=headers or None, retrieved_at=retrieved_at)
         response.raise_for_status()
-        _validate_download_bytes(
+        return self._finalize_download(
             body=response.content,
+            original_url=str(response.url),
+            retrieved_at=retrieved_at,
             mime_type=response.headers.get("content-type"),
+            etag=response.headers.get("etag"),
+            last_modified=response.headers.get("last-modified"),
             filename=resource.attachment_filename,
             url=resource.attachment_url,
         )
 
-        stored = self.store.put_bytes(response.content)
+    def _fetch_via_browser(
+        self,
+        candidate: DownloadCandidate,
+        resource: DownloadResource,
+        *,
+        headers: dict[str, str] | None,
+        retrieved_at: datetime,
+    ) -> DownloadedAttachment | None:
+        session = PlaywrightSession(
+            profile_dir=self.cfg.browser.profile_dir,
+            artifacts_dir=self.cfg.browser.artifacts_dir,
+            headless=self.cfg.browser.headless,
+            challenge_timeout_s=self.cfg.browser.challenge_timeout_s,
+            page_settle_ms=self.cfg.browser.page_settle_ms,
+            channel=self.cfg.browser.channel,
+        )
+        fetched = session.fetch_resource(
+            source_id=candidate.source_name,
+            page_url=_source_page_url(candidate.source_name),
+            resource_url=resource.attachment_url,
+            headers=None if _is_idx_url(resource.attachment_url) else headers,
+        )
+        if fetched.status == 304:
+            return None
+        if fetched.status >= 400:
+            raise httpx.HTTPStatusError(
+                f"Client error '{fetched.status}' for url '{resource.attachment_url}'",
+                request=httpx.Request("GET", resource.attachment_url, headers=headers or None),
+                response=httpx.Response(
+                    fetched.status,
+                    headers=fetched.headers,
+                    request=httpx.Request("GET", resource.attachment_url),
+                ),
+            )
+        return self._finalize_download(
+            body=fetched.body,
+            original_url=fetched.final_url,
+            retrieved_at=retrieved_at,
+            mime_type=fetched.content_type,
+            etag=fetched.headers.get("etag"),
+            last_modified=fetched.headers.get("last-modified"),
+            filename=resource.attachment_filename,
+            url=resource.attachment_url,
+        )
+
+    def _finalize_download(
+        self,
+        *,
+        body: bytes,
+        original_url: str,
+        retrieved_at: datetime,
+        mime_type: str | None,
+        etag: str | None,
+        last_modified: str | None,
+        filename: str | None,
+        url: str,
+    ) -> DownloadedAttachment:
+        _validate_download_bytes(
+            body=body,
+            mime_type=mime_type,
+            filename=filename,
+            url=url,
+        )
+        stored = self.store.put_bytes(body)
         if not self.store.verify(stored.sha256):
             raise CorruptDownloadError(
-                url=resource.attachment_url,
-                filename=resource.attachment_filename,
+                url=url,
+                filename=filename,
                 detail="Stored file failed post-write SHA-256 verification",
-                body=response.content,
-                mime_type=response.headers.get("content-type"),
+                body=body,
+                mime_type=mime_type,
             )
         return DownloadedAttachment(
-            original_url=str(response.url),
+            original_url=original_url,
             retrieved_at=retrieved_at,
-            mime_type=_normalize_mime_type(response.headers.get("content-type"), resource.attachment_filename),
-            etag=response.headers.get("etag"),
-            last_modified=response.headers.get("last-modified"),
+            mime_type=_normalize_mime_type(mime_type, filename),
+            etag=etag,
+            last_modified=last_modified,
             stored_file=stored,
         )
 
@@ -866,7 +889,22 @@ def _replace_result(result: DownloadRunResult, **updates: int) -> DownloadRunRes
 
 
 def _requires_browser_session(url: str) -> bool:
-    return "idx.co.id" in url
+    lowered = url.lower()
+    if "idx.co.id" not in lowered:
+        return False
+    if lowered.endswith(".pdf"):
+        return False
+    if "/portals/0/staticdata/" in lowered:
+        return False
+    return True
+
+
+def _is_idx_url(url: str) -> bool:
+    return "idx.co.id" in url.lower()
+
+
+def _should_fallback_to_browser(url: str, status_code: int, *, headless: bool) -> bool:
+    return not headless and _is_idx_url(url) and status_code in {401, 403}
 
 
 def _source_page_url(source_name: str) -> str:

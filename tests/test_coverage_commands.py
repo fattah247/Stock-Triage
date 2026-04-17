@@ -10,9 +10,10 @@ from stock_triage.commands.coverage import (
     cmd_coverage_status,
     cmd_nuance_audit,
 )
+from stock_triage.coverage.pipeline import _blocked_reason_for, _persist_coverage_rows
 from stock_triage.coverage import load_coverage_status
 from stock_triage.dashboard.server import create_dashboard_server
-from stock_triage.db import connect, configure_pragmas
+from stock_triage.db import connect, configure_pragmas, run_migrations
 
 from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
 
@@ -142,3 +143,65 @@ def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
         handle.server.shutdown()
         handle.server.server_close()
         thread.join(timeout=5)
+
+
+def test_persist_coverage_rows_upserts_duplicate_keys(tmp_config):
+    row_a = {
+        "coverage_id": "cov-a",
+        "ticker": "TAMU",
+        "source_name": "idx_financial_reports",
+        "obligation_type": "annual_fs",
+        "document_type": "financial_statement",
+        "fiscal_year": 2024,
+        "period_label": "Annual FS",
+        "period_end_date": "2024-12-31",
+        "window_start": "2025-03-30",
+        "deadline_at": "2025-04-29",
+        "expected_state": "late",
+        "actual_state": "unknown",
+        "candidate_count": 0,
+        "downloaded_count": 0,
+        "analyzed_count": 0,
+        "blocked_reason": None,
+        "knowledge_source": "default",
+        "payload_json": "{}",
+        "coverage_version": "v3_4-v1",
+        "updated_at": "2026-04-18T00:00:00+00:00",
+    }
+    row_b = dict(row_a)
+    row_b["coverage_id"] = "cov-b"
+    row_b["candidate_count"] = 2
+    row_b["actual_state"] = "discovered"
+
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        _persist_coverage_rows(conn, rows=[row_a, row_b], tickers=["TAMU"])
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT coverage_id, actual_state, candidate_count
+            FROM filing_coverage
+            WHERE ticker = ? AND obligation_type = ? AND period_end_date = ? AND coverage_version = ?
+            """,
+            ("TAMU", "annual_fs", "2024-12-31", "v3_4-v1"),
+        ).fetchone()
+        assert row is not None
+        assert row["coverage_id"] == "cov-b"
+        assert row["actual_state"] == "discovered"
+        assert row["candidate_count"] == 2
+    finally:
+        conn.close()
+
+
+def test_blocked_reason_prefers_specific_candidate_error_code():
+    reason = _blocked_reason_for(
+        matched_documents=[],
+        matched_candidates=[
+            {"status": "failed", "last_error_code": "Error"},
+            {"status": "failed", "last_error_code": "http_403"},
+        ],
+    )
+
+    assert reason == "http_403"

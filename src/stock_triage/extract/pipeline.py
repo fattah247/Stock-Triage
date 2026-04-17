@@ -814,7 +814,10 @@ def _derive_financial_metrics(metrics: dict[str, ExtractedMetric]) -> list[Extra
     debt_total = None
     debt_source = short_term_debt or long_term_debt
     if short_term_debt is not None or long_term_debt is not None:
-        debt_total = (short_term_debt.value_normalized or 0.0) + (long_term_debt.value_normalized or 0.0)
+        debt_total = (
+            (0.0 if short_term_debt is None else (short_term_debt.value_normalized or 0.0))
+            + (0.0 if long_term_debt is None else (long_term_debt.value_normalized or 0.0))
+        )
     if cash is not None and debt_total is not None and debt_source is not None:
         derived.append(
             ExtractedMetric(
