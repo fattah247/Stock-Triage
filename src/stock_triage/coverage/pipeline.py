@@ -29,10 +29,12 @@ from ..intelligence import DERIVED_VERSION, run_intelligence
 from ..intelligence.pipeline import _filing_deadline_templates, _stable_id
 from ..logging_setup import get_logger
 from ..parse import run_parse
+from ..recon import PlaywrightSession
 from ..extract import run_extract
 from ..rules import run_rules
 from ..sources import DiscoveryWindow
 from ..sources.adapters import IDXDisclosureAdapter, IDXFinancialReportAdapter
+from ..sources.idx_artifacts import parse_financial_report_json
 
 COVERAGE_VERSION = "v3_4-v1"
 _SCOPE_CHOICES = {"all", "watchlist", "sector", "ticker-set"}
@@ -359,6 +361,7 @@ def run_coverage_action(
             target_tickers=target_tickers,
             date_from=date.fromisoformat(str(preview["date_from"])),
             date_to=date.fromisoformat(str(preview["date_to"])),
+            source_name=source_name,
         )
     elif action == "download-missing":
         executed = _run_download_for_scope(cfg, candidate_ids=list(preview["action_targets"]))
@@ -784,14 +787,15 @@ def _build_action_plan(
                 target_tickers.add(str(row["ticker"]))
         target_ids = sorted(target_tickers)[:limit]
     elif action == "download-missing":
+        candidate_ids: list[str] = []
         for row in coverage_rows:
             if row["actual_state"] not in {"discovered", "blocked"}:
                 continue
             payload = json.loads(row["payload_json"] or "{}")
             for candidate_id in payload.get("matched_candidate_ids") or []:
-                target_ids.append(str(candidate_id))
+                candidate_ids.append(str(candidate_id))
                 target_tickers.add(str(row["ticker"]))
-        target_ids = list(dict.fromkeys(target_ids))[:limit]
+        target_ids = _prioritize_candidate_ids(conn, candidate_ids)[:limit]
     else:
         for row in coverage_rows:
             if action == "process-missing" and row["actual_state"] not in {"downloaded", "blocked"}:
@@ -901,16 +905,29 @@ def _serialize_coverage_row(row: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _run_discover_for_scope(cfg: Config, *, target_tickers: list[str], date_from: date, date_to: date) -> int:
+def _run_discover_for_scope(
+    cfg: Config,
+    *,
+    target_tickers: list[str],
+    date_from: date,
+    date_to: date,
+    source_name: str | None = None,
+) -> int:
     targets = {ticker.upper() for ticker in target_tickers}
     if not targets:
         return 0
     inserted_total = 0
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
-        for adapter in (IDXDisclosureAdapter(), IDXFinancialReportAdapter()):
+        adapters = [IDXDisclosureAdapter(), IDXFinancialReportAdapter()]
+        if source_name:
+            adapters = [adapter for adapter in adapters if adapter.name == source_name]
+        for adapter in adapters:
             window = DiscoveryWindow(start=date_from, end=date_to)
-            candidates = [candidate for candidate in adapter.discover(window) if (candidate.ticker or "").upper() in targets]
+            if adapter.name == "idx_financial_reports":
+                candidates = _discover_financial_reports_for_tickers(cfg, target_tickers=sorted(targets), window=window)
+            else:
+                candidates = [candidate for candidate in adapter.discover(window) if (candidate.ticker or "").upper() in targets]
             result = wq.submit(lambda conn, c=candidates: persist_document_candidates(conn, c))
             wq.submit(
                 lambda conn, a=adapter, w=window, cnt=len(candidates): persist_watermark(
@@ -923,6 +940,121 @@ def _run_discover_for_scope(cfg: Config, *, target_tickers: list[str], date_from
             )
             inserted_total += result.inserted + result.updated
     return inserted_total
+
+
+def _discover_financial_reports_for_tickers(
+    cfg: Config,
+    *,
+    target_tickers: list[str],
+    window: DiscoveryWindow,
+) -> list[object]:
+    adapter = IDXFinancialReportAdapter()
+    session = PlaywrightSession(
+        profile_dir=cfg.browser.profile_dir,
+        artifacts_dir=cfg.browser.artifacts_dir,
+        headless=cfg.browser.headless,
+        challenge_timeout_s=cfg.browser.challenge_timeout_s,
+        page_settle_ms=cfg.browser.page_settle_ms,
+        channel=cfg.browser.channel,
+    )
+    year = adapter._resolve_year(window)
+    candidates = []
+    seen_record_ids: set[str] = set()
+    with session.open_page(page_url=adapter.public_url) as page:
+        for ticker in target_tickers:
+            for report_type in adapter.report_types:
+                first_url = adapter._build_api_url(
+                    year=year,
+                    page_size=adapter.default_page_size,
+                    index_from=1,
+                    report_type=report_type,
+                    kode_emiten=ticker,
+                )
+                first = adapter._fetch_payload(session=session, page=page, api_url=first_url)
+                pages = adapter._total_pages(
+                    result_count=int(first.get("ResultCount") or 0),
+                    page_size=adapter.default_page_size,
+                )
+                payloads = [first]
+                for page_no in range(2, pages + 1):
+                    next_url = adapter._build_api_url(
+                        year=year,
+                        page_size=adapter.default_page_size,
+                        index_from=page_no,
+                        report_type=report_type,
+                        kode_emiten=ticker,
+                    )
+                    payloads.append(adapter._fetch_payload(session=session, page=page, api_url=next_url))
+                for payload in payloads:
+                    for candidate in parse_financial_report_json(payload):
+                        if (candidate.ticker or "").upper() != ticker:
+                            continue
+                        if candidate.source_record_id in seen_record_ids:
+                            continue
+                        seen_record_ids.add(candidate.source_record_id)
+                        candidates.append(candidate)
+    return candidates
+
+
+def _prioritize_candidate_ids(conn: sqlite3.Connection, candidate_ids: list[str]) -> list[str]:
+    if not candidate_ids:
+        return []
+    deduped_ids = list(dict.fromkeys(candidate_ids))
+    rows = conn.execute(
+        f"""
+        SELECT candidate_id, source_name, ticker, title, raw_metadata
+        FROM document_candidates
+        WHERE candidate_id IN ({",".join("?" for _ in deduped_ids)})
+        """,
+        tuple(deduped_ids),
+    ).fetchall()
+    by_id = {str(row["candidate_id"]): dict(row) for row in rows}
+    grouped: dict[tuple[str, str, str, str, str], list[str]] = {}
+    ordered_misc: list[str] = []
+    for candidate_id in deduped_ids:
+        row = by_id.get(candidate_id)
+        if row is None:
+            continue
+        if str(row.get("source_name") or "") != "idx_financial_reports":
+            ordered_misc.append(candidate_id)
+            continue
+        raw = json.loads(row.get("raw_metadata") or "{}")
+        key = (
+            str(row.get("source_name") or ""),
+            str(row.get("ticker") or ""),
+            str(raw.get("report_year") or ""),
+            str(raw.get("report_period") or ""),
+            str(raw.get("report_type") or ""),
+        )
+        grouped.setdefault(key, []).append(candidate_id)
+
+    ordered: list[str] = []
+    ordered.extend(ordered_misc)
+    for key in sorted(grouped):
+        ranked = sorted(grouped[key], key=lambda cid: _financial_candidate_priority(by_id[cid]))
+        ordered.append(ranked[0])
+    return ordered
+
+
+def _financial_candidate_priority(row: dict[str, object]) -> tuple[int, str]:
+    title = str(row.get("title") or "").lower()
+    raw = json.loads(row.get("raw_metadata") or "{}")
+    file_type = str(raw.get("file_type") or "").lower()
+    if "financialstatement" in title and title.endswith(".pdf"):
+        rank = 0
+    elif title.endswith(".pdf") and "laporan keuangan" in title:
+        rank = 1
+    elif title.endswith(".pdf"):
+        rank = 2
+    elif file_type == ".pdf":
+        rank = 3
+    elif title.endswith(".xlsx"):
+        rank = 4
+    elif title.endswith(".zip"):
+        rank = 5
+    else:
+        rank = 6
+    return rank, title
 
 
 def _run_download_for_scope(cfg: Config, *, candidate_ids: list[str]) -> int:

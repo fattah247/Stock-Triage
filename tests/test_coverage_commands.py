@@ -10,10 +10,12 @@ from stock_triage.commands.coverage import (
     cmd_coverage_status,
     cmd_nuance_audit,
 )
-from stock_triage.coverage.pipeline import _blocked_reason_for, _persist_coverage_rows
+from stock_triage.coverage.pipeline import _blocked_reason_for, _persist_coverage_rows, _prioritize_candidate_ids
 from stock_triage.coverage import load_coverage_status
 from stock_triage.dashboard.server import create_dashboard_server
-from stock_triage.db import connect, configure_pragmas, run_migrations
+from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
+from stock_triage.discovery import persist_document_candidates
+from stock_triage.sources import DocumentCandidate, SourceClass
 
 from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
 
@@ -228,3 +230,53 @@ def test_coverage_status_filters_by_source_and_document_type(tmp_config):
     assert report["summary"]["expected_count"] > 0
     assert all(row["source_name"] == "idx_financial_reports" for row in report["gap_leaders"])
     assert all(row["document_type"] == "financial_statement" for row in report["gap_leaders"])
+
+
+def test_prioritize_candidate_ids_collapses_financial_report_siblings(tmp_config):
+    candidates = [
+        DocumentCandidate(
+            source_name="idx_financial_reports",
+            source_class=SourceClass.FINANCIAL_REPORT,
+            source_record_id="pdf-1",
+            ticker="ABDA",
+            title="FinancialStatement-2025-Tahunan-ABDA.pdf",
+            attachment_url="https://example.test/abda/FinancialStatement-2025-Tahunan-ABDA.pdf",
+            attachment_filename="FinancialStatement-2025-Tahunan-ABDA.pdf",
+            raw_metadata={"report_year": "2025", "report_period": "Audit", "report_type": "rdf", "file_type": ".pdf"},
+        ),
+        DocumentCandidate(
+            source_name="idx_financial_reports",
+            source_class=SourceClass.FINANCIAL_REPORT,
+            source_record_id="zip-1",
+            ticker="ABDA",
+            title="instance.zip",
+            attachment_url="https://example.test/abda/instance.zip",
+            attachment_filename="instance.zip",
+            raw_metadata={"report_year": "2025", "report_period": "Audit", "report_type": "rdf", "file_type": ".zip"},
+        ),
+        DocumentCandidate(
+            source_name="idx_financial_reports",
+            source_class=SourceClass.FINANCIAL_REPORT,
+            source_record_id="xlsx-1",
+            ticker="ABDA",
+            title="FinancialStatement-2025-Tahunan-ABDA.xlsx",
+            attachment_url="https://example.test/abda/FinancialStatement-2025-Tahunan-ABDA.xlsx",
+            attachment_filename="FinancialStatement-2025-Tahunan-ABDA.xlsx",
+            raw_metadata={"report_year": "2025", "report_period": "Audit", "report_type": "rdf", "file_type": ".xlsx"},
+        ),
+    ]
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, candidates))
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, tmp_config)
+        ranked = _prioritize_candidate_ids(
+            conn,
+            [f"idx_financial_reports:{candidate.source_record_id}" for candidate in candidates],
+        )
+    finally:
+        conn.close()
+
+    assert ranked == ["idx_financial_reports:pdf-1"]

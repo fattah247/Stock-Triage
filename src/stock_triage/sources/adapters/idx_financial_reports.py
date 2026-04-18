@@ -141,6 +141,7 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
         index_from: int = 1,
         report_type: str = "rdf",
         period: str = "audit",
+        kode_emiten: str = "",
     ) -> str:
         params = {
             "indexFrom": index_from,
@@ -149,7 +150,7 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
             "reportType": report_type,
             "EmitenType": "s",
             "periode": period,
-            "kodeEmiten": "",
+            "kodeEmiten": kode_emiten,
             "SortColumn": "FileModified",
             "SortOrder": "desc",
         }
