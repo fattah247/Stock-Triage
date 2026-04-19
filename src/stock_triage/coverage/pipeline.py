@@ -43,6 +43,12 @@ BLOCK_CLASS_ORCHESTRATION_ERROR = "orchestration_error"
 BLOCK_CLASS_UPSTREAM_403_TRANSIENT = "upstream_403_transient"
 BLOCK_CLASS_UPSTREAM_403_PERSISTENT = "upstream_403_persistent"
 BLOCK_CLASS_ACCESS_CONSTRAINT = "access_constraint"
+_BLOCK_CLASS_RANK = {
+    BLOCK_CLASS_ORCHESTRATION_ERROR: 0,
+    BLOCK_CLASS_UPSTREAM_403_TRANSIENT: 1,
+    BLOCK_CLASS_UPSTREAM_403_PERSISTENT: 2,
+    BLOCK_CLASS_ACCESS_CONSTRAINT: 3,
+}
 
 
 @dataclass(frozen=True)
@@ -209,6 +215,7 @@ def load_coverage_status_from_conn(
         for row in normalized_rows
         if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
     ]
+    normalized_rows = _enrich_coverage_rows_with_access_state(conn, normalized_rows)
     state_counts = {
         "expected_count": len(normalized_rows),
         "analyzed_count": sum(1 for row in normalized_rows if row["actual_state"] == "analyzed"),
@@ -216,6 +223,9 @@ def load_coverage_status_from_conn(
         "discovered_count": sum(1 for row in normalized_rows if row["actual_state"] == "discovered"),
         "blocked_count": sum(1 for row in normalized_rows if row["actual_state"] == "blocked"),
         "unknown_count": sum(1 for row in normalized_rows if row["actual_state"] == "unknown"),
+        "blocked_fixable_count": sum(1 for row in normalized_rows if row.get("blocked_bucket") == "fixable"),
+        "blocked_retryable_count": sum(1 for row in normalized_rows if row.get("blocked_bucket") == "retryable"),
+        "blocked_access_constrained_count": sum(1 for row in normalized_rows if row.get("blocked_bucket") == "access_constrained"),
     }
     gap_rows = [row for row in normalized_rows if row["actual_state"] != "analyzed"]
     gap_rows.sort(
@@ -294,6 +304,7 @@ def preview_coverage_action(
             for row in coverage_rows
             if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
         ]
+        filtered_rows = _enrich_coverage_rows_with_access_state(conn, filtered_rows)
         plan = _build_action_plan(conn, selected, filtered_rows, action=action, limit=limit)
         current_snapshot_count = _count_current_snapshots(conn, selected=selected) if selected else 0
     finally:
@@ -319,6 +330,9 @@ def preview_coverage_action(
         "downloaded_count": sum(1 for row in filtered_rows if row["downloaded_count"] > 0),
         "analyzed_count": sum(1 for row in filtered_rows if row["analyzed_count"] > 0),
         "blocked_count": sum(1 for row in filtered_rows if row["actual_state"] == "blocked"),
+        "blocked_fixable_count": sum(1 for row in filtered_rows if row.get("blocked_bucket") == "fixable"),
+        "blocked_retryable_count": sum(1 for row in filtered_rows if row.get("blocked_bucket") == "retryable"),
+        "blocked_access_constrained_count": sum(1 for row in filtered_rows if row.get("blocked_bucket") == "access_constrained"),
         "current_snapshot_count": current_snapshot_count,
         "dominant_blocked_reasons": _dominant_blocked_reasons(filtered_rows),
         "preview_generated_at": datetime.now(timezone.utc).isoformat(),
@@ -804,7 +818,7 @@ def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str,
                 retry_eligible_until = (now + timedelta(hours=24)).isoformat()
             existing = conn.execute(
                 """
-                SELECT first_blocked_at, retry_count, needs_alternative_source_check
+                SELECT first_blocked_at, retry_count, needs_alternative_source_check, block_class
                 FROM artifact_access_state
                 WHERE artifact_id = ?
                 """,
@@ -812,7 +826,15 @@ def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str,
             ).fetchone()
             first_blocked_at = str(existing["first_blocked_at"]) if existing and existing["first_blocked_at"] else now.isoformat()
             retry_count = int(existing["retry_count"] or 0) + 1 if existing else 1
-            needs_alternative_source_check = int(existing["needs_alternative_source_check"] or 0) if existing else 0
+            block_class = _resolved_access_block_class(
+                blocked_reason=blocked_reason,
+                retry_count=retry_count,
+                expected_state=str(row.get("expected_state") or ""),
+                deadline_at=str(row.get("deadline_at") or ""),
+                previous_block_class=str(existing["block_class"] or "") if existing and existing["block_class"] else None,
+            )
+            retry_eligible_until = _retry_eligible_until_for_block_class(now=now, block_class=block_class)
+            needs_alternative_source_check = 1 if block_class in {BLOCK_CLASS_UPSTREAM_403_PERSISTENT, BLOCK_CLASS_ACCESS_CONSTRAINT} else 0
             conn.execute(
                 """
                 INSERT INTO artifact_access_state (
@@ -848,7 +870,7 @@ def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str,
                     now.isoformat(),
                     None,
                     retry_count,
-                    blocked_reason,
+                    block_class,
                     retry_eligible_until,
                     needs_alternative_source_check,
                     candidate["last_http_status"],
@@ -892,6 +914,133 @@ def _load_selected_coverage_rows(
     return [dict(row) for row in rows]
 
 
+def _enrich_coverage_rows_with_access_state(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    candidate_ids: list[str] = []
+    for row in rows:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+        candidate_ids.extend(str(item) for item in payload.get("matched_candidate_ids") or [] if item)
+    access_by_candidate = _load_access_state_by_candidate_ids(conn, candidate_ids)
+    enriched: list[dict[str, object]] = []
+    for row in rows:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+        matched_candidate_ids = [str(item) for item in payload.get("matched_candidate_ids") or [] if item]
+        access_states = [access_by_candidate[candidate_id] for candidate_id in matched_candidate_ids if candidate_id in access_by_candidate]
+        effective_block_class = _effective_block_class_for_row(
+            blocked_reason=str(row.get("blocked_reason") or "") or None,
+            access_states=access_states,
+        )
+        blocked_bucket = _blocked_bucket_for_class(effective_block_class) if row.get("actual_state") == "blocked" else None
+        retry_eligible_until = _latest_retry_eligible_until(access_states)
+        needs_alternative_source_check = any(bool(state.get("needs_alternative_source_check")) for state in access_states)
+        enriched.append(
+            {
+                **row,
+                "effective_block_class": effective_block_class,
+                "blocked_bucket": blocked_bucket,
+                "retry_eligible_until": retry_eligible_until,
+                "needs_alternative_source_check": needs_alternative_source_check,
+            }
+        )
+    return enriched
+
+
+def _load_access_state_by_candidate_ids(
+    conn: sqlite3.Connection,
+    candidate_ids: list[str],
+) -> dict[str, dict[str, object]]:
+    if not candidate_ids:
+        return {}
+    deduped_ids = list(dict.fromkeys(candidate_ids))
+    rows = conn.execute(
+        f"""
+        SELECT candidate_id, block_class, retry_eligible_until, needs_alternative_source_check
+        FROM artifact_access_state
+        WHERE candidate_id IN ({",".join("?" for _ in deduped_ids)})
+        """,
+        tuple(deduped_ids),
+    ).fetchall()
+    return {str(row["candidate_id"]): dict(row) for row in rows}
+
+
+def _effective_block_class_for_row(
+    *,
+    blocked_reason: str | None,
+    access_states: list[dict[str, object]],
+) -> str | None:
+    classes = [str(state.get("block_class") or "") for state in access_states if state.get("block_class")]
+    if blocked_reason:
+        classes.append(blocked_reason)
+    if not classes:
+        return None
+    return max(classes, key=lambda value: _BLOCK_CLASS_RANK.get(value, -1))
+
+
+def _blocked_bucket_for_class(block_class: str | None) -> str | None:
+    if block_class == BLOCK_CLASS_ORCHESTRATION_ERROR:
+        return "fixable"
+    if block_class in {BLOCK_CLASS_UPSTREAM_403_TRANSIENT, BLOCK_CLASS_UPSTREAM_403_PERSISTENT}:
+        return "retryable"
+    if block_class == BLOCK_CLASS_ACCESS_CONSTRAINT:
+        return "access_constrained"
+    return None
+
+
+def _latest_retry_eligible_until(access_states: list[dict[str, object]]) -> str | None:
+    values = [str(state.get("retry_eligible_until") or "") for state in access_states if state.get("retry_eligible_until")]
+    return max(values) if values else None
+
+
+def _resolved_access_block_class(
+    *,
+    blocked_reason: str,
+    retry_count: int,
+    expected_state: str,
+    deadline_at: str,
+    previous_block_class: str | None,
+) -> str:
+    if blocked_reason != BLOCK_CLASS_UPSTREAM_403_TRANSIENT:
+        return blocked_reason
+    if previous_block_class == BLOCK_CLASS_ACCESS_CONSTRAINT:
+        return BLOCK_CLASS_ACCESS_CONSTRAINT
+    if retry_count >= 3 and _is_past_deadline_window(expected_state=expected_state, deadline_at=deadline_at):
+        return BLOCK_CLASS_ACCESS_CONSTRAINT
+    if retry_count >= 2:
+        return BLOCK_CLASS_UPSTREAM_403_PERSISTENT
+    return BLOCK_CLASS_UPSTREAM_403_TRANSIENT
+
+
+def _retry_eligible_until_for_block_class(*, now: datetime, block_class: str) -> str | None:
+    if block_class == BLOCK_CLASS_UPSTREAM_403_TRANSIENT:
+        return (now + timedelta(hours=24)).isoformat()
+    if block_class == BLOCK_CLASS_UPSTREAM_403_PERSISTENT:
+        return (now + timedelta(hours=72)).isoformat()
+    return None
+
+
+def _is_past_deadline_window(*, expected_state: str, deadline_at: str) -> bool:
+    if expected_state == "late":
+        return True
+    if not deadline_at:
+        return False
+    try:
+        return date.fromisoformat(deadline_at) < date.today()
+    except ValueError:
+        return False
+
+
+def _retry_ready(row: dict[str, object]) -> bool:
+    retry_eligible_until = str(row.get("retry_eligible_until") or "").strip()
+    if not retry_eligible_until:
+        return True
+    try:
+        return datetime.fromisoformat(retry_eligible_until) <= datetime.now(timezone.utc)
+    except ValueError:
+        return True
+
+
 def _build_action_plan(
     conn: sqlite3.Connection,
     selected: list[str],
@@ -910,6 +1059,8 @@ def _build_action_plan(
     elif action == "download-missing":
         candidate_ids: list[str] = []
         for row in coverage_rows:
+            if row["actual_state"] == "blocked" and row.get("blocked_bucket") == "access_constrained":
+                continue
             if row["actual_state"] not in {"discovered", "blocked"}:
                 continue
             payload = json.loads(row["payload_json"] or "{}")
@@ -921,8 +1072,13 @@ def _build_action_plan(
         for row in coverage_rows:
             if action == "process-missing" and row["actual_state"] not in {"downloaded", "blocked"}:
                 continue
-            if action == "rerun-blocked" and row["actual_state"] != "blocked":
-                continue
+            if action == "rerun-blocked":
+                if row["actual_state"] != "blocked":
+                    continue
+                if row.get("blocked_bucket") == "access_constrained":
+                    continue
+                if row.get("blocked_bucket") == "retryable" and not _retry_ready(row):
+                    continue
             payload = json.loads(row["payload_json"] or "{}")
             for document_id in payload.get("matched_document_ids") or []:
                 target_ids.append(str(document_id))
@@ -955,7 +1111,7 @@ def _count_current_snapshots(conn: sqlite3.Connection, *, selected: list[str]) -
 def _dominant_blocked_reasons(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     counts: dict[str, int] = {}
     for row in rows:
-        reason = str(row.get("blocked_reason") or "")
+        reason = str(row.get("effective_block_class") or row.get("blocked_reason") or "")
         if reason:
             counts[reason] = counts.get(reason, 0) + 1
     return [
@@ -1006,6 +1162,7 @@ def _coverage_row_matches_filters(
 def _serialize_coverage_row(row: dict[str, object]) -> dict[str, object]:
     payload = json.loads(row.get("payload_json") or "{}")
     return {
+        "coverage_id": row["coverage_id"],
         "ticker": row["ticker"],
         "issuer_name": row.get("issuer_name"),
         "obligation_type": row["obligation_type"],
@@ -1020,6 +1177,10 @@ def _serialize_coverage_row(row: dict[str, object]) -> dict[str, object]:
         "downloaded_count": row["downloaded_count"],
         "analyzed_count": row["analyzed_count"],
         "blocked_reason": row["blocked_reason"],
+        "effective_block_class": row.get("effective_block_class"),
+        "blocked_bucket": row.get("blocked_bucket"),
+        "retry_eligible_until": row.get("retry_eligible_until"),
+        "needs_alternative_source_check": bool(row.get("needs_alternative_source_check")),
         "knowledge_source": row["knowledge_source"],
         "matched_document_ids": payload.get("matched_document_ids") or [],
         "matched_candidate_ids": payload.get("matched_candidate_ids") or [],

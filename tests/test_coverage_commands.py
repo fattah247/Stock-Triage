@@ -11,10 +11,16 @@ from stock_triage.commands.coverage import (
     cmd_nuance_audit,
 )
 from stock_triage.coverage.pipeline import (
+    _build_action_plan,
     _blocked_reason_for,
+    _enrich_coverage_rows_with_access_state,
     _persist_coverage_rows,
     _prioritize_candidate_ids,
     _raw_blocked_reason_for,
+    BLOCK_CLASS_ACCESS_CONSTRAINT,
+    BLOCK_CLASS_ORCHESTRATION_ERROR,
+    BLOCK_CLASS_UPSTREAM_403_PERSISTENT,
+    BLOCK_CLASS_UPSTREAM_403_TRANSIENT,
 )
 from stock_triage.coverage import load_coverage_status
 from stock_triage.dashboard.server import create_dashboard_server
@@ -320,6 +326,294 @@ def test_persist_coverage_rows_tracks_artifact_access_state(tmp_config):
         assert row["retry_eligible_until"] is not None
         assert row["last_http_status"] == 403
         assert row["last_error_code"] == "http_403"
+    finally:
+        conn.close()
+
+
+def test_persist_coverage_rows_promotes_403_to_persistent_then_access_constraint(tmp_config):
+    now = "2026-04-19T00:00:00+00:00"
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        conn.execute(
+            """
+            INSERT INTO document_candidates (
+                candidate_id, source_name, source_record_id, ticker, title, upstream_published_at,
+                attachment_url, raw_metadata, discovered_at, queued
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cand-403",
+                "idx_financial_reports",
+                "rec-403",
+                "TAMU",
+                "Financial Statement 2025",
+                None,
+                "https://example.test/fs.pdf",
+                "{}",
+                now,
+                0,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO download_resources (
+                resource_id, candidate_id, source_name, source_record_id, source_file_id,
+                attachment_url, attachment_filename, status, document_id, attempt_count, failure_count,
+                last_attempted_at, next_attempt_at, last_http_status, last_error_code,
+                last_error_detail, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "res-403",
+                "cand-403",
+                "idx_financial_reports",
+                "rec-403",
+                "file-403",
+                "https://example.test/fs.pdf",
+                "fs.pdf",
+                "failed",
+                None,
+                1,
+                1,
+                now,
+                None,
+                403,
+                "http_403",
+                "forbidden",
+                now,
+                now,
+            ),
+        )
+        row = {
+            "coverage_id": "cov-403",
+            "ticker": "TAMU",
+            "source_name": "idx_financial_reports",
+            "obligation_type": "annual_fs",
+            "document_type": "financial_statement",
+            "fiscal_year": 2025,
+            "period_label": "Annual FS",
+            "period_end_date": "2025-12-31",
+            "window_start": "2026-03-30",
+            "deadline_at": "2026-04-01",
+            "expected_state": "late",
+            "actual_state": "blocked",
+            "candidate_count": 1,
+            "downloaded_count": 0,
+            "analyzed_count": 0,
+            "blocked_reason": BLOCK_CLASS_UPSTREAM_403_TRANSIENT,
+            "knowledge_source": "default",
+            "payload_json": json.dumps({"matched_candidate_ids": ["cand-403"]}),
+            "coverage_version": "v3_4-v1",
+            "updated_at": now,
+        }
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        first = conn.execute(
+            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
+            ("cand-403",),
+        ).fetchone()
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        second = conn.execute(
+            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
+            ("cand-403",),
+        ).fetchone()
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        third = conn.execute(
+            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
+            ("cand-403",),
+        ).fetchone()
+        assert first["block_class"] == BLOCK_CLASS_UPSTREAM_403_TRANSIENT
+        assert first["retry_count"] == 1
+        assert first["needs_alternative_source_check"] == 0
+        assert first["retry_eligible_until"] is not None
+        assert second["block_class"] == BLOCK_CLASS_UPSTREAM_403_PERSISTENT
+        assert second["retry_count"] == 2
+        assert second["needs_alternative_source_check"] == 1
+        assert second["retry_eligible_until"] is not None
+        assert third["block_class"] == BLOCK_CLASS_ACCESS_CONSTRAINT
+        assert third["retry_count"] == 3
+        assert third["needs_alternative_source_check"] == 1
+        assert third["retry_eligible_until"] is None
+    finally:
+        conn.close()
+
+
+def test_coverage_status_splits_blocked_rows_by_operator_bucket(tmp_config):
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        conn.execute(
+            """
+            INSERT INTO filing_coverage (
+                coverage_id, ticker, source_name, obligation_type, document_type, fiscal_year,
+                period_label, period_end_date, window_start, deadline_at, expected_state, actual_state,
+                candidate_count, downloaded_count, analyzed_count, blocked_reason, knowledge_source,
+                payload_json, coverage_version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cov-fixable",
+                "TAMU",
+                "idx_financial_reports",
+                "annual_fs",
+                "financial_statement",
+                2025,
+                "Annual FS",
+                "2025-12-31",
+                "2026-03-30",
+                "2026-04-29",
+                "late",
+                "blocked",
+                0,
+                0,
+                0,
+                BLOCK_CLASS_ORCHESTRATION_ERROR,
+                "default",
+                json.dumps({"matched_document_ids": ["doc-fixable"]}),
+                "v3_4-v1",
+                "2026-04-19T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO filing_coverage (
+                coverage_id, ticker, source_name, obligation_type, document_type, fiscal_year,
+                period_label, period_end_date, window_start, deadline_at, expected_state, actual_state,
+                candidate_count, downloaded_count, analyzed_count, blocked_reason, knowledge_source,
+                payload_json, coverage_version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cov-constrained",
+                "TAMU",
+                "idx_financial_reports",
+                "interim_fs",
+                "financial_statement",
+                2026,
+                "Interim FS",
+                "2026-06-30",
+                "2026-07-30",
+                "2026-08-31",
+                "late",
+                "blocked",
+                1,
+                0,
+                0,
+                BLOCK_CLASS_UPSTREAM_403_TRANSIENT,
+                "default",
+                json.dumps({"matched_candidate_ids": ["cand-constraint"]}),
+                "v3_4-v1",
+                "2026-04-19T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO artifact_access_state (
+                artifact_id, candidate_id, source_name, ticker, endpoint_family, document_type,
+                first_blocked_at, last_blocked_at, last_success_at, retry_count, block_class,
+                retry_eligible_until, needs_alternative_source_check, last_http_status, last_error_code,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cand-constraint",
+                "cand-constraint",
+                "idx_financial_reports",
+                "TAMU",
+                "idx_financial_reports_artifact",
+                "financial_statement",
+                "2026-04-17T00:00:00+00:00",
+                "2026-04-19T00:00:00+00:00",
+                None,
+                3,
+                BLOCK_CLASS_ACCESS_CONSTRAINT,
+                None,
+                1,
+                403,
+                "http_403",
+                "2026-04-17T00:00:00+00:00",
+                "2026-04-19T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        report = load_coverage_status(
+            tmp_config,
+            scope="ticker-set",
+            ticker="TAMU",
+            limit=10,
+            materialize=False,
+        )
+
+        assert report["summary"]["blocked_count"] == 2
+        assert report["summary"]["blocked_fixable_count"] == 1
+        assert report["summary"]["blocked_retryable_count"] == 0
+        assert report["summary"]["blocked_access_constrained_count"] == 1
+        constrained = next(row for row in report["gap_leaders"] if row["coverage_id"] == "cov-constrained")
+        assert constrained["effective_block_class"] == BLOCK_CLASS_ACCESS_CONSTRAINT
+        assert constrained["blocked_bucket"] == "access_constrained"
+        assert constrained["needs_alternative_source_check"] is True
+    finally:
+        conn.close()
+
+
+def test_rerun_blocked_plan_excludes_access_constraints(tmp_config):
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        rows = _enrich_coverage_rows_with_access_state(
+            conn,
+            [
+                {
+                    "ticker": "TAMU",
+                    "payload_json": json.dumps({"matched_document_ids": ["doc-fixable"]}),
+                    "actual_state": "blocked",
+                    "blocked_reason": BLOCK_CLASS_ORCHESTRATION_ERROR,
+                },
+                {
+                    "ticker": "TAMU",
+                    "payload_json": json.dumps({"matched_document_ids": ["doc-constrained"], "matched_candidate_ids": ["cand-constraint"]}),
+                    "actual_state": "blocked",
+                    "blocked_reason": BLOCK_CLASS_UPSTREAM_403_TRANSIENT,
+                },
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO artifact_access_state (
+                artifact_id, candidate_id, source_name, ticker, endpoint_family, document_type,
+                first_blocked_at, last_blocked_at, last_success_at, retry_count, block_class,
+                retry_eligible_until, needs_alternative_source_check, last_http_status, last_error_code,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cand-constraint",
+                "cand-constraint",
+                "idx_financial_reports",
+                "TAMU",
+                "idx_financial_reports_artifact",
+                "financial_statement",
+                "2026-04-17T00:00:00+00:00",
+                "2026-04-19T00:00:00+00:00",
+                None,
+                3,
+                BLOCK_CLASS_ACCESS_CONSTRAINT,
+                None,
+                1,
+                403,
+                "http_403",
+                "2026-04-17T00:00:00+00:00",
+                "2026-04-19T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+        rows = _enrich_coverage_rows_with_access_state(conn, rows)
+        plan = _build_action_plan(conn, ["TAMU"], rows, action="rerun-blocked", limit=10)
+        assert plan["targets"] == ["doc-fixable"]
     finally:
         conn.close()
 

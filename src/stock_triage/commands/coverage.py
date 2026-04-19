@@ -43,7 +43,10 @@ def cmd_coverage_status(args: argparse.Namespace) -> int:
         f"ticker_count={report['ticker_count']} "
         f"expected={report['summary']['expected_count']} "
         f"analyzed={report['summary']['analyzed_count']} "
-        f"blocked={report['summary']['blocked_count']}"
+        f"blocked={report['summary']['blocked_count']} "
+        f"fixable={report['summary'].get('blocked_fixable_count', 0)} "
+        f"retryable={report['summary'].get('blocked_retryable_count', 0)} "
+        f"access_constrained={report['summary'].get('blocked_access_constrained_count', 0)}"
     )
     print(json.dumps(report, sort_keys=True))
     return 0
@@ -104,7 +107,10 @@ def cmd_coverage_run(args: argparse.Namespace) -> int:
         f"scope={result['preview']['scope_label']} "
         f"expected={status['summary']['expected_count']} "
         f"analyzed={status['summary']['analyzed_count']} "
-        f"blocked={status['summary']['blocked_count']}"
+        f"blocked={status['summary']['blocked_count']} "
+        f"fixable={status['summary'].get('blocked_fixable_count', 0)} "
+        f"retryable={status['summary'].get('blocked_retryable_count', 0)} "
+        f"access_constrained={status['summary'].get('blocked_access_constrained_count', 0)}"
     )
     print(json.dumps(result, sort_keys=True))
     return 0
