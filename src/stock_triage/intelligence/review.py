@@ -664,7 +664,7 @@ def _issue_family_from_persistence_focus(focus_key: str) -> str:
         return "debt_stress"
     if normalized == "governance_related_party":
         return "governance"
-    if normalized == "segment_concentration":
+    if normalized == "segment_or_subsidiary_concentration":
         return "segment"
     if normalized == "claim_credibility":
         return "claim:credibility"
@@ -998,6 +998,19 @@ def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[s
         else:
             add_case("narrative_signal_quality", "fail", "Narrative signals exceed cap or are not deduplicated.")
 
+        if not events and not segment_summary:
+            add_case(
+                "sparse_issuer_handled",
+                "pass",
+                "Sparse issuer state is explicit: event and segment signal depth are both absent and surfaced as warnings.",
+            )
+        else:
+            add_case(
+                "sparse_issuer_handled",
+                "warning",
+                "Snapshot is not sparse enough for the sparse-issuer handling case.",
+            )
+
     no_case_reason: str | None = None
     summary: str
     if not rows:
@@ -1036,6 +1049,16 @@ def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[s
                         f"{ticker_upper} has no local documents yet. "
                         "Run discovery and download before golden checks."
                     )
+            if no_case_reason:
+                cases.append(
+                    {
+                        "ticker": ticker_upper,
+                        "case_name": "no_snapshot_issuer_handled",
+                        "status": "pass",
+                        "detail": no_case_reason,
+                    }
+                )
+                passed += 1
         else:
             no_case_reason = (
                 f"No current {DERIVED_VERSION} snapshots exist yet. "

@@ -37,6 +37,7 @@ from stock_triage.intelligence.pipeline import (
     _build_segment_summary,
     _derive_stance,
     _next_expected_filing_window,
+    _resolved_nuance_severity_tier,
     UncertaintyRecord,
 )
 from stock_triage.intelligence.review import load_intelligence_observability, run_golden_set
@@ -137,7 +138,7 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert payload["uncertainty_rows"]
         assert payload["next_read_guidance"]
         assert payload["contradiction_rows"]
-        assert any(item["nuance_class"] == "claim_contradiction" for item in payload["nuance_findings"])
+        assert any(item["nuance_class"] == "management_contradiction" for item in payload["nuance_findings"])
         assert any(item["uncertainty_class"] == "event_confidence_missing" for item in payload["uncertainty_rows"])
         assert payload["next_read_guidance"][0]["reason_class"] in {"missing_filing", "nuance_review", "uncertainty_followup"}
         assert payload["contradiction_rows"][0]["contradiction_class"] == "claim_vs_outcome"
@@ -208,6 +209,34 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
             "thesis_conditions": 3,
             "thesis_evaluations": 1,
         }
+    finally:
+        rconn.close()
+
+
+def test_run_intelligence_persists_v35_issuer_condition(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        snapshot = rconn.execute(
+            """
+            SELECT issuer_condition, payload_json
+            FROM company_snapshots
+            WHERE ticker = ? AND snapshot_kind = 'current' AND derived_version = ?
+            """,
+            ("TAMU", DERIVED_VERSION),
+        ).fetchone()
+        assert snapshot is not None
+        payload = json.loads(snapshot["payload_json"])
+        assert snapshot["issuer_condition"] in {"clean", "watch", "stressed"}
+        assert payload["issuer_condition"] == snapshot["issuer_condition"]
+        assert payload["top_card"]["issuer_condition"] == snapshot["issuer_condition"]
+        assert payload["decision_panel"]["issuer_condition"] == snapshot["issuer_condition"]
+
     finally:
         rconn.close()
 
@@ -331,6 +360,101 @@ def test_run_golden_set_persists_audit_run_and_updates_observability(tmp_config)
     assert latest is not None
     assert latest["golden_run_id"] == result.golden_run_id
     assert latest["target_ticker"] == "TAMU"
+
+
+def test_run_golden_set_adds_sparse_issuer_case(tmp_config):
+    _seed_phase8_data(tmp_config)
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        as_of_document_id = rconn.execute(
+            "SELECT document_id FROM documents WHERE ticker = ? ORDER BY updated_at DESC, document_id DESC LIMIT 1",
+            ("TAMU",),
+        ).fetchone()["document_id"]
+    finally:
+        rconn.close()
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "top_card": {"overall_state": "stable"},
+        "decision_panel": {"stance": "Watch", "confidence": "medium"},
+        "filing_expectations": [{"obligation_type": "annual_report", "state": "satisfied"}],
+        "recommendation": {"bucket": "neither"},
+        "events": [],
+        "segment_summary": [],
+        "narrative_signals": ["watch liquidity"],
+        "review_required": [],
+    }
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+
+        def _seed_sparse_snapshot(conn) -> None:
+            conn.execute(
+                """
+                INSERT INTO company_snapshots (
+                    ticker, as_of_document_id, as_of_date, snapshot_kind, payload_json,
+                    issuer_condition, derived_version, created_at, updated_at
+                ) VALUES (?, ?, ?, 'current', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "TAMU",
+                        as_of_document_id,
+                        "2026-04-18",
+                        json.dumps(payload, sort_keys=True),
+                        "watch",
+                    DERIVED_VERSION,
+                    now,
+                    now,
+                ),
+            )
+
+        wq.submit(_seed_sparse_snapshot)
+
+    result = run_golden_set(tmp_config, ticker="TAMU", limit=5)
+
+    assert result.case_count >= 1
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT payload_json
+            FROM golden_set_runs
+            WHERE golden_run_id = ?
+            """,
+            (result.golden_run_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        sparse_case = next(case for case in payload["cases"] if case["case_name"] == "sparse_issuer_handled")
+        assert sparse_case["status"] == "pass"
+    finally:
+        rconn.close()
+
+
+def test_run_golden_set_adds_no_snapshot_case(tmp_config):
+    _seed_phase8_data(tmp_config)
+
+    result = run_golden_set(tmp_config, ticker="TAMU", limit=1)
+
+    assert result.case_count == 1
+    assert result.passed_count == 1
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(rconn, tmp_config)
+        row = rconn.execute(
+            """
+            SELECT payload_json
+            FROM golden_set_runs
+            WHERE golden_run_id = ?
+            """,
+            (result.golden_run_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        assert payload["cases"][0]["case_name"] == "no_snapshot_issuer_handled"
+        assert payload["cases"][0]["status"] == "pass"
+        assert payload["no_case_reason"]
+    finally:
+        rconn.close()
 
 
 def test_run_intelligence_prefers_local_fiscal_year_override(tmp_config):
@@ -1027,12 +1151,16 @@ def test_build_nuance_findings_uses_section_cues_without_events():
     )
 
     row_map = {row.nuance_class: row for row in rows}
-    assert row_map["legal_note_focus"].section_label == "Legal and Regulatory"
-    assert json.loads(row_map["legal_note_focus"].payload_json)["excerpt_text"] == "The company discusses a lawsuit and regulatory sanction in this section."
-    assert json.loads(row_map["legal_note_focus"].payload_json)["page_start"] == 44
-    assert json.loads(row_map["legal_note_focus"].payload_json)["stage"] == "active_process"
-    assert json.loads(row_map["legal_note_focus"].payload_json)["severity_context"] == "developing"
-    assert json.loads(row_map["legal_note_focus"].payload_json)["severity_tier"] == "active_litigation"
+    legal_row = row_map["legal_or_regulatory_severity"]
+    assert legal_row.section_label == "Legal and Regulatory"
+    assert legal_row.severity_tier == "active_litigation"
+    assert json.loads(legal_row.payload_json)["excerpt_text"] == "The company discusses a lawsuit and regulatory sanction in this section."
+    assert json.loads(legal_row.payload_json)["page_start"] == 44
+    assert json.loads(legal_row.payload_json)["stage"] == "active_process"
+    assert json.loads(legal_row.payload_json)["severity_context"] == "developing"
+    assert json.loads(legal_row.payload_json)["severity_tier"] == "active_litigation"
+    assert json.loads(legal_row.payload_json)["source_sections"] == ["Legal and Regulatory"]
+    assert _resolved_nuance_severity_tier(legal_row) == "active_litigation"
 
 
 def test_build_nuance_findings_adds_capital_allocation_signals():
@@ -1140,10 +1268,14 @@ def test_build_nuance_findings_adds_capital_allocation_signals():
     )
 
     row_map = {row.nuance_class: row for row in rows}
-    assert "dilution_dependence" in row_map
-    assert "proceeds_redeployment" in row_map
-    assert json.loads(row_map["proceeds_redeployment"].payload_json)["working_capital_use"] is True
-    assert json.loads(row_map["proceeds_redeployment"].payload_json)["revision_signal"] is True
+    assert "capital_allocation_shift" in row_map
+    assert "use_of_proceeds_follow_through" in row_map
+    capital_payload = json.loads(row_map["capital_allocation_shift"].payload_json)
+    assert "dilution_dependence" in capital_payload["subsignals"]
+    proceeds_payload = json.loads(row_map["use_of_proceeds_follow_through"].payload_json)
+    assert proceeds_payload["working_capital_use"] is True
+    assert proceeds_payload["revision_signal"] is True
+    assert "proceeds_redeployment" in proceeds_payload["subsignals"]
 
 
 def test_build_next_read_guidance_falls_back_to_section_focus_with_excerpt():
@@ -1261,7 +1393,7 @@ def test_build_unresolved_nuance_summary_groups_focuses():
                 nuance_id="n1",
                 ticker="TAMU",
                 document_id="doc-1",
-                nuance_class="legal_note_focus",
+                nuance_class="legal_or_regulatory_severity",
                 severity="critical",
                 confidence=None,
                 section_label="Legal and Regulatory",
@@ -1274,7 +1406,7 @@ def test_build_unresolved_nuance_summary_groups_focuses():
                 nuance_id="n2",
                 ticker="TAMU",
                 document_id="doc-1",
-                nuance_class="proceeds_redeployment",
+                nuance_class="use_of_proceeds_follow_through",
                 severity="warning",
                 confidence=None,
                 section_label="Use of Proceeds",

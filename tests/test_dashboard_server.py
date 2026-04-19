@@ -808,9 +808,10 @@ def test_ops_detail_exposes_zero_case_golden_reason(tmp_config) -> None:
         ops = json.loads(urlopen(f"{handle.url}/api/detail?section=ops").read().decode("utf-8"))
         zero_case = next((row for row in ops["golden_rows"] if row["target_ticker"] == "TAMU"), None)
         assert zero_case is not None
-        assert zero_case["case_count"] == 0
+        assert zero_case["case_count"] == 1
         assert "no analyzed" in (zero_case["no_case_reason"] or "").lower() or "no current" in (zero_case["no_case_reason"] or "").lower()
         assert zero_case["summary"]
+        assert zero_case["payload"]["cases"][0]["case_name"] == "no_snapshot_issuer_handled"
     finally:
         handle.server.shutdown()
         handle.server.server_close()

@@ -39,6 +39,10 @@ from ..sources.idx_artifacts import parse_financial_report_json
 COVERAGE_VERSION = "v3_4-v1"
 _SCOPE_CHOICES = {"all", "watchlist", "sector", "ticker-set"}
 _ACTION_CHOICES = {"discover-missing", "download-missing", "process-missing", "rerun-blocked"}
+BLOCK_CLASS_ORCHESTRATION_ERROR = "orchestration_error"
+BLOCK_CLASS_UPSTREAM_403_TRANSIENT = "upstream_403_transient"
+BLOCK_CLASS_UPSTREAM_403_PERSISTENT = "upstream_403_persistent"
+BLOCK_CLASS_ACCESS_CONSTRAINT = "access_constraint"
 
 
 @dataclass(frozen=True)
@@ -529,10 +533,11 @@ def _build_coverage_row_for_template(
     candidate_count = len(matched_candidates)
     downloaded_count = len([doc for doc in matched_documents if doc["process_state"] != "failed"])
     analyzed_count = len([doc for doc in matched_documents if doc["process_state"] == "analyzed"])
-    blocked_reason = _blocked_reason_for(
+    raw_blocked_reason = _raw_blocked_reason_for(
         matched_documents=matched_documents,
         matched_candidates=matched_candidates,
     )
+    blocked_reason = _blocked_reason_for(raw_blocked_reason)
     actual_state = _actual_state_for(
         candidate_count=candidate_count,
         downloaded_count=downloaded_count,
@@ -543,6 +548,7 @@ def _build_coverage_row_for_template(
     payload = {
         "matched_document_ids": [doc["document_id"] for doc in matched_documents],
         "matched_candidate_ids": [candidate["candidate_id"] for candidate in matched_candidates],
+        "raw_blocked_reason": raw_blocked_reason,
         "reason": template["reason"],
         "report_type": obligation_type,
     }
@@ -650,7 +656,7 @@ def _matched_candidates_for_expectation(
     return [dict(row) for row in rows]
 
 
-def _blocked_reason_for(
+def _raw_blocked_reason_for(
     *,
     matched_documents: list[dict[str, object]],
     matched_candidates: list[dict[str, object]],
@@ -666,6 +672,15 @@ def _blocked_reason_for(
                 return reason
         return str(failed_candidates[0].get("last_error_code") or "download_failed")
     return None
+
+
+def _blocked_reason_for(raw_blocked_reason: str | None) -> str | None:
+    if not raw_blocked_reason:
+        return None
+    normalized = str(raw_blocked_reason).strip().lower()
+    if normalized in {"http_403", "browser_http_403", "cloudflare_403"}:
+        return BLOCK_CLASS_UPSTREAM_403_TRANSIENT
+    return BLOCK_CLASS_ORCHESTRATION_ERROR
 
 
 def _actual_state_for(
@@ -744,7 +759,113 @@ def _persist_coverage_rows(conn: sqlite3.Connection, *, rows: list[dict[str, obj
                 row["updated_at"],
             ),
         )
+    _persist_access_state_rows(conn, rows=rows)
     return len(rows)
+
+
+def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str, object]]) -> None:
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        blocked_reason = str(row.get("blocked_reason") or "").strip()
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+        candidate_ids = [str(item) for item in payload.get("matched_candidate_ids") or [] if item]
+        if not blocked_reason or not candidate_ids:
+            continue
+        placeholders = ",".join("?" for _ in candidate_ids)
+        candidate_rows = conn.execute(
+            f"""
+            SELECT
+                dc.candidate_id,
+                dc.source_name,
+                dc.ticker,
+                dr.resource_id,
+                dr.last_http_status,
+                dr.last_error_code
+            FROM document_candidates dc
+            LEFT JOIN download_resources dr ON dr.candidate_id = dc.candidate_id
+            WHERE dc.candidate_id IN ({placeholders})
+            ORDER BY dr.last_attempted_at DESC, dr.resource_id DESC
+            """,
+            tuple(candidate_ids),
+        ).fetchall()
+        seen_candidates: set[str] = set()
+        for candidate in candidate_rows:
+            candidate_id = str(candidate["candidate_id"])
+            if candidate_id in seen_candidates:
+                continue
+            seen_candidates.add(candidate_id)
+            artifact_id = candidate_id
+            endpoint_family = _endpoint_family_for(
+                source_name=str(candidate["source_name"] or row.get("source_name") or ""),
+                block_class=blocked_reason,
+            )
+            retry_eligible_until = None
+            if blocked_reason == BLOCK_CLASS_UPSTREAM_403_TRANSIENT:
+                retry_eligible_until = (now + timedelta(hours=24)).isoformat()
+            existing = conn.execute(
+                """
+                SELECT first_blocked_at, retry_count, needs_alternative_source_check
+                FROM artifact_access_state
+                WHERE artifact_id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
+            first_blocked_at = str(existing["first_blocked_at"]) if existing and existing["first_blocked_at"] else now.isoformat()
+            retry_count = int(existing["retry_count"] or 0) + 1 if existing else 1
+            needs_alternative_source_check = int(existing["needs_alternative_source_check"] or 0) if existing else 0
+            conn.execute(
+                """
+                INSERT INTO artifact_access_state (
+                    artifact_id, candidate_id, source_name, ticker, endpoint_family, document_type,
+                    first_blocked_at, last_blocked_at, last_success_at, retry_count, block_class,
+                    retry_eligible_until, needs_alternative_source_check, last_http_status, last_error_code,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id)
+                DO UPDATE SET
+                    candidate_id = excluded.candidate_id,
+                    source_name = excluded.source_name,
+                    ticker = excluded.ticker,
+                    endpoint_family = excluded.endpoint_family,
+                    document_type = excluded.document_type,
+                    last_blocked_at = excluded.last_blocked_at,
+                    retry_count = excluded.retry_count,
+                    block_class = excluded.block_class,
+                    retry_eligible_until = excluded.retry_eligible_until,
+                    needs_alternative_source_check = excluded.needs_alternative_source_check,
+                    last_http_status = excluded.last_http_status,
+                    last_error_code = excluded.last_error_code,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    artifact_id,
+                    candidate_id,
+                    str(candidate["source_name"] or row.get("source_name") or ""),
+                    str(candidate["ticker"] or row.get("ticker") or ""),
+                    endpoint_family,
+                    str(row.get("document_type") or ""),
+                    first_blocked_at,
+                    now.isoformat(),
+                    None,
+                    retry_count,
+                    blocked_reason,
+                    retry_eligible_until,
+                    needs_alternative_source_check,
+                    candidate["last_http_status"],
+                    candidate["last_error_code"],
+                    first_blocked_at,
+                    now.isoformat(),
+                ),
+            )
+
+
+def _endpoint_family_for(*, source_name: str, block_class: str) -> str:
+    normalized_source = source_name.strip().lower()
+    if normalized_source == "idx_financial_reports":
+        return "idx_financial_reports_artifact" if block_class.startswith("upstream_403") else "idx_financial_reports_pipeline"
+    if normalized_source == "idx_disclosures":
+        return "idx_disclosures_attachment" if block_class.startswith("upstream_403") else "idx_disclosures_pipeline"
+    return f"{normalized_source or 'unknown'}_artifact"
 
 
 def _load_selected_coverage_rows(

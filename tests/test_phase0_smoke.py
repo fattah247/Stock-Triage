@@ -36,7 +36,7 @@ def test_phase0_end_to_end(tmp_config):
     # 1. Migrations apply via the writer queue.
     with WriterQueue(cfg) as wq:
         applied = wq.submit(run_migrations)
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
 
         # 2. Re-running is a no-op.
         again = wq.submit(run_migrations)
@@ -93,7 +93,7 @@ def test_phase0_end_to_end(tmp_config):
         version = rconn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     finally:
         rconn.close()
 

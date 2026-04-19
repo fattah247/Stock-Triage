@@ -10,7 +10,12 @@ from stock_triage.commands.coverage import (
     cmd_coverage_status,
     cmd_nuance_audit,
 )
-from stock_triage.coverage.pipeline import _blocked_reason_for, _persist_coverage_rows, _prioritize_candidate_ids
+from stock_triage.coverage.pipeline import (
+    _blocked_reason_for,
+    _persist_coverage_rows,
+    _prioritize_candidate_ids,
+    _raw_blocked_reason_for,
+)
 from stock_triage.coverage import load_coverage_status
 from stock_triage.dashboard.server import create_dashboard_server
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
@@ -202,15 +207,121 @@ def test_persist_coverage_rows_upserts_duplicate_keys(tmp_config):
 
 
 def test_blocked_reason_prefers_specific_candidate_error_code():
-    reason = _blocked_reason_for(
+    raw = _raw_blocked_reason_for(
         matched_documents=[],
         matched_candidates=[
             {"status": "failed", "last_error_code": "Error"},
             {"status": "failed", "last_error_code": "http_403"},
         ],
     )
+    reason = _blocked_reason_for(raw)
 
-    assert reason == "http_403"
+    assert reason == "upstream_403_transient"
+
+
+def test_persist_coverage_rows_tracks_artifact_access_state(tmp_config):
+    now = "2026-04-19T00:00:00+00:00"
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        conn.execute(
+            """
+            INSERT INTO document_candidates (
+                candidate_id, source_name, source_record_id, ticker, title, upstream_published_at,
+                attachment_url, raw_metadata, discovered_at, queued
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "cand-1",
+                "idx_financial_reports",
+                "rec-1",
+                "TAMU",
+                "Financial Statement 2025",
+                None,
+                "https://example.test/fs.pdf",
+                "{}",
+                now,
+                0,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO download_resources (
+                resource_id, candidate_id, source_name, source_record_id, source_file_id,
+                attachment_url, attachment_filename, status, document_id, attempt_count, failure_count,
+                last_attempted_at, next_attempt_at, last_http_status, last_error_code,
+                last_error_detail, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "res-1",
+                "cand-1",
+                "idx_financial_reports",
+                "rec-1",
+                "file-1",
+                "https://example.test/fs.pdf",
+                "fs.pdf",
+                "failed",
+                None,
+                1,
+                1,
+                now,
+                None,
+                403,
+                "http_403",
+                "forbidden",
+                now,
+                now,
+            ),
+        )
+        _persist_coverage_rows(
+            conn,
+            rows=[
+                {
+                    "coverage_id": "cov-1",
+                    "ticker": "TAMU",
+                    "source_name": "idx_financial_reports",
+                    "obligation_type": "annual_fs",
+                    "document_type": "financial_statement",
+                    "fiscal_year": 2025,
+                    "period_label": "Annual FS",
+                    "period_end_date": "2025-12-31",
+                    "window_start": "2026-03-30",
+                    "deadline_at": "2026-04-29",
+                    "expected_state": "late",
+                    "actual_state": "blocked",
+                    "candidate_count": 1,
+                    "downloaded_count": 0,
+                    "analyzed_count": 0,
+                    "blocked_reason": "upstream_403_transient",
+                    "knowledge_source": "default",
+                    "payload_json": json.dumps({"matched_candidate_ids": ["cand-1"]}),
+                    "coverage_version": "v3_4-v1",
+                    "updated_at": now,
+                }
+            ],
+            tickers=["TAMU"],
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT candidate_id, block_class, endpoint_family, retry_count, retry_eligible_until, last_http_status, last_error_code
+            FROM artifact_access_state
+            WHERE artifact_id = ?
+            """,
+            ("cand-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["candidate_id"] == "cand-1"
+        assert row["block_class"] == "upstream_403_transient"
+        assert row["endpoint_family"] == "idx_financial_reports_artifact"
+        assert row["retry_count"] == 1
+        assert row["retry_eligible_until"] is not None
+        assert row["last_http_status"] == 403
+        assert row["last_error_code"] == "http_403"
+    finally:
+        conn.close()
 
 
 def test_coverage_status_filters_by_source_and_document_type(tmp_config):

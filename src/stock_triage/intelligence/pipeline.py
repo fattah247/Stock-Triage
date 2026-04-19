@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from typing import Any
@@ -89,6 +89,16 @@ GOVERNANCE_EVENT_TYPES = {
 NUANCE_CLASS_ALIASES = {
     "audit_note_focus": "auditor_language",
     "covenant_note_focus": "debt_covenant_or_maturity",
+    "liability_note_focus": "contingent_liability",
+    "legal_note_focus": "legal_or_regulatory_severity",
+    "regulatory_note_focus": "legal_or_regulatory_severity",
+    "claim_contradiction": "management_contradiction",
+    "segment_concentration": "segment_or_subsidiary_concentration",
+    "dilution_dependence": "capital_allocation_shift",
+    "proceeds_followup_open": "use_of_proceeds_follow_through",
+    "proceeds_redeployment": "use_of_proceeds_follow_through",
+    "funding_use_quality": "use_of_proceeds_follow_through",
+    "funding_use_unclear": "use_of_proceeds_follow_through",
 }
 
 
@@ -302,6 +312,7 @@ class NuanceFindingRecord:
     evidence_span_id: str | None
     requires_human_review: bool
     payload_json: str
+    severity_tier: str | None = None
     tier: str = "derived"
     source_label: str = "unknown"
 
@@ -376,6 +387,17 @@ class SegmentHistoryRecord:
     trend: str | None
     dominant: bool
     concentration_risk: str | None
+
+
+def _resolved_nuance_severity_tier(finding: NuanceFindingRecord) -> str | None:
+    if finding.severity_tier:
+        return finding.severity_tier
+    try:
+        payload = json.loads(finding.payload_json or "{}")
+    except json.JSONDecodeError:
+        return None
+    severity_tier = payload.get("severity_tier")
+    return str(severity_tier) if severity_tier else None
 
 
 @dataclass(frozen=True)
@@ -1771,7 +1793,7 @@ def _build_nuance_findings(
                 nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "claim", outcome.claim_id, DERIVED_VERSION),
                 ticker=ticker,
                 document_id=latest_document.document_id,
-                nuance_class="claim_contradiction",
+                nuance_class="management_contradiction",
                 severity="critical" if outcome.outcome_status == "Contradicted" else "warning",
                 confidence=None,
                 section_label=context.section_label if context else None,
@@ -1808,7 +1830,7 @@ def _build_nuance_findings(
                 ),
                 ticker=ticker,
                 document_id=latest_document.document_id,
-                nuance_class="segment_concentration",
+                nuance_class="segment_or_subsidiary_concentration",
                 severity="warning",
                 confidence=None,
                 section_label="Segment note",
@@ -1888,10 +1910,12 @@ def _build_nuance_findings(
                 requires_human_review=True,
                 tier="derived",
                 source_label="section_cue",
+                severity_tier=(clue.get("legal_context") or {}).get("severity_tier"),
                 payload_json=json.dumps(
                     {
                         "source": "section_cue",
                         "section_label": clue.get("section_label"),
+                        "source_sections": clue.get("source_sections"),
                         "excerpt_text": clue.get("excerpt_text"),
                         "matched_keywords": clue.get("matched_keywords"),
                         "page_start": clue.get("page_start"),
@@ -1948,7 +1972,7 @@ def _build_capital_allocation_findings(
                 nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "capital", "dilution_dependence", DERIVED_VERSION),
                 ticker=ticker,
                 document_id=latest_document.document_id,
-                nuance_class="dilution_dependence",
+                nuance_class="capital_allocation_shift",
                 severity="warning",
                 confidence=None,
                 section_label=None,
@@ -1960,6 +1984,7 @@ def _build_capital_allocation_findings(
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
+                        "subsignals": ["dilution_dependence"],
                         "event_types": [event.event_type for event in dilution_events],
                         "operating_cash_flow": operating_cash_flow,
                         "free_cash_flow": free_cash_flow,
@@ -1976,7 +2001,7 @@ def _build_capital_allocation_findings(
                 nuance_id=_stable_id("nuance", ticker, latest_document.document_id, "capital", "proceeds_followup_open", DERIVED_VERSION),
                 ticker=ticker,
                 document_id=latest_document.document_id,
-                nuance_class="proceeds_followup_open",
+                nuance_class="use_of_proceeds_follow_through",
                 severity="warning",
                 confidence=None,
                 section_label="Use of Proceeds",
@@ -1988,6 +2013,7 @@ def _build_capital_allocation_findings(
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
+                        "subsignals": ["proceeds_followup_open"],
                         "event_types": [event.event_type for event in dilution_events],
                         "claim_types": sorted(claim_types),
                     },
@@ -2026,6 +2052,7 @@ def _build_capital_allocation_findings(
                 payload_json=json.dumps(
                     {
                         "source": "capital_allocation",
+                        "subsignals": [capital_context["subsignal"]],
                         "event_type": event.event_type,
                         "context_class": capital_context["context_class"],
                         "working_capital_use": capital_context["working_capital_use"],
@@ -2041,12 +2068,29 @@ def _build_capital_allocation_findings(
         )
 
     deduped: list[NuanceFindingRecord] = []
-    seen_classes: set[str] = set()
+    seen_classes: dict[str, int] = {}
     for finding in findings:
-        if finding.nuance_class in seen_classes:
+        if finding.nuance_class not in seen_classes:
+            seen_classes[finding.nuance_class] = len(deduped)
+            deduped.append(finding)
             continue
-        seen_classes.add(finding.nuance_class)
-        deduped.append(finding)
+        current = deduped[seen_classes[finding.nuance_class]]
+        current_payload = json.loads(current.payload_json or "{}")
+        incoming_payload = json.loads(finding.payload_json or "{}")
+        current_subsignals = [str(item) for item in current_payload.get("subsignals") or [] if item]
+        incoming_subsignals = [str(item) for item in incoming_payload.get("subsignals") or [] if item]
+        current_payload["subsignals"] = _dedupe_keep_order([*current_subsignals, *incoming_subsignals])
+        for key, value in incoming_payload.items():
+            if key == "subsignals":
+                continue
+            if isinstance(value, bool):
+                current_payload[key] = bool(current_payload.get(key)) or value
+                continue
+            if value is None:
+                continue
+            if current_payload.get(key) in (None, "", [], {}):
+                current_payload[key] = value
+        deduped[seen_classes[finding.nuance_class]] = replace(current, payload_json=json.dumps(current_payload, sort_keys=True))
     return deduped
 
 
@@ -2059,7 +2103,8 @@ def _classify_capital_allocation_context(*, text: str) -> dict[str, Any]:
 
     if revision_signal:
         return {
-            "nuance_class": "proceeds_redeployment",
+            "nuance_class": "use_of_proceeds_follow_through",
+            "subsignal": "proceeds_redeployment",
             "severity": "warning",
             "context_class": "reallocation",
             "working_capital_use": working_capital_use,
@@ -2070,7 +2115,8 @@ def _classify_capital_allocation_context(*, text: str) -> dict[str, Any]:
         }
     if working_capital_use or debt_repayment_use:
         return {
-            "nuance_class": "funding_use_quality",
+            "nuance_class": "use_of_proceeds_follow_through",
+            "subsignal": "funding_use_quality",
             "severity": "warning",
             "context_class": "defensive_use",
             "working_capital_use": working_capital_use,
@@ -2082,6 +2128,7 @@ def _classify_capital_allocation_context(*, text: str) -> dict[str, Any]:
     if capex_use:
         return {
             "nuance_class": "funding_use_execution",
+            "subsignal": "funding_use_execution",
             "severity": "info",
             "context_class": "expansion_use",
             "working_capital_use": working_capital_use,
@@ -2091,7 +2138,8 @@ def _classify_capital_allocation_context(*, text: str) -> dict[str, Any]:
             "flag_summary": "",
         }
     return {
-        "nuance_class": "funding_use_unclear",
+        "nuance_class": "use_of_proceeds_follow_through",
+        "subsignal": "funding_use_unclear",
         "severity": "warning",
         "context_class": "unclear",
         "working_capital_use": working_capital_use,
@@ -2243,7 +2291,7 @@ def _build_section_nuance_clues(
             {"related_party_transaction"},
         ),
         (
-            "liability_note_focus",
+            "contingent_liability",
             "warning",
             {"Notes to Financial Statements", "Legal and Regulatory"},
             [r"contingent liabilit", r"liabilitas kontinjensi", r"commitments and contingencies", r"komitmen dan kontinjensi"],
@@ -2251,7 +2299,7 @@ def _build_section_nuance_clues(
             {"contingent_liability"},
         ),
         (
-            "legal_note_focus",
+            "legal_or_regulatory_severity",
             "critical",
             {"Legal and Regulatory", "Notes to Financial Statements"},
             [r"lawsuit", r"litigation", r"gugatan", r"sengketa hukum", r"legal dispute"],
@@ -2259,7 +2307,7 @@ def _build_section_nuance_clues(
             {"lawsuit"},
         ),
         (
-            "regulatory_note_focus",
+            "legal_or_regulatory_severity",
             "critical",
             {"Legal and Regulatory", "Governance"},
             [r"regulatory", r"sanksi", r"otoritas jasa keuangan", r"special supervision", r"pembatasan kegiatan usaha"],
@@ -2268,6 +2316,7 @@ def _build_section_nuance_clues(
         ),
     ]
     seen: set[tuple[str, str | None]] = set()
+    merged_clues: dict[str, dict[str, Any]] = {}
     for cue in section_cues:
         if not cue.section_label:
             continue
@@ -2280,35 +2329,68 @@ def _build_section_nuance_clues(
             matched = [regex for regex in regexes if re.search(regex, lowered, flags=re.IGNORECASE)]
             if not matched:
                 continue
-            key = (nuance_class, cue.section_label)
-            if key in seen:
+            dedupe_key = (nuance_class, cue.section_label)
+            if dedupe_key in seen:
                 continue
-            seen.add(key)
+            seen.add(dedupe_key)
             legal_context = None
             resolved_summary = summary
-            if nuance_class in {"legal_note_focus", "regulatory_note_focus"}:
+            if nuance_class == "legal_or_regulatory_severity":
                 legal_context = _classify_legal_regulatory_context(
                     text=cue.text,
-                    event_type="lawsuit" if nuance_class == "legal_note_focus" else "regulatory_action",
+                    event_type="lawsuit" if re.search(r"lawsuit|litigation|gugatan|sengketa hukum|legal dispute", lowered, flags=re.IGNORECASE) else "regulatory_action",
                 )
                 resolved_summary = (
-                    "Legal dispute language appears in the latest filing; "
-                    if nuance_class == "legal_note_focus"
-                    else "Regulatory sanction or restriction language appears in the filing; "
+                    "Legal or regulatory severity language appears in the filing; "
                 ) + str(legal_context["summary_fragment"])
-            clues.append(
-                {
-                    "nuance_class": nuance_class,
-                    "severity": severity,
-                    "section_label": cue.section_label,
-                    "summary": resolved_summary,
-                    "excerpt_text": cue.excerpt_text,
-                    "matched_keywords": matched,
-                    "page_start": cue.page_start,
-                    "page_end": cue.page_end,
-                    "legal_context": legal_context,
-                }
+            clue = {
+                "nuance_class": nuance_class,
+                "severity": severity,
+                "section_label": cue.section_label,
+                "summary": resolved_summary,
+                "excerpt_text": cue.excerpt_text,
+                "matched_keywords": matched,
+                "page_start": cue.page_start,
+                "page_end": cue.page_end,
+                "legal_context": legal_context,
+                "source_sections": [cue.section_label],
+            }
+            if nuance_class != "legal_or_regulatory_severity":
+                clues.append(clue)
+                continue
+            existing = merged_clues.get(nuance_class)
+            if existing is None:
+                merged_clues[nuance_class] = clue
+                continue
+            existing_sections = [str(item) for item in existing.get("source_sections") or []]
+            merged_sections = _dedupe_keep_order([*existing_sections, cue.section_label])
+            existing["source_sections"] = merged_sections
+            existing["matched_keywords"] = _dedupe_keep_order(
+                [*([str(item) for item in existing.get("matched_keywords") or []]), *matched]
             )
+            existing["excerpt_text"] = existing.get("excerpt_text") or cue.excerpt_text
+            existing["page_start"] = min(
+                [value for value in [existing.get("page_start"), cue.page_start] if value is not None],
+                default=existing.get("page_start") or cue.page_start,
+            )
+            existing["page_end"] = max(
+                [value for value in [existing.get("page_end"), cue.page_end] if value is not None],
+                default=existing.get("page_end") or cue.page_end,
+            )
+            existing_context = existing.get("legal_context") or {}
+            incoming_tier = (legal_context or {}).get("severity_tier")
+            current_tier = existing_context.get("severity_tier")
+            tier_rank = {
+                "routine": 0,
+                "active_litigation": 1,
+                "supervision_or_restriction": 2,
+                "material_exposure": 3,
+                "settlement_or_resolution": 4,
+            }
+            if tier_rank.get(str(incoming_tier), -1) > tier_rank.get(str(current_tier), -1):
+                existing["legal_context"] = legal_context
+                existing["summary"] = resolved_summary
+    clues.extend(merged_clues.values())
     return clues
 
 
@@ -3268,7 +3350,7 @@ def _focus_bucket_for_class(class_name: str | None) -> str:
     if any(token in value for token in ("related_party", "governance")):
         return "governance_related_party"
     if "segment" in value:
-        return "segment_concentration"
+        return "segment_or_subsidiary_concentration"
     if any(token in value for token in ("claim", "contradiction")):
         return "claim_credibility"
     if "filing" in value:
@@ -3283,7 +3365,7 @@ def _focus_bucket_label(focus_key: str) -> str:
         "liquidity_balance_sheet": "Liquidity / Balance Sheet",
         "capital_allocation": "Capital Allocation",
         "governance_related_party": "Governance / Related Party",
-        "segment_concentration": "Segment / Concentration",
+        "segment_or_subsidiary_concentration": "Segment / Concentration",
         "claim_credibility": "Claim / Credibility",
         "filing_coverage": "Filing / Coverage",
         "general_analysis": "General Follow-up",
@@ -3510,6 +3592,15 @@ def _build_snapshot_payload_json(
         persistent_risk_signals=persistent_risk_signals,
         persistent_contradiction_signals=persistent_contradiction_signals,
     )
+    issuer_condition = _issuer_condition_for(
+        top_card=health,
+        decision_panel=decision_panel,
+        review_items=review_items,
+        persistent_risk_signals=persistent_risk_signals,
+        persistent_contradiction_signals=persistent_contradiction_signals,
+    )
+    health["issuer_condition"] = issuer_condition
+    decision_panel["issuer_condition"] = issuer_condition
     unresolved_nuance_summary = _build_unresolved_nuance_summary(
         filing_expectations=filing_expectations,
         nuance_findings=nuance_findings,
@@ -3555,6 +3646,7 @@ def _build_snapshot_payload_json(
         ),
         "top_card": health,
         "decision_panel": decision_panel,
+        "issuer_condition": issuer_condition,
         "recommendation": decision_panel.get("recommendation"),
         "unresolved_nuance_summary": unresolved_nuance_summary,
         "persistent_risk_signals": persistent_risk_signals,
@@ -3603,6 +3695,7 @@ def _build_snapshot_payload_json(
             {
                 "nuance_class": finding.nuance_class,
                 "severity": finding.severity,
+                "severity_tier": _resolved_nuance_severity_tier(finding),
                 "confidence": finding.confidence,
                 "section_label": finding.section_label,
                 "summary": finding.summary,
@@ -4192,6 +4285,45 @@ def _build_decision_panel(
         "next_catalyst": next_catalyst,
         "recommendation": recommendation,
     }
+
+
+def _issuer_condition_for(
+    *,
+    top_card: dict[str, Any],
+    decision_panel: dict[str, Any],
+    review_items: list[ReviewQueueItem],
+    persistent_risk_signals: list[dict[str, Any]],
+    persistent_contradiction_signals: list[dict[str, Any]],
+) -> str:
+    overall_state = str(top_card.get("overall_state") or "stable")
+    thesis_state = str(top_card.get("thesis_state") or "none")
+    credibility_band = str(top_card.get("credibility_band") or "unknown")
+    stance = str(top_card.get("decision_state") or "Watch")
+    confidence = str(decision_panel.get("confidence") or top_card.get("confidence") or "low")
+    active_persistence = any(
+        str(row.get("persistence_state") or "") in {"active", "reappeared"}
+        for row in [*persistent_risk_signals, *persistent_contradiction_signals]
+    )
+    negative_factors = [str(item).lower() for item in top_card.get("negative_factors") or []]
+    if (
+        overall_state == "critical"
+        or thesis_state == "broken"
+        or credibility_band == "poor"
+        or stance in {"Avoid", "Review manually"}
+        or active_persistence
+    ):
+        return "stressed"
+    if (
+        overall_state == "stable"
+        and thesis_state in {"holding", "improving"}
+        and credibility_band in {"high", "acceptable"}
+        and confidence in {"high", "medium"}
+        and not review_items
+        and not active_persistence
+        and not any("critical" in factor or "deteriorat" in factor for factor in negative_factors)
+    ):
+        return "clean"
+    return "watch"
 
 
 RECOMMENDATION_BUCKET_STOCK_PICK = "stock_pick_candidate"
@@ -5973,10 +6105,10 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         conn.execute(
             """
             INSERT INTO nuance_findings (
-                nuance_id, ticker, document_id, nuance_class, severity, confidence, section_label,
+                nuance_id, ticker, document_id, nuance_class, severity, severity_tier, confidence, section_label,
                 summary, evidence_span_id, requires_human_review, tier, source_label, payload_json,
                 derived_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 finding.nuance_id,
@@ -5984,6 +6116,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 finding.document_id,
                 finding.nuance_class,
                 finding.severity,
+                _resolved_nuance_severity_tier(finding),
                 finding.confidence,
                 finding.section_label,
                 finding.summary,
@@ -5996,7 +6129,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 now,
                 now,
             ),
-        )
+    )
 
     for row in bundle.uncertainty_rows:
         conn.execute(
@@ -6113,8 +6246,8 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         """
         INSERT INTO company_snapshots (
             snapshot_id, ticker, snapshot_kind, as_of_document_id, as_of_date, latest_analysis_run_id,
-            payload_json, derived_version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            payload_json, issuer_condition, derived_version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, snapshot_kind, derived_version)
         DO UPDATE SET
             snapshot_id = excluded.snapshot_id,
@@ -6122,6 +6255,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             as_of_date = excluded.as_of_date,
             latest_analysis_run_id = excluded.latest_analysis_run_id,
             payload_json = excluded.payload_json,
+            issuer_condition = excluded.issuer_condition,
             updated_at = excluded.updated_at
         """,
         (
@@ -6132,6 +6266,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             bundle.latest_document.source_modified_at or bundle.latest_document.updated_at,
             bundle.latest_analysis.analysis_run_id if bundle.latest_analysis else None,
             bundle.snapshot_payload_json,
+            json.loads(bundle.snapshot_payload_json).get("issuer_condition", "watch"),
             DERIVED_VERSION,
             now,
             now,

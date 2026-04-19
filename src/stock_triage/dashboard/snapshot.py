@@ -1175,7 +1175,7 @@ def _load_revision_history_for_ticker(
 def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """
-        SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
+        SELECT ticker, as_of_document_id, as_of_date, issuer_condition, payload_json, updated_at
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
           AND derived_version = ?
@@ -1192,6 +1192,7 @@ def _load_company_snapshots(conn: sqlite3.Connection) -> list[dict[str, object]]
                 "ticker": row["ticker"],
                 "as_of_document_id": row["as_of_document_id"],
                 "as_of_date": row["as_of_date"],
+                "issuer_condition": row["issuer_condition"],
                 "updated_at": row["updated_at"],
                 "payload": payload,
             }
@@ -1206,7 +1207,7 @@ def _load_company_snapshot_for_ticker(
 ) -> dict[str, object] | None:
     row = conn.execute(
         """
-        SELECT ticker, as_of_document_id, as_of_date, payload_json, updated_at
+        SELECT ticker, as_of_document_id, as_of_date, issuer_condition, payload_json, updated_at
         FROM company_snapshots
         WHERE snapshot_kind = 'current'
           AND derived_version = ?
@@ -1222,6 +1223,7 @@ def _load_company_snapshot_for_ticker(
         "ticker": row["ticker"],
         "as_of_document_id": row["as_of_document_id"],
         "as_of_date": row["as_of_date"],
+        "issuer_condition": row["issuer_condition"],
         "updated_at": row["updated_at"],
         "payload": json.loads(row["payload_json"] or "{}"),
     }
