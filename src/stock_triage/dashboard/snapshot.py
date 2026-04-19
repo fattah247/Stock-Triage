@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..canary import load_canary_status
 from ..config import Config
-from ..coverage import default_coverage_range, load_coverage_status_from_conn
+from ..coverage import default_coverage_range, load_coverage_plan, load_coverage_plan_audit, load_coverage_status_from_conn
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
@@ -195,6 +195,8 @@ def load_section_detail(cfg: Config, section: str) -> dict[str, object]:
             "source_sync_rows": _load_source_sync_rows_from_cfg(cfg),
             "observability": load_intelligence_observability(cfg),
             "nuance_audit": load_nuance_audit(cfg, limit=8),
+            "coverage_plan": load_coverage_plan(cfg, scope="watchlist", limit=5, materialize=False),
+            "coverage_plan_audit": load_coverage_plan_audit(cfg, limit=8),
             "golden_rows": load_latest_golden_runs(cfg, limit=5),
             "coverage_status": coverage,
         }

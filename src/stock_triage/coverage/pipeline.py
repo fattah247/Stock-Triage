@@ -39,6 +39,7 @@ from ..sources.idx_artifacts import parse_financial_report_json
 COVERAGE_VERSION = "v3_4-v1"
 _SCOPE_CHOICES = {"all", "watchlist", "sector", "ticker-set"}
 _ACTION_CHOICES = {"discover-missing", "download-missing", "process-missing", "rerun-blocked"}
+_PLANNER_BOOTSTRAP_THRESHOLD = 10
 BLOCK_CLASS_ORCHESTRATION_ERROR = "orchestration_error"
 BLOCK_CLASS_UPSTREAM_403_TRANSIENT = "upstream_403_transient"
 BLOCK_CLASS_UPSTREAM_403_PERSISTENT = "upstream_403_persistent"
@@ -387,6 +388,23 @@ def run_coverage_action(
         executed = _run_process_for_scope(cfg, document_ids=list(preview["action_targets"]), target_tickers=target_tickers)
     elif action == "rerun-blocked":
         executed = _run_rerun_blocked_for_scope(cfg, document_ids=list(preview["action_targets"]), target_tickers=target_tickers)
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+        wq.submit(
+            lambda conn: _persist_coverage_plan_action_event(
+                conn,
+                cfg,
+                action=action,
+                preview=preview,
+                scope=scope,
+                sector=sector,
+                ticker=ticker,
+                tickers=tickers,
+                source_name=source_name,
+                document_type=document_type,
+                limit=limit,
+            )
+        )
     log.info("coverage action executed", extra={"action": action, "executed": executed, "scope": scope})
     refreshed = load_coverage_status(
         cfg,
@@ -407,6 +425,151 @@ def run_coverage_action(
         "preview": preview,
         "status": refreshed,
     }
+
+
+def load_coverage_plan(
+    cfg: Config,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    scope: str = "watchlist",
+    sector: str | None = None,
+    ticker: str | None = None,
+    tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
+    limit: int = 10,
+    materialize: bool = True,
+    persist_audit: bool = False,
+) -> dict[str, object]:
+    cfg.ensure_dirs()
+    if materialize:
+        materialize_coverage(
+            cfg,
+            date_from=date_from,
+            date_to=date_to,
+            scope=scope,
+            sector=sector,
+            ticker=ticker,
+            tickers=tickers,
+        )
+    conn = connect(cfg.paths.db_path, read_only=False if persist_audit else True)
+    try:
+        configure_pragmas(conn, cfg)
+        plan = load_coverage_plan_from_conn(
+            conn,
+            cfg,
+            date_from=date_from,
+            date_to=date_to,
+            scope=scope,
+            sector=sector,
+            ticker=ticker,
+            tickers=tickers,
+            source_name=source_name,
+            document_type=document_type,
+            limit=limit,
+        )
+        if persist_audit:
+            _persist_coverage_plan_generated(conn, plan=plan)
+            conn.commit()
+        return plan
+    finally:
+        conn.close()
+
+
+def load_coverage_plan_from_conn(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    scope: str = "watchlist",
+    sector: str | None = None,
+    ticker: str | None = None,
+    tickers: Iterable[str] | None = None,
+    source_name: str | None = None,
+    document_type: str | None = None,
+    limit: int = 10,
+) -> dict[str, object]:
+    range_start, range_end = _normalized_range(date_from, date_to)
+    selected = _select_scope_tickers(conn, cfg, scope=scope, sector=sector, ticker=ticker, tickers=tickers)
+    coverage_rows = _load_selected_coverage_rows(conn, selected, range_start=range_start, range_end=range_end)
+    filtered_rows = [
+        row for row in coverage_rows if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
+    ]
+    enriched_rows = _enrich_coverage_rows_with_access_state(conn, filtered_rows)
+    plan_mode, telemetry_sample_count = _coverage_planner_mode(conn)
+    rows = _build_coverage_plan_rows(conn, cfg, selected=selected, coverage_rows=enriched_rows, limit=limit)
+    return {
+        "scope": scope,
+        "scope_label": _scope_label(
+            scope,
+            sector=sector,
+            ticker=ticker,
+            tickers=tickers,
+            source_name=source_name,
+            document_type=document_type,
+        ),
+        "source_name": source_name,
+        "document_type": document_type,
+        "date_from": range_start.isoformat(),
+        "date_to": range_end.isoformat(),
+        "ticker_count": len(selected),
+        "plan_mode": plan_mode,
+        "telemetry_sample_count": telemetry_sample_count,
+        "bootstrap_threshold": _PLANNER_BOOTSTRAP_THRESHOLD,
+        "rows": rows[:limit],
+        "recommended_tickers": [str(row["ticker"]) for row in rows[:limit]],
+        "summary": {
+            "row_count": len(rows[:limit]),
+            "bootstrap": plan_mode == "bootstrap",
+            "high_priority_count": sum(1 for row in rows[:limit] if int(row["score"]) >= 6),
+        },
+    }
+
+
+def load_coverage_plan_audit(
+    cfg: Config,
+    *,
+    limit: int = 20,
+) -> dict[str, object]:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        rows = conn.execute(
+            """
+            SELECT audit_id, event_type, plan_mode, scope_label, action, payload_json, created_at
+            FROM coverage_plan_audit_log
+            ORDER BY created_at DESC, audit_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        parsed_rows = [
+            {
+                "audit_id": row["audit_id"],
+                "event_type": row["event_type"],
+                "plan_mode": row["plan_mode"],
+                "scope_label": row["scope_label"],
+                "action": row["action"],
+                "payload": json.loads(row["payload_json"] or "{}"),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        return {
+            "summary": {
+                "event_count": len(parsed_rows),
+                "divergence_count": sum(1 for row in parsed_rows if row["event_type"] == "action_diverged"),
+                "plan_generated_count": sum(1 for row in parsed_rows if row["event_type"] == "plan_generated"),
+            },
+            "rows": parsed_rows,
+        }
+    finally:
+        conn.close()
 
 
 def _normalized_range(date_from: date | None, date_to: date | None) -> tuple[date, date]:
@@ -1108,6 +1271,199 @@ def _count_current_snapshots(conn: sqlite3.Connection, *, selected: list[str]) -
     return int(row["count"] or 0)
 
 
+def _coverage_planner_mode(conn: sqlite3.Connection) -> tuple[str, int]:
+    row = conn.execute("SELECT COUNT(*) AS count FROM artifact_access_state").fetchone()
+    telemetry_sample_count = int(row["count"] or 0)
+    if telemetry_sample_count < _PLANNER_BOOTSTRAP_THRESHOLD:
+        return "bootstrap", telemetry_sample_count
+    return "adaptive", telemetry_sample_count
+
+
+def _build_coverage_plan_rows(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    *,
+    selected: list[str],
+    coverage_rows: list[dict[str, object]],
+    limit: int,
+) -> list[dict[str, object]]:
+    if not selected:
+        return []
+    placeholders = ",".join("?" for _ in selected)
+    issuer_rows = conn.execute(
+        f"""
+        SELECT c.ticker, c.issuer_name,
+               CASE WHEN cs.ticker IS NULL THEN 0 ELSE 1 END AS has_current_snapshot
+        FROM companies c
+        LEFT JOIN company_snapshots cs
+          ON cs.ticker = c.ticker
+         AND cs.snapshot_kind = 'current'
+         AND cs.derived_version = ?
+        WHERE c.ticker IN ({placeholders})
+        ORDER BY c.ticker ASC
+        """,
+        (DERIVED_VERSION, *selected),
+    ).fetchall()
+    issuer_map = {str(row["ticker"]): dict(row) for row in issuer_rows}
+    watchlist = _effective_watchlist(cfg)
+    plan_mode, telemetry_sample_count = _coverage_planner_mode(conn)
+    rows_by_ticker: dict[str, list[dict[str, object]]] = {}
+    for row in coverage_rows:
+        rows_by_ticker.setdefault(str(row["ticker"]), []).append(row)
+    ranked: list[dict[str, object]] = []
+    for ticker in selected:
+        row_set = rows_by_ticker.get(ticker, [])
+        if not row_set:
+            continue
+        expected_count = len(row_set)
+        analyzed_count = sum(1 for row in row_set if row["actual_state"] == "analyzed")
+        downloaded_count = sum(1 for row in row_set if row["actual_state"] == "downloaded")
+        discovered_count = sum(1 for row in row_set if row["actual_state"] == "discovered")
+        blocked_fixable_count = sum(1 for row in row_set if row.get("blocked_bucket") == "fixable")
+        blocked_retryable_count = sum(1 for row in row_set if row.get("blocked_bucket") == "retryable")
+        blocked_access_constrained_count = sum(1 for row in row_set if row.get("blocked_bucket") == "access_constrained")
+        gap_count = sum(1 for row in row_set if row["actual_state"] != "analyzed")
+        partial_completion = analyzed_count > 0 or downloaded_count > 0 or discovered_count > 0
+        completion_score = (3 if analyzed_count > 0 else 0) + (2 if downloaded_count > 0 else 0) + (1 if discovered_count > 0 else 0)
+        decision_value = (3 if ticker in watchlist else 0) + (2 if int(issuer_map.get(ticker, {}).get("has_current_snapshot") or 0) else 0)
+        continuity_unlock = 3 if downloaded_count > 0 and analyzed_count == 0 else 2 if discovered_count > 0 and analyzed_count == 0 else 1 if gap_count > 0 and analyzed_count > 0 else 0
+        access_friction = blocked_access_constrained_count * 4 + blocked_retryable_count * 2 + blocked_fixable_count
+        friction_penalty = access_friction if plan_mode == "adaptive" else blocked_access_constrained_count * 2
+        score = completion_score + decision_value + continuity_unlock - friction_penalty
+        recommended_actions: list[str] = []
+        if analyzed_count == 0 and downloaded_count > 0:
+            recommended_actions.append("process-missing")
+        elif downloaded_count == 0 and discovered_count > 0:
+            recommended_actions.append("download-missing")
+        elif not partial_completion:
+            recommended_actions.append("discover-missing")
+        if blocked_fixable_count > 0 or blocked_retryable_count > 0:
+            recommended_actions.append("rerun-blocked")
+        recommended_actions = _dedupe_keep_order(recommended_actions)[:2]
+        ranked.append(
+            {
+                "ticker": ticker,
+                "issuer_name": issuer_map.get(ticker, {}).get("issuer_name"),
+                "score": score,
+                "completion_score": completion_score,
+                "decision_value": decision_value,
+                "continuity_unlock": continuity_unlock,
+                "access_friction": access_friction,
+                "expected_count": expected_count,
+                "gap_count": gap_count,
+                "analyzed_count": analyzed_count,
+                "downloaded_count": downloaded_count,
+                "discovered_count": discovered_count,
+                "blocked_fixable_count": blocked_fixable_count,
+                "blocked_retryable_count": blocked_retryable_count,
+                "blocked_access_constrained_count": blocked_access_constrained_count,
+                "has_current_snapshot": bool(issuer_map.get(ticker, {}).get("has_current_snapshot")),
+                "on_watchlist": ticker in watchlist,
+                "plan_mode": plan_mode,
+                "telemetry_sample_count": telemetry_sample_count,
+                "recommended_actions": recommended_actions,
+                "recommended_command": f"coverage-run {recommended_actions[0]} --scope ticker-set --ticker {ticker}" if recommended_actions else None,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -int(item["score"]),
+            -int(item["completion_score"]),
+            -int(item["decision_value"]),
+            str(item["ticker"]),
+        )
+    )
+    return ranked[:limit]
+
+
+def _persist_coverage_plan_generated(conn: sqlite3.Connection, *, plan: dict[str, object]) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO coverage_plan_audit_log (
+            audit_id, event_type, plan_mode, scope_label, action, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _stable_id("coverage-plan-audit", "plan-generated", str(plan.get("scope_label") or ""), now),
+            "plan_generated",
+            str(plan.get("plan_mode") or "bootstrap"),
+            str(plan.get("scope_label") or ""),
+            None,
+            json.dumps(
+                {
+                    "recommended_tickers": plan.get("recommended_tickers") or [],
+                    "telemetry_sample_count": plan.get("telemetry_sample_count"),
+                    "bootstrap_threshold": plan.get("bootstrap_threshold"),
+                },
+                sort_keys=True,
+            ),
+            now,
+        ),
+    )
+
+
+def _persist_coverage_plan_action_event(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    *,
+    action: str,
+    preview: dict[str, object],
+    scope: str,
+    sector: str | None,
+    ticker: str | None,
+    tickers: Iterable[str] | None,
+    source_name: str | None,
+    document_type: str | None,
+    limit: int,
+) -> None:
+    plan = load_coverage_plan_from_conn(
+        conn,
+        cfg,
+        date_from=date.fromisoformat(str(preview["date_from"])),
+        date_to=date.fromisoformat(str(preview["date_to"])),
+        scope=scope,
+        sector=sector,
+        ticker=ticker,
+        tickers=tickers,
+        source_name=source_name,
+        document_type=document_type,
+        limit=min(max(limit, 5), 10),
+    )
+    recommended = [str(item) for item in plan.get("recommended_tickers") or []]
+    targeted = [str(item) for item in preview.get("target_tickers") or []]
+    skipped_recommended = [item for item in recommended if item not in targeted]
+    extra_targeted = [item for item in targeted if item not in recommended]
+    event_type = "action_diverged" if skipped_recommended or extra_targeted else "action_followed"
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO coverage_plan_audit_log (
+            audit_id, event_type, plan_mode, scope_label, action, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _stable_id("coverage-plan-audit", event_type, action, str(preview.get("scope_label") or ""), now),
+            event_type,
+            str(plan.get("plan_mode") or "bootstrap"),
+            str(preview.get("scope_label") or ""),
+            action,
+            json.dumps(
+                {
+                    "recommended_tickers": recommended,
+                    "action_target_tickers": targeted,
+                    "skipped_recommended_tickers": skipped_recommended,
+                    "extra_targeted_tickers": extra_targeted,
+                    "telemetry_sample_count": plan.get("telemetry_sample_count"),
+                    "bootstrap_threshold": plan.get("bootstrap_threshold"),
+                },
+                sort_keys=True,
+            ),
+            now,
+        ),
+    )
+
+
 def _dominant_blocked_reasons(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     counts: dict[str, int] = {}
     for row in rows:
@@ -1144,6 +1500,17 @@ def _scope_label(
     if suffix_parts:
         label = f"{label}|{'|'.join(suffix_parts)}"
     return label
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _coverage_row_matches_filters(

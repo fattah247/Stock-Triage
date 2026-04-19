@@ -6,6 +6,8 @@ import threading
 from urllib.request import urlopen
 
 from stock_triage.commands.coverage import (
+    cmd_coverage_plan_audit,
+    cmd_coverage_plan_issuers_next,
     cmd_coverage_preview,
     cmd_coverage_status,
     cmd_nuance_audit,
@@ -14,6 +16,7 @@ from stock_triage.coverage.pipeline import (
     _build_action_plan,
     _blocked_reason_for,
     _enrich_coverage_rows_with_access_state,
+    _persist_coverage_plan_action_event,
     _persist_coverage_rows,
     _prioritize_candidate_ids,
     _raw_blocked_reason_for,
@@ -126,6 +129,48 @@ def test_coverage_preview_and_nuance_audit_commands_are_scoped(tmp_config, monke
         assert "recommended_command" in target["bridge"]
 
 
+def test_coverage_plan_commands_surface_bootstrap_and_audit(tmp_config, monkeypatch, capsys):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    load_coverage_status(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        limit=10,
+        materialize=True,
+    )
+    monkeypatch.setattr("stock_triage.commands.coverage.load_config", lambda: tmp_config)
+
+    plan_exit = cmd_coverage_plan_issuers_next(
+        argparse.Namespace(
+            date_from="2024-01-01",
+            date_to="2026-12-31",
+            scope="ticker-set",
+            sector=None,
+            ticker="TAMU",
+            tickers=None,
+            source=None,
+            document_type=None,
+            limit=5,
+        )
+    )
+    plan_out = capsys.readouterr().out
+    assert plan_exit == 0
+    assert "coverage-plan:" in plan_out
+    plan_payload = json.loads(plan_out.strip().splitlines()[-1])
+    assert plan_payload["plan_mode"] in {"bootstrap", "adaptive"}
+    assert plan_payload["rows"]
+    assert plan_payload["recommended_tickers"] == ["TAMU"]
+
+    audit_exit = cmd_coverage_plan_audit(argparse.Namespace(limit=10))
+    audit_out = capsys.readouterr().out
+    assert audit_exit == 0
+    assert "coverage-plan-audit:" in audit_out
+    audit_payload = json.loads(audit_out.strip().splitlines()[-1])
+    assert audit_payload["summary"]["plan_generated_count"] >= 1
+    assert any(row["event_type"] == "plan_generated" for row in audit_payload["rows"])
+
+
 def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
     _seed_phase10_inputs(tmp_config)
     _write_phase12_theses(tmp_config)
@@ -156,6 +201,8 @@ def test_dashboard_snapshot_exposes_coverage_panels(tmp_config):
         assert "summary" in ops["coverage_status"]
         assert "nuance_audit" in ops
         assert "summary" in ops["nuance_audit"]
+        assert "coverage_plan" in ops
+        assert "coverage_plan_audit" in ops
     finally:
         handle.server.shutdown()
         handle.server.server_close()
@@ -614,6 +661,59 @@ def test_rerun_blocked_plan_excludes_access_constraints(tmp_config):
         rows = _enrich_coverage_rows_with_access_state(conn, rows)
         plan = _build_action_plan(conn, ["TAMU"], rows, action="rerun-blocked", limit=10)
         assert plan["targets"] == ["doc-fixable"]
+    finally:
+        conn.close()
+
+
+def test_action_event_logs_divergence_to_plan_audit(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    load_coverage_status(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        limit=10,
+        materialize=True,
+    )
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+
+        def _write_audit(conn):
+            _persist_coverage_plan_action_event(
+                conn,
+                tmp_config,
+                action="discover-missing",
+                preview={
+                    "date_from": "2024-01-01",
+                    "date_to": "2026-12-31",
+                    "scope_label": "all",
+                    "target_tickers": ["TAMU", "ZZZZ"],
+                },
+                scope="watchlist",
+                sector=None,
+                ticker="TAMU",
+                tickers=None,
+                source_name=None,
+                document_type=None,
+                limit=5,
+            )
+
+        wq.submit(_write_audit)
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, tmp_config)
+        row = conn.execute(
+            """
+            SELECT event_type, payload_json
+            FROM coverage_plan_audit_log
+            ORDER BY created_at DESC, audit_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert row["event_type"] == "action_diverged"
+        payload = json.loads(row["payload_json"])
+        assert "ZZZZ" in payload["extra_targeted_tickers"]
     finally:
         conn.close()
 

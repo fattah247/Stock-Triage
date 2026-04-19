@@ -80,6 +80,8 @@
   const observabilityList = document.getElementById("observabilityList");
   const nuanceAuditList = document.getElementById("nuanceAuditList");
   const goldenList = document.getElementById("goldenList");
+  const coveragePlanList = document.getElementById("coveragePlanList");
+  const coveragePlanAuditList = document.getElementById("coveragePlanAuditList");
   const rerunPreviewList = document.getElementById("rerunPreviewList");
   const companyRerunPreview = document.getElementById("companyRerunPreview");
   const inboxList = document.getElementById("inboxList");
@@ -1739,6 +1741,29 @@
             : ""}`
         : `<div class="emptyState"><strong>No golden checks run yet.</strong> Use Run Golden Checks from Ops or from a company workspace.</div>`;
     }
+    if (coveragePlanList) {
+      const plan = data.coverage_plan || {};
+      const rows = (plan.rows || []).slice(0, 5);
+      coveragePlanList.innerHTML = rows.length
+        ? `<div class="meta">Mode ${esc(plan.plan_mode || "bootstrap")} · telemetry ${esc(plan.telemetry_sample_count || 0)}/${esc(
+            plan.bootstrap_threshold || 0
+          )} · scope ${esc(plan.scope_label || "—")}</div>
+           <div class="findingStack">${rows
+             .map(
+               (item) => `
+                 <article class="findingCard sev-${item.blocked_access_constrained_count ? "warning" : "info"} clickableCard" data-focus-ticker="${esc(item.ticker)}">
+                   <div class="findingClaim">${esc(item.ticker)} · ${esc(item.issuer_name || "")}</div>
+                   <div class="meta">score ${esc(item.score)} · completion ${esc(item.completion_score)} · decision ${esc(item.decision_value)} · continuity ${esc(item.continuity_unlock)}</div>
+                   <div class="meta">analyzed ${esc(item.analyzed_count)} · downloaded ${esc(item.downloaded_count)} · discovered ${esc(item.discovered_count)} · gaps ${esc(item.gap_count)}</div>
+                   <div class="meta">blocked: fixable ${esc(item.blocked_fixable_count || 0)} · retryable ${esc(item.blocked_retryable_count || 0)} · constrained ${esc(item.blocked_access_constrained_count || 0)}</div>
+                   <div class="meta">${esc((item.recommended_actions || []).join(" -> ") || "No recommended next step.")}</div>
+                   <div class="meta">${esc(item.recommended_command || "")}</div>
+                 </article>
+               `
+             )
+             .join("")}</div>`
+        : `<div class="emptyState"><strong>No coverage plan rows yet.</strong> Materialize coverage for a scope before relying on the advisory planner.</div>`;
+    }
     if (nuanceAuditList) {
       const audit = data.nuance_audit || {};
       const summary = audit.summary || {};
@@ -1807,6 +1832,29 @@
           </section>
         </div>
       `;
+    }
+    if (coveragePlanAuditList) {
+      const audit = data.coverage_plan_audit || {};
+      const rows = (audit.rows || []).slice(0, 6);
+      coveragePlanAuditList.innerHTML = rows.length
+        ? `<div class="meta">Events ${esc(audit.summary?.event_count || 0)} · divergence ${esc(
+            audit.summary?.divergence_count || 0
+          )} · plan generations ${esc(audit.summary?.plan_generated_count || 0)}</div>
+           <table class="systemTable"><thead><tr><th>Event</th><th>Mode</th><th>Scope</th><th>Detail</th><th>When</th></tr></thead><tbody>${rows
+             .map((item) => {
+               const payload = item.payload || {};
+               const detail =
+                 item.event_type === "action_diverged"
+                   ? `recommended ${esc((payload.recommended_tickers || []).join(", ") || "-")} · skipped ${esc(
+                       (payload.skipped_recommended_tickers || []).join(", ") || "-"
+                     )} · extra ${esc((payload.extra_targeted_tickers || []).join(", ") || "-")}`
+                   : `recommended ${esc((payload.recommended_tickers || []).join(", ") || "-")}`;
+               return `<tr><td>${esc(item.event_type)}</td><td>${esc(item.plan_mode)}</td><td>${esc(
+                 item.action || item.scope_label
+               )}</td><td>${detail}</td><td>${renderTimestamp(item.created_at)}</td></tr>`;
+             })
+             .join("")}</tbody></table>`
+        : `<div class="emptyState"><strong>No planner audit events yet.</strong> Run coverage-plan or a coverage action to start the advisory audit trail.</div>`;
     }
     if (rerunPreviewList) {
       rerunPreviewList.innerHTML = renderRerunPreview(
