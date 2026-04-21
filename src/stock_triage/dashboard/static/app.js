@@ -1691,6 +1691,7 @@
       const latestGolden = observability.latest_golden_run || null;
       const coverageStatus = data.coverage_status || {};
       const coverageSummary = coverageStatus.summary || {};
+      const altSourceTasks = ((coverageStatus.operator_tasks || {}).alternative_source_check || []).length;
       observabilityList.innerHTML = `
         <div class="statsGrid">
           <div class="stat"><div class="summaryLabel">Snapshots</div><strong>${esc(summary.snapshot_count || 0)}</strong></div>
@@ -1701,6 +1702,7 @@
           <div class="stat"><div class="summaryLabel">Coverage expected</div><strong>${esc(coverageSummary.expected_count || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Coverage analyzed</div><strong>${esc(coverageSummary.analyzed_count || 0)}</strong></div>
           <div class="stat"><div class="summaryLabel">Coverage blocked</div><strong>${esc(coverageSummary.blocked_count || 0)}</strong></div>
+          <div class="stat"><div class="summaryLabel">Alt-source tasks</div><strong>${esc(altSourceTasks)}</strong></div>
         </div>
         <div class="meta">Recommendation buckets: ${Object.entries(recommendationBuckets).map(([name, count]) => `${name}=${count}`).join(" · ") || "none"}</div>
         <div class="meta">Coverage range: ${esc(coverageStatus.date_from || "—")} to ${esc(coverageStatus.date_to || "—")} · tickers ${esc(coverageStatus.ticker_count || 0)}</div>
@@ -1745,13 +1747,16 @@
       const plan = data.coverage_plan || {};
       const controller = plan.controller || {};
       const rows = (plan.rows || []).slice(0, 5);
+      const endpointBreakdown = (controller.endpoint_breakdown || []).slice(0, 3);
+      const issuerBreakdown = (controller.issuer_breakdown || []).slice(0, 3);
       coveragePlanList.innerHTML = rows.length
         ? `<div class="meta">Mode ${esc(plan.plan_mode || "bootstrap")} · telemetry ${esc(plan.telemetry_sample_count || 0)}/${esc(
-            plan.bootstrap_threshold || 0
-          )} · controller ${esc(controller.source_health || "bootstrap")} · delay ${esc(controller.recommended_delay_ms || 0)}ms · scope ${esc(plan.scope_label || "—")}</div>
+            (plan.bootstrap_threshold || {}).event_count || 0
+          )} · runs ${esc(controller.run_count || 0)}/${esc(((plan.bootstrap_threshold || {}).run_count) || 0)} · controller ${esc(controller.source_health || "bootstrap")} · confidence ${esc(controller.bootstrap_confidence || "low")} · delay ${esc(controller.recommended_delay_ms || 0)}ms · scope ${esc(plan.scope_label || "—")}</div>
            <div class="meta">friction ${(controller.friction_rate || 0).toFixed ? esc(controller.friction_rate.toFixed(3)) : esc(controller.friction_rate || 0)} · consecutive ${esc(controller.consecutive_friction_count || 0)}${
              controller.cooldown_until ? ` · cooldown until ${renderTimestamp(controller.cooldown_until)}` : ""
-           }</div>
+           } · recommendation ${esc(controller.stop_or_continue || "continue_bootstrap_conservative")}</div>
+           <div class="meta">endpoint health ${endpointBreakdown.map((item) => `${esc(item.endpoint_family)}=${esc(item.friction_rate)}`).join(" · ") || "none"} · issuer health ${issuerBreakdown.map((item) => `${esc(item.ticker)}=${esc(item.friction_rate)}`).join(" · ") || "none"}</div>
            <div class="findingStack">${rows
              .map(
                (item) => `
@@ -1760,7 +1765,18 @@
                    <div class="meta">score ${esc(item.score)} · completion ${esc(item.completion_score)} · decision ${esc(item.decision_value)} · continuity ${esc(item.continuity_unlock)}</div>
                    <div class="meta">analyzed ${esc(item.analyzed_count)} · downloaded ${esc(item.downloaded_count)} · discovered ${esc(item.discovered_count)} · gaps ${esc(item.gap_count)}</div>
                    <div class="meta">blocked: fixable ${esc(item.blocked_fixable_count || 0)} · retryable ${esc(item.blocked_retryable_count || 0)} · constrained ${esc(item.blocked_access_constrained_count || 0)}</div>
-                   <div class="meta">controller ${esc(item.controller_health || "bootstrap")} · delay ${esc(item.recommended_delay_ms || 0)}ms</div>
+                   <div class="meta">controller ${esc(item.controller_health || "bootstrap")} · confidence ${esc(item.bootstrap_confidence || "low")} · delay ${esc(item.recommended_delay_ms || 0)}ms</div>
+                   <div class="meta">${esc((item.selection_reasons || []).join(" · ") || "No explicit selection reasons captured.")}</div>
+                   <div class="meta">targets ${esc((item.proposed_filing_targets || []).join(" · ") || "none")}</div>
+                   ${
+                     (item.alternative_source_tasks || []).length
+                       ? `<div class="meta">tasks ${esc(
+                           (item.alternative_source_tasks || [])
+                             .map((task) => `${task.task_type}:${task.document_type || task.source_name || "unknown"}`)
+                             .join(" · ")
+                         )}</div>`
+                       : ""
+                   }
                    <div class="meta">${esc((item.recommended_actions || []).join(" -> ") || "No recommended next step.")}</div>
                    <div class="meta">${esc(item.recommended_command || "")}</div>
                  </article>
@@ -1855,7 +1871,9 @@
                      )} · extra ${esc((payload.extra_targeted_tickers || []).join(", ") || "-")}`
                    : `recommended ${esc((payload.recommended_tickers || []).join(", ") || "-")}`;
                const controllerSummary = payload.controller
-                 ? ` · controller ${esc(payload.controller.source_health || "bootstrap")} · delay ${esc(
+                 ? ` · controller ${esc(payload.controller.source_health || "bootstrap")} · confidence ${esc(
+                     payload.controller.bootstrap_confidence || "low"
+                   )} · delay ${esc(
                      payload.controller.recommended_delay_ms || 0
                    )}ms`
                  : "";

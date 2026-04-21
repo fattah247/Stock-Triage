@@ -48,7 +48,8 @@ def cmd_coverage_status(args: argparse.Namespace) -> int:
         f"blocked={report['summary']['blocked_count']} "
         f"fixable={report['summary'].get('blocked_fixable_count', 0)} "
         f"retryable={report['summary'].get('blocked_retryable_count', 0)} "
-        f"access_constrained={report['summary'].get('blocked_access_constrained_count', 0)}"
+        f"access_constrained={report['summary'].get('blocked_access_constrained_count', 0)} "
+        f"alt_source_tasks={len((report.get('operator_tasks') or {}).get('alternative_source_check') or [])}"
     )
     print(json.dumps(report, sort_keys=True))
     return 0
@@ -80,7 +81,8 @@ def cmd_coverage_preview(args: argparse.Namespace) -> int:
         f"ticker_count={preview['ticker_count']} "
         f"targets={preview['action_target_count']} "
         f"controller={preview.get('controller', {}).get('source_health', 'bootstrap')} "
-        f"effective_limit={preview.get('effective_limit', args.limit)}"
+        f"effective_limit={preview.get('effective_limit', args.limit)} "
+        f"alt_source_tasks={len((preview.get('operator_tasks') or {}).get('alternative_source_check') or [])}"
     )
     print(json.dumps(preview, sort_keys=True))
     return 0
@@ -172,6 +174,7 @@ def cmd_coverage_plan_issuers_next(args: argparse.Namespace) -> int:
         f"scope={plan['scope_label']} "
         f"telemetry={plan['telemetry_sample_count']} "
         f"controller={plan.get('controller', {}).get('source_health', 'bootstrap')} "
+        f"confidence={plan.get('controller', {}).get('bootstrap_confidence', 'low')} "
         f"delay_ms={plan.get('controller', {}).get('recommended_delay_ms', 0)} "
         f"rows={plan['summary']['row_count']}"
     )

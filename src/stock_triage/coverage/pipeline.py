@@ -40,8 +40,8 @@ from ..sources.idx_artifacts import parse_financial_report_json
 COVERAGE_VERSION = "v3_4-v1"
 _SCOPE_CHOICES = {"all", "watchlist", "sector", "ticker-set"}
 _ACTION_CHOICES = {"discover-missing", "download-missing", "process-missing", "rerun-blocked"}
-_PLANNER_BOOTSTRAP_THRESHOLD = 10
-_PACING_BOOTSTRAP_THRESHOLD = 12
+_PLANNER_BOOTSTRAP_RUN_THRESHOLD = 20
+_PACING_BOOTSTRAP_EVENT_THRESHOLD = 200
 _PACING_LOOKBACK_LIMIT = 60
 _HEALTHY_DELAY_MS = 0
 _BOOTSTRAP_DELAY_MS = 250
@@ -210,7 +210,13 @@ def load_coverage_status_from_conn(
                 "downloaded_count": 0,
                 "discovered_count": 0,
                 "blocked_count": 0,
+                "blocked_fixable_count": 0,
+                "blocked_retryable_count": 0,
+                "blocked_access_constrained_count": 0,
                 "unknown_count": 0,
+            },
+            "operator_tasks": {
+                "alternative_source_check": [],
             },
             "gap_leaders": [],
             "undercovered_watchlist": [],
@@ -290,6 +296,9 @@ def load_coverage_status_from_conn(
         "date_to": range_end.isoformat(),
         "ticker_count": len(selected),
         "summary": state_counts,
+        "operator_tasks": {
+            "alternative_source_check": _alternative_source_tasks(gap_rows),
+        },
         "gap_leaders": gap_leaders,
         "undercovered_watchlist": undercovered_watchlist,
         "state_breakdown": state_breakdown,
@@ -369,6 +378,9 @@ def preview_coverage_action(
         "blocked_access_constrained_count": sum(1 for row in filtered_rows if row.get("blocked_bucket") == "access_constrained"),
         "current_snapshot_count": current_snapshot_count,
         "dominant_blocked_reasons": _dominant_blocked_reasons(filtered_rows),
+        "operator_tasks": {
+            "alternative_source_check": _alternative_source_tasks(filtered_rows),
+        },
         "preview_generated_at": datetime.now(timezone.utc).isoformat(),
         "controller": controller,
         "requested_limit": limit,
@@ -595,7 +607,10 @@ def load_coverage_plan_from_conn(
         "ticker_count": len(selected),
         "plan_mode": plan_mode,
         "telemetry_sample_count": telemetry_sample_count,
-        "bootstrap_threshold": _PLANNER_BOOTSTRAP_THRESHOLD,
+        "bootstrap_threshold": {
+            "run_count": _PLANNER_BOOTSTRAP_RUN_THRESHOLD,
+            "event_count": _PACING_BOOTSTRAP_EVENT_THRESHOLD,
+        },
         "controller": controller,
         "rows": rows[:limit],
         "recommended_tickers": [str(row["ticker"]) for row in rows[:limit]],
@@ -1334,6 +1349,14 @@ def _load_coverage_controller_from_conn(
         ).fetchall()
     parsed_rows = [dict(row) for row in rows]
     sample_count = len(parsed_rows)
+    action_run_count_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM coverage_plan_audit_log
+        WHERE event_type IN ('action_followed', 'action_diverged')
+        """
+    ).fetchone()
+    action_run_count = int(action_run_count_row["count"] or 0)
     friction_count = sum(1 for row in parsed_rows if _telemetry_is_friction(str(row.get("result_class") or "")))
     consecutive_friction = 0
     for row in parsed_rows:
@@ -1342,7 +1365,7 @@ def _load_coverage_controller_from_conn(
             continue
         break
     friction_rate = (friction_count / sample_count) if sample_count else 0.0
-    mode = "bootstrap" if sample_count < _PACING_BOOTSTRAP_THRESHOLD else "adaptive"
+    mode = "bootstrap" if action_run_count < _PLANNER_BOOTSTRAP_RUN_THRESHOLD and sample_count < _PACING_BOOTSTRAP_EVENT_THRESHOLD else "adaptive"
     source_health = "bootstrap" if mode == "bootstrap" else "healthy"
     recommended_delay_ms = _BOOTSTRAP_DELAY_MS if mode == "bootstrap" else _HEALTHY_DELAY_MS
     recommended_limit_cap: int | None = None
@@ -1365,6 +1388,8 @@ def _load_coverage_controller_from_conn(
                     datetime.fromisoformat(str(parsed_rows[0]["created_at"])) + timedelta(minutes=10)
                 ).isoformat()
     source_breakdown: list[dict[str, object]] = []
+    endpoint_breakdown: list[dict[str, object]] = []
+    issuer_breakdown: list[dict[str, object]] = []
     grouped: dict[str, list[dict[str, object]]] = {}
     for row in parsed_rows:
         grouped.setdefault(str(row.get("source_name") or "unknown"), []).append(row)
@@ -1379,11 +1404,51 @@ def _load_coverage_controller_from_conn(
                 "friction_rate": round(group_friction_count / group_sample_count, 3) if group_sample_count else 0.0,
             }
         )
+    endpoint_grouped: dict[str, list[dict[str, object]]] = {}
+    issuer_grouped: dict[str, list[dict[str, object]]] = {}
+    for row in parsed_rows:
+        endpoint_grouped.setdefault(str(row.get("endpoint_family") or "unknown"), []).append(row)
+        if row.get("ticker"):
+            issuer_grouped.setdefault(str(row.get("ticker")), []).append(row)
+    for key, values in sorted(endpoint_grouped.items()):
+        group_sample_count = len(values)
+        group_friction_count = sum(1 for row in values if _telemetry_is_friction(str(row.get("result_class") or "")))
+        endpoint_breakdown.append(
+            {
+                "endpoint_family": key,
+                "sample_count": group_sample_count,
+                "friction_count": group_friction_count,
+                "friction_rate": round(group_friction_count / group_sample_count, 3) if group_sample_count else 0.0,
+            }
+        )
+    for key, values in sorted(issuer_grouped.items(), key=lambda item: (-len(item[1]), item[0]))[:10]:
+        group_sample_count = len(values)
+        group_friction_count = sum(1 for row in values if _telemetry_is_friction(str(row.get("result_class") or "")))
+        issuer_breakdown.append(
+            {
+                "ticker": key,
+                "sample_count": group_sample_count,
+                "friction_count": group_friction_count,
+                "friction_rate": round(group_friction_count / group_sample_count, 3) if group_sample_count else 0.0,
+            }
+        )
+    stop_or_continue = "continue"
+    if source_health == "constrained":
+        stop_or_continue = "stop_current_source_switch_issuer"
+    elif source_health == "degraded":
+        stop_or_continue = "continue_bounded_with_cooldown"
+    elif mode == "bootstrap":
+        stop_or_continue = "continue_bootstrap_conservative"
     return {
         "plan_mode": mode,
         "source_health": source_health,
         "sample_count": sample_count,
-        "bootstrap_threshold": _PACING_BOOTSTRAP_THRESHOLD,
+        "run_count": action_run_count,
+        "bootstrap_threshold": {
+            "run_count": _PLANNER_BOOTSTRAP_RUN_THRESHOLD,
+            "event_count": _PACING_BOOTSTRAP_EVENT_THRESHOLD,
+        },
+        "bootstrap_confidence": "low" if mode == "bootstrap" else "learned",
         "friction_count": friction_count,
         "friction_rate": round(friction_rate, 3),
         "consecutive_friction_count": consecutive_friction,
@@ -1391,11 +1456,14 @@ def _load_coverage_controller_from_conn(
         "recommended_limit_cap": recommended_limit_cap,
         "cooldown_until": cooldown_until,
         "source_breakdown": source_breakdown,
+        "endpoint_breakdown": endpoint_breakdown[:8],
+        "issuer_breakdown": issuer_breakdown,
+        "stop_or_continue": stop_or_continue,
     }
 
 
 def _telemetry_is_friction(result_class: str) -> bool:
-    return result_class in {"http_403", "challenge", "timeout"}
+    return result_class in {"http_403", "challenge", "timeout", "session_expired"}
 
 
 def _controller_effective_limit(*, controller: dict[str, object], action: str, requested_limit: int) -> int:
@@ -1529,11 +1597,8 @@ def _count_current_snapshots(conn: sqlite3.Connection, *, selected: list[str]) -
 
 
 def _coverage_planner_mode(conn: sqlite3.Connection) -> tuple[str, int]:
-    row = conn.execute("SELECT COUNT(*) AS count FROM coverage_request_telemetry").fetchone()
-    telemetry_sample_count = int(row["count"] or 0)
-    if telemetry_sample_count < _PLANNER_BOOTSTRAP_THRESHOLD:
-        return "bootstrap", telemetry_sample_count
-    return "adaptive", telemetry_sample_count
+    controller = _load_coverage_controller_from_conn(conn)
+    return str(controller.get("plan_mode") or "bootstrap"), int(controller.get("sample_count") or 0)
 
 
 def _build_coverage_plan_rows(
@@ -1601,6 +1666,21 @@ def _build_coverage_plan_rows(
         if blocked_fixable_count > 0 or blocked_retryable_count > 0:
             recommended_actions.append("rerun-blocked")
         recommended_actions = _dedupe_keep_order(recommended_actions)[:2]
+        selection_reasons: list[str] = []
+        if ticker in watchlist:
+            selection_reasons.append("watchlist or operator focus")
+        if int(issuer_map.get(ticker, {}).get("has_current_snapshot") or 0):
+            selection_reasons.append("already has a current snapshot worth completing")
+        if downloaded_count > 0 and analyzed_count == 0:
+            selection_reasons.append("downloaded filings can be promoted into current intelligence quickly")
+        elif discovered_count > 0 and downloaded_count == 0:
+            selection_reasons.append("discovered filings are ready for bounded download")
+        elif gap_count > 0 and analyzed_count > 0:
+            selection_reasons.append("one more filing can unlock continuity or delta comparisons")
+        if blocked_access_constrained_count == 0 and blocked_retryable_count == 0:
+            selection_reasons.append("current access path is relatively healthy")
+        proposed_filing_targets = _proposed_filing_targets(row_set)
+        alternative_source_tasks = _alternative_source_tasks(row_set)
         ranked.append(
             {
                 "ticker": ticker,
@@ -1624,6 +1704,10 @@ def _build_coverage_plan_rows(
                 "telemetry_sample_count": telemetry_sample_count,
                 "controller_health": controller.get("source_health"),
                 "recommended_delay_ms": controller.get("recommended_delay_ms"),
+                "bootstrap_confidence": controller.get("bootstrap_confidence"),
+                "selection_reasons": selection_reasons[:4],
+                "proposed_filing_targets": proposed_filing_targets,
+                "alternative_source_tasks": alternative_source_tasks,
                 "recommended_actions": recommended_actions,
                 "recommended_command": f"coverage-run {recommended_actions[0]} --scope ticker-set --ticker {ticker}" if recommended_actions else None,
             }
@@ -1776,6 +1860,51 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
         seen.add(item)
         result.append(item)
     return result
+
+
+def _proposed_filing_targets(rows: list[dict[str, object]]) -> list[str]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            0 if str(row.get("obligation_type") or "").startswith("annual") else 1 if str(row.get("obligation_type") or "").startswith("interim") else 2,
+            0 if row.get("expected_state") == "late" else 1 if row.get("expected_state") == "due" else 2,
+            str(row.get("deadline_at") or ""),
+        ),
+    )
+    targets: list[str] = []
+    for row in ordered:
+        if row.get("actual_state") == "analyzed":
+            continue
+        label = f"{row.get('obligation_type')}:{row.get('period_end_date')}:{row.get('actual_state')}"
+        targets.append(label)
+        if len(targets) >= 3:
+            break
+    return targets
+
+
+def _alternative_source_tasks(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    tasks: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not bool(row.get("needs_alternative_source_check")):
+            continue
+        key = f"{row.get('ticker')}:{row.get('obligation_type')}:{row.get('period_end_date')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tasks.append(
+            {
+                "task_type": "alternative_source_check",
+                "ticker": row.get("ticker"),
+                "source_name": row.get("source_name"),
+                "document_type": row.get("document_type"),
+                "period_end_date": row.get("period_end_date"),
+                "blocked_class": row.get("effective_block_class") or row.get("blocked_reason"),
+            }
+        )
+        if len(tasks) >= 3:
+            break
+    return tasks
 
 
 def _coverage_row_matches_filters(
@@ -2034,6 +2163,8 @@ def _fetch_financial_payload_with_telemetry(
 
 def _telemetry_result_from_exception(exc: Exception) -> tuple[str, int | None]:
     message = str(exc).lower()
+    if "session expired" in message:
+        return "session_expired", None
     if "status 403" in message or "http_403" in message:
         return "http_403", 403
     if "cloudflare" in message or "blocked" in message or "challenge" in message:

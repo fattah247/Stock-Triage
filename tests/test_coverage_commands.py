@@ -162,6 +162,7 @@ def test_coverage_plan_commands_surface_bootstrap_and_audit(tmp_config, monkeypa
     plan_payload = json.loads(plan_out.strip().splitlines()[-1])
     assert plan_payload["plan_mode"] in {"bootstrap", "adaptive"}
     assert "controller" in plan_payload
+    assert plan_payload["controller"]["bootstrap_confidence"] in {"low", "learned"}
     assert plan_payload["rows"]
     assert plan_payload["recommended_tickers"] == ["TAMU"]
 
@@ -738,7 +739,24 @@ def test_coverage_controller_adapts_with_telemetry_and_caps_preview_limit(tmp_co
     try:
         configure_pragmas(conn, tmp_config)
         run_migrations(conn)
-        for idx in range(12):
+        for idx in range(20):
+            conn.execute(
+                """
+                INSERT INTO coverage_plan_audit_log (
+                    audit_id, event_type, plan_mode, scope_label, action, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"audit-{idx}",
+                    "action_followed",
+                    "adaptive",
+                    "tickers:TAMU",
+                    "download-missing",
+                    "{}",
+                    f"2026-04-2{idx % 9}T00:00:0{idx % 10}+00:00",
+                ),
+            )
+        for idx in range(40):
             created_at = f"2026-04-2{idx % 9}T00:00:0{idx % 10}+00:00"
             conn.execute(
                 """
@@ -793,10 +811,13 @@ def test_coverage_controller_adapts_with_telemetry_and_caps_preview_limit(tmp_co
 
     assert preview["controller"]["plan_mode"] == "adaptive"
     assert preview["controller"]["source_health"] == "constrained"
+    assert preview["controller"]["bootstrap_confidence"] == "learned"
     assert preview["effective_limit"] == 3
     assert preview["controller"]["recommended_delay_ms"] == 3000
     assert plan["plan_mode"] == "adaptive"
     assert plan["controller"]["source_health"] == "constrained"
+    assert plan["rows"][0]["selection_reasons"]
+    assert plan["rows"][0]["proposed_filing_targets"]
 
 
 def test_run_coverage_action_passes_controller_pressure_into_download(tmp_config, monkeypatch):
@@ -816,7 +837,24 @@ def test_run_coverage_action_passes_controller_pressure_into_download(tmp_config
     try:
         configure_pragmas(conn, tmp_config)
         run_migrations(conn)
-        for idx in range(12):
+        for idx in range(20):
+            conn.execute(
+                """
+                INSERT INTO coverage_plan_audit_log (
+                    audit_id, event_type, plan_mode, scope_label, action, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"action-audit-{idx}",
+                    "action_followed",
+                    "adaptive",
+                    "tickers:TAMU",
+                    "download-missing",
+                    "{}",
+                    f"2026-04-21T00:10:{idx:02d}+00:00",
+                ),
+            )
+        for idx in range(40):
             conn.execute(
                 """
                 INSERT INTO coverage_request_telemetry (
@@ -871,6 +909,7 @@ def test_run_coverage_action_passes_controller_pressure_into_download(tmp_config
     )
 
     assert result["controller"]["source_health"] == "constrained"
+    assert result["controller"]["bootstrap_confidence"] == "learned"
     assert observed["controller_mode"] == "adaptive"
     assert observed["source_health"] == "constrained"
     assert observed["delay_ms"] == 3000
