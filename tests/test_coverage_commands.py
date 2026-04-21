@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+from datetime import datetime, timezone
 from urllib.request import urlopen
 
 from stock_triage.commands.coverage import (
@@ -20,6 +21,7 @@ from stock_triage.coverage.pipeline import (
     _persist_coverage_rows,
     _prioritize_candidate_ids,
     _raw_blocked_reason_for,
+    _run_download_for_scope,
     preview_coverage_action,
     run_coverage_action,
     BLOCK_CLASS_ACCESS_CONSTRAINT,
@@ -32,6 +34,8 @@ from stock_triage.dashboard.server import create_dashboard_server
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.discovery import persist_document_candidates
 from stock_triage.sources import DocumentCandidate, SourceClass
+from stock_triage.download.pipeline import DownloadedAttachment, DownloadResource
+from stock_triage.storage import StoredFile
 
 from .test_intelligence_pipeline import _seed_phase10_inputs, _write_phase12_theses
 
@@ -913,6 +917,87 @@ def test_run_coverage_action_passes_controller_pressure_into_download(tmp_config
     assert observed["controller_mode"] == "adaptive"
     assert observed["source_health"] == "constrained"
     assert observed["delay_ms"] == 3000
+
+
+def test_run_download_for_scope_persists_telemetry_without_name_error(tmp_config, monkeypatch):
+    candidate = DocumentCandidate(
+        source_name="idx_financial_reports",
+        source_class=SourceClass.FINANCIAL_REPORT,
+        source_record_id="rec-download-1",
+        ticker="TAMU",
+        title="FinancialStatement-2025-Tahunan-TAMU.pdf",
+        attachment_url="https://example.test/tamu.pdf",
+        attachment_filename="FinancialStatement-2025-Tahunan-TAMU.pdf",
+        raw_metadata={"report_year": "2025", "report_period": "Audit", "report_type": "rdf", "file_type": ".pdf"},
+    )
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(lambda conn: persist_document_candidates(conn, [candidate]))
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, tmp_config)
+        candidate_row = conn.execute(
+            """
+            SELECT candidate_id
+            FROM document_candidates
+            WHERE source_name = ? AND source_record_id = ?
+            """,
+            ("idx_financial_reports", "rec-download-1"),
+        ).fetchone()
+        assert candidate_row is not None
+        candidate_id = candidate_row["candidate_id"]
+    finally:
+        conn.close()
+
+    fake_file = StoredFile(
+        local_path=tmp_config.paths.files_dir / "dummy.pdf",
+        sha256="a" * 64,
+        size_bytes=7,
+        deduplicated=False,
+    )
+    fake_file.local_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_file.local_path.write_bytes(b"%PDF-1.4")
+
+    def _fake_fetch(self, candidate, resource, *, existing=None):
+        assert isinstance(resource, DownloadResource)
+        return DownloadedAttachment(
+            original_url=resource.attachment_url,
+            retrieved_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            mime_type="application/pdf",
+            etag=None,
+            last_modified=None,
+            stored_file=fake_file,
+        )
+
+    monkeypatch.setattr("stock_triage.download.pipeline.AttachmentDownloader.fetch", _fake_fetch)
+
+    executed = _run_download_for_scope(
+        tmp_config,
+        candidate_ids=[candidate_id],
+        controller_mode="bootstrap",
+        source_health="bootstrap",
+        delay_ms=0,
+    )
+
+    assert executed == 1
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, tmp_config)
+        row = conn.execute(
+            """
+            SELECT result_class, source_name, controller_mode, source_health
+            FROM coverage_request_telemetry
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["result_class"] == "success"
+        assert row["source_name"] == "idx_financial_reports"
+        assert row["controller_mode"] == "bootstrap"
+        assert row["source_health"] == "bootstrap"
+    finally:
+        conn.close()
 
 
 def test_coverage_status_filters_by_source_and_document_type(tmp_config):

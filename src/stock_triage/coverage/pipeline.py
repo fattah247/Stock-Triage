@@ -20,6 +20,7 @@ from ..download.pipeline import (
     _existing_downloads_for_candidate,
     _persist_download,
     _persist_download_attempt,
+    _requires_browser_session,
     _resource_state_for_candidate,
     _resources_for_candidate,
     _should_fetch_resource,
