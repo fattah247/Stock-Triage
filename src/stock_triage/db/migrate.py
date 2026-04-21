@@ -38,6 +38,7 @@ def _discover_migrations() -> list[tuple[int, Path]]:
 
 
 _COMMENT_LINE = re.compile(r"^\s*--.*$", re.MULTILINE)
+_ALTER_ADD_COLUMN = re.compile(r"^\s*ALTER\s+TABLE\s+.+\s+ADD\s+COLUMN\s+.+$", re.IGNORECASE | re.DOTALL)
 
 
 def _split_statements(sql: str) -> list[str]:
@@ -48,6 +49,10 @@ def _split_statements(sql: str) -> list[str]:
     """
     cleaned = _COMMENT_LINE.sub("", sql)
     return [stmt.strip() for stmt in cleaned.split(";") if stmt.strip()]
+
+
+def _is_safe_duplicate_column(stmt: str, exc: Exception) -> bool:
+    return bool(_ALTER_ADD_COLUMN.match(stmt)) and "duplicate column name:" in str(exc).lower()
 
 
 def run_migrations(conn: sqlite3.Connection) -> list[int]:
@@ -62,7 +67,12 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
         conn.execute("BEGIN")
         try:
             for stmt in statements:
-                conn.execute(stmt)
+                try:
+                    conn.execute(stmt)
+                except Exception as exc:
+                    if _is_safe_duplicate_column(stmt, exc):
+                        continue
+                    raise
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(timezone.utc).isoformat()),

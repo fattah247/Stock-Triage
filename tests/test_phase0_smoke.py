@@ -36,7 +36,7 @@ def test_phase0_end_to_end(tmp_config):
     # 1. Migrations apply via the writer queue.
     with WriterQueue(cfg) as wq:
         applied = wq.submit(run_migrations)
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 
         # 2. Re-running is a no-op.
         again = wq.submit(run_migrations)
@@ -93,7 +93,7 @@ def test_phase0_end_to_end(tmp_config):
         version = rconn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     finally:
         rconn.close()
 
@@ -104,6 +104,26 @@ def test_file_store_dedup(tmp_config):
     b = store.put_bytes(b"hello world")
     assert a.sha256 == b.sha256
     assert b.deduplicated is True
+
+
+def test_migrations_tolerate_duplicate_add_column_on_partial_upgrade(tmp_config):
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        for version in range(1, 17):
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(timezone.utc).isoformat()),
+            )
+        conn.execute("CREATE TABLE IF NOT EXISTS nuance_findings (finding_id TEXT PRIMARY KEY, severity_tier TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS company_snapshots (snapshot_id TEXT PRIMARY KEY, issuer_condition TEXT NOT NULL DEFAULT 'watch')")
+        applied = run_migrations(conn)
+        assert applied == [17, 18, 19, 20]
+        versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+        assert [row["version"] for row in versions][-4:] == [17, 18, 19, 20]
+    finally:
+        conn.close()
 
 
 def test_stage_counters_thread_safe():

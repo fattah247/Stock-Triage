@@ -1743,11 +1743,15 @@
     }
     if (coveragePlanList) {
       const plan = data.coverage_plan || {};
+      const controller = plan.controller || {};
       const rows = (plan.rows || []).slice(0, 5);
       coveragePlanList.innerHTML = rows.length
         ? `<div class="meta">Mode ${esc(plan.plan_mode || "bootstrap")} · telemetry ${esc(plan.telemetry_sample_count || 0)}/${esc(
             plan.bootstrap_threshold || 0
-          )} · scope ${esc(plan.scope_label || "—")}</div>
+          )} · controller ${esc(controller.source_health || "bootstrap")} · delay ${esc(controller.recommended_delay_ms || 0)}ms · scope ${esc(plan.scope_label || "—")}</div>
+           <div class="meta">friction ${(controller.friction_rate || 0).toFixed ? esc(controller.friction_rate.toFixed(3)) : esc(controller.friction_rate || 0)} · consecutive ${esc(controller.consecutive_friction_count || 0)}${
+             controller.cooldown_until ? ` · cooldown until ${renderTimestamp(controller.cooldown_until)}` : ""
+           }</div>
            <div class="findingStack">${rows
              .map(
                (item) => `
@@ -1756,6 +1760,7 @@
                    <div class="meta">score ${esc(item.score)} · completion ${esc(item.completion_score)} · decision ${esc(item.decision_value)} · continuity ${esc(item.continuity_unlock)}</div>
                    <div class="meta">analyzed ${esc(item.analyzed_count)} · downloaded ${esc(item.downloaded_count)} · discovered ${esc(item.discovered_count)} · gaps ${esc(item.gap_count)}</div>
                    <div class="meta">blocked: fixable ${esc(item.blocked_fixable_count || 0)} · retryable ${esc(item.blocked_retryable_count || 0)} · constrained ${esc(item.blocked_access_constrained_count || 0)}</div>
+                   <div class="meta">controller ${esc(item.controller_health || "bootstrap")} · delay ${esc(item.recommended_delay_ms || 0)}ms</div>
                    <div class="meta">${esc((item.recommended_actions || []).join(" -> ") || "No recommended next step.")}</div>
                    <div class="meta">${esc(item.recommended_command || "")}</div>
                  </article>
@@ -1849,9 +1854,14 @@
                        (payload.skipped_recommended_tickers || []).join(", ") || "-"
                      )} · extra ${esc((payload.extra_targeted_tickers || []).join(", ") || "-")}`
                    : `recommended ${esc((payload.recommended_tickers || []).join(", ") || "-")}`;
+               const controllerSummary = payload.controller
+                 ? ` · controller ${esc(payload.controller.source_health || "bootstrap")} · delay ${esc(
+                     payload.controller.recommended_delay_ms || 0
+                   )}ms`
+                 : "";
                return `<tr><td>${esc(item.event_type)}</td><td>${esc(item.plan_mode)}</td><td>${esc(
                  item.action || item.scope_label
-               )}</td><td>${detail}</td><td>${renderTimestamp(item.created_at)}</td></tr>`;
+               )}</td><td>${detail}${controllerSummary}</td><td>${renderTimestamp(item.created_at)}</td></tr>`;
              })
              .join("")}</tbody></table>`
         : `<div class="emptyState"><strong>No planner audit events yet.</strong> Run coverage-plan or a coverage action to start the advisory audit trail.</div>`;

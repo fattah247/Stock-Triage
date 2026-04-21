@@ -78,7 +78,9 @@ def cmd_coverage_preview(args: argparse.Namespace) -> int:
         f"date_from={preview['date_from']} "
         f"date_to={preview['date_to']} "
         f"ticker_count={preview['ticker_count']} "
-        f"targets={preview['action_target_count']}"
+        f"targets={preview['action_target_count']} "
+        f"controller={preview.get('controller', {}).get('source_health', 'bootstrap')} "
+        f"effective_limit={preview.get('effective_limit', args.limit)}"
     )
     print(json.dumps(preview, sort_keys=True))
     return 0
@@ -107,6 +109,7 @@ def cmd_coverage_run(args: argparse.Namespace) -> int:
         f"action={result['action']} "
         f"executed={result['executed']} "
         f"scope={result['preview']['scope_label']} "
+        f"controller={result.get('controller', {}).get('source_health', 'bootstrap')} "
         f"expected={status['summary']['expected_count']} "
         f"analyzed={status['summary']['analyzed_count']} "
         f"blocked={status['summary']['blocked_count']} "
@@ -168,6 +171,8 @@ def cmd_coverage_plan_issuers_next(args: argparse.Namespace) -> int:
         f"mode={plan['plan_mode']} "
         f"scope={plan['scope_label']} "
         f"telemetry={plan['telemetry_sample_count']} "
+        f"controller={plan.get('controller', {}).get('source_health', 'bootstrap')} "
+        f"delay_ms={plan.get('controller', {}).get('recommended_delay_ms', 0)} "
         f"rows={plan['summary']['row_count']}"
     )
     print(json.dumps(plan, sort_keys=True))

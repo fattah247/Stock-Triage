@@ -20,12 +20,14 @@ from stock_triage.coverage.pipeline import (
     _persist_coverage_rows,
     _prioritize_candidate_ids,
     _raw_blocked_reason_for,
+    preview_coverage_action,
+    run_coverage_action,
     BLOCK_CLASS_ACCESS_CONSTRAINT,
     BLOCK_CLASS_ORCHESTRATION_ERROR,
     BLOCK_CLASS_UPSTREAM_403_PERSISTENT,
     BLOCK_CLASS_UPSTREAM_403_TRANSIENT,
 )
-from stock_triage.coverage import load_coverage_status
+from stock_triage.coverage import load_coverage_plan, load_coverage_status
 from stock_triage.dashboard.server import create_dashboard_server
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.discovery import persist_document_candidates
@@ -159,6 +161,7 @@ def test_coverage_plan_commands_surface_bootstrap_and_audit(tmp_config, monkeypa
     assert "coverage-plan:" in plan_out
     plan_payload = json.loads(plan_out.strip().splitlines()[-1])
     assert plan_payload["plan_mode"] in {"bootstrap", "adaptive"}
+    assert "controller" in plan_payload
     assert plan_payload["rows"]
     assert plan_payload["recommended_tickers"] == ["TAMU"]
 
@@ -716,6 +719,161 @@ def test_action_event_logs_divergence_to_plan_audit(tmp_config):
         assert "ZZZZ" in payload["extra_targeted_tickers"]
     finally:
         conn.close()
+
+
+def test_coverage_controller_adapts_with_telemetry_and_caps_preview_limit(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    load_coverage_status(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=20,
+        materialize=True,
+    )
+
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        for idx in range(12):
+            created_at = f"2026-04-2{idx % 9}T00:00:0{idx % 10}+00:00"
+            conn.execute(
+                """
+                INSERT INTO coverage_request_telemetry (
+                    telemetry_id, action, source_name, endpoint_family, transport_mode, ticker,
+                    document_type, candidate_id, document_id, result_class, http_status, latency_ms,
+                    delay_applied_ms, controller_mode, source_health, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"telemetry-{idx}",
+                    "download-missing",
+                    "idx_financial_reports",
+                    "idx_financial_reports_artifact",
+                    "http",
+                    "TAMU",
+                    "financial_statement",
+                    None,
+                    None,
+                    "http_403",
+                    403,
+                    120,
+                    1500,
+                    "adaptive",
+                    "degraded",
+                    "{}",
+                    created_at,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    preview = preview_coverage_action(
+        tmp_config,
+        action="download-missing",
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=20,
+    )
+    plan = load_coverage_plan(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=5,
+        materialize=False,
+    )
+
+    assert preview["controller"]["plan_mode"] == "adaptive"
+    assert preview["controller"]["source_health"] == "constrained"
+    assert preview["effective_limit"] == 3
+    assert preview["controller"]["recommended_delay_ms"] == 3000
+    assert plan["plan_mode"] == "adaptive"
+    assert plan["controller"]["source_health"] == "constrained"
+
+
+def test_run_coverage_action_passes_controller_pressure_into_download(tmp_config, monkeypatch):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    load_coverage_status(
+        tmp_config,
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=20,
+        materialize=True,
+    )
+
+    conn = connect(tmp_config.paths.db_path, read_only=False)
+    try:
+        configure_pragmas(conn, tmp_config)
+        run_migrations(conn)
+        for idx in range(12):
+            conn.execute(
+                """
+                INSERT INTO coverage_request_telemetry (
+                    telemetry_id, action, source_name, endpoint_family, transport_mode, ticker,
+                    document_type, candidate_id, document_id, result_class, http_status, latency_ms,
+                    delay_applied_ms, controller_mode, source_health, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"pressure-{idx}",
+                    "download-missing",
+                    "idx_financial_reports",
+                    "idx_financial_reports_artifact",
+                    "http",
+                    "TAMU",
+                    "financial_statement",
+                    None,
+                    None,
+                    "http_403",
+                    403,
+                    100,
+                    1500,
+                    "adaptive",
+                    "degraded",
+                    "{}",
+                    f"2026-04-21T00:00:{idx:02d}+00:00",
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    observed: dict[str, object] = {}
+
+    def _fake_download(cfg, *, candidate_ids, controller_mode, source_health, delay_ms):
+        observed["candidate_ids"] = list(candidate_ids)
+        observed["controller_mode"] = controller_mode
+        observed["source_health"] = source_health
+        observed["delay_ms"] = delay_ms
+        return len(candidate_ids)
+
+    monkeypatch.setattr("stock_triage.coverage.pipeline._run_download_for_scope", _fake_download)
+
+    result = run_coverage_action(
+        tmp_config,
+        action="download-missing",
+        scope="ticker-set",
+        ticker="TAMU",
+        source_name="idx_financial_reports",
+        document_type="financial_statement",
+        limit=20,
+    )
+
+    assert result["controller"]["source_health"] == "constrained"
+    assert observed["controller_mode"] == "adaptive"
+    assert observed["source_health"] == "constrained"
+    assert observed["delay_ms"] == 3000
 
 
 def test_coverage_status_filters_by_source_and_document_type(tmp_config):

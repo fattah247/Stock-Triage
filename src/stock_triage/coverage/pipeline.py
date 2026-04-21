@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -40,6 +41,12 @@ COVERAGE_VERSION = "v3_4-v1"
 _SCOPE_CHOICES = {"all", "watchlist", "sector", "ticker-set"}
 _ACTION_CHOICES = {"discover-missing", "download-missing", "process-missing", "rerun-blocked"}
 _PLANNER_BOOTSTRAP_THRESHOLD = 10
+_PACING_BOOTSTRAP_THRESHOLD = 12
+_PACING_LOOKBACK_LIMIT = 60
+_HEALTHY_DELAY_MS = 0
+_BOOTSTRAP_DELAY_MS = 250
+_DEGRADED_DELAY_MS = 1500
+_CONSTRAINED_DELAY_MS = 3000
 BLOCK_CLASS_ORCHESTRATION_ERROR = "orchestration_error"
 BLOCK_CLASS_UPSTREAM_403_TRANSIENT = "upstream_403_transient"
 BLOCK_CLASS_UPSTREAM_403_PERSISTENT = "upstream_403_persistent"
@@ -58,6 +65,26 @@ class CoverageMaterializeResult:
     row_count: int
     range_start: date
     range_end: date
+
+
+@dataclass(frozen=True)
+class CoverageTelemetryEvent:
+    action: str
+    source_name: str | None
+    endpoint_family: str | None
+    transport_mode: str | None
+    ticker: str | None
+    document_type: str | None
+    candidate_id: str | None
+    document_id: str | None
+    result_class: str
+    http_status: int | None
+    latency_ms: int | None
+    delay_applied_ms: int
+    controller_mode: str
+    source_health: str
+    payload: dict[str, object]
+    created_at: str
 
 
 def default_coverage_range(today: date | None = None) -> tuple[date, date]:
@@ -306,7 +333,13 @@ def preview_coverage_action(
             if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
         ]
         filtered_rows = _enrich_coverage_rows_with_access_state(conn, filtered_rows)
-        plan = _build_action_plan(conn, selected, filtered_rows, action=action, limit=limit)
+        controller = _load_coverage_controller_from_conn(
+            conn,
+            source_name=source_name,
+            source_names=sorted({str(row.get("source_name") or "") for row in filtered_rows if row.get("source_name")}),
+        )
+        effective_limit = _controller_effective_limit(controller=controller, action=action, requested_limit=limit)
+        plan = _build_action_plan(conn, selected, filtered_rows, action=action, limit=effective_limit)
         current_snapshot_count = _count_current_snapshots(conn, selected=selected) if selected else 0
     finally:
         conn.close()
@@ -337,6 +370,9 @@ def preview_coverage_action(
         "current_snapshot_count": current_snapshot_count,
         "dominant_blocked_reasons": _dominant_blocked_reasons(filtered_rows),
         "preview_generated_at": datetime.now(timezone.utc).isoformat(),
+        "controller": controller,
+        "requested_limit": limit,
+        "effective_limit": effective_limit,
         "action_target_count": plan["target_count"],
         "action_targets": plan["targets"],
         "target_tickers": plan["target_tickers"],
@@ -374,6 +410,12 @@ def run_coverage_action(
     log = get_logger("stock_triage.coverage")
     executed = 0
     target_tickers = list(preview["target_tickers"])
+    controller = dict(preview.get("controller") or {})
+    controller_mode = str(controller.get("plan_mode") or "bootstrap")
+    source_health = str(controller.get("source_health") or "bootstrap")
+    delay_ms = int(controller.get("recommended_delay_ms") or 0)
+    if preview.get("effective_limit") is not None and int(preview["effective_limit"]) < len(target_tickers) and action == "discover-missing":
+        target_tickers = target_tickers[: int(preview["effective_limit"])]
     if action == "discover-missing":
         executed = _run_discover_for_scope(
             cfg,
@@ -381,13 +423,26 @@ def run_coverage_action(
             date_from=date.fromisoformat(str(preview["date_from"])),
             date_to=date.fromisoformat(str(preview["date_to"])),
             source_name=source_name,
+            controller_mode=controller_mode,
+            source_health=source_health,
+            delay_ms=delay_ms,
         )
     elif action == "download-missing":
-        executed = _run_download_for_scope(cfg, candidate_ids=list(preview["action_targets"]))
+        executed = _run_download_for_scope(
+            cfg,
+            candidate_ids=list(preview["action_targets"]),
+            controller_mode=controller_mode,
+            source_health=source_health,
+            delay_ms=delay_ms,
+        )
     elif action == "process-missing":
         executed = _run_process_for_scope(cfg, document_ids=list(preview["action_targets"]), target_tickers=target_tickers)
     elif action == "rerun-blocked":
-        executed = _run_rerun_blocked_for_scope(cfg, document_ids=list(preview["action_targets"]), target_tickers=target_tickers)
+        executed = _run_rerun_blocked_for_scope(
+            cfg,
+            document_ids=list(preview["action_targets"]),
+            target_tickers=target_tickers,
+        )
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
         wq.submit(
@@ -423,6 +478,7 @@ def run_coverage_action(
         "action": action,
         "executed": executed,
         "preview": preview,
+        "controller": controller,
         "status": refreshed,
     }
 
@@ -477,6 +533,23 @@ def load_coverage_plan(
         conn.close()
 
 
+def load_coverage_controller(
+    cfg: Config,
+    *,
+    source_name: str | None = None,
+    source_names: Iterable[str] | None = None,
+) -> dict[str, object]:
+    cfg.ensure_dirs()
+    with WriterQueue(cfg) as wq:
+        wq.submit(run_migrations)
+    conn = connect(cfg.paths.db_path, read_only=True)
+    try:
+        configure_pragmas(conn, cfg)
+        return _load_coverage_controller_from_conn(conn, source_name=source_name, source_names=source_names)
+    finally:
+        conn.close()
+
+
 def load_coverage_plan_from_conn(
     conn: sqlite3.Connection,
     cfg: Config,
@@ -498,6 +571,11 @@ def load_coverage_plan_from_conn(
         row for row in coverage_rows if _coverage_row_matches_filters(row, source_name=source_name, document_type=document_type)
     ]
     enriched_rows = _enrich_coverage_rows_with_access_state(conn, filtered_rows)
+    controller = _load_coverage_controller_from_conn(
+        conn,
+        source_name=source_name,
+        source_names=sorted({str(row.get("source_name") or "") for row in enriched_rows if row.get("source_name")}),
+    )
     plan_mode, telemetry_sample_count = _coverage_planner_mode(conn)
     rows = _build_coverage_plan_rows(conn, cfg, selected=selected, coverage_rows=enriched_rows, limit=limit)
     return {
@@ -518,6 +596,7 @@ def load_coverage_plan_from_conn(
         "plan_mode": plan_mode,
         "telemetry_sample_count": telemetry_sample_count,
         "bootstrap_threshold": _PLANNER_BOOTSTRAP_THRESHOLD,
+        "controller": controller,
         "rows": rows[:limit],
         "recommended_tickers": [str(row["ticker"]) for row in rows[:limit]],
         "summary": {
@@ -1053,6 +1132,24 @@ def _endpoint_family_for(*, source_name: str, block_class: str) -> str:
     return f"{normalized_source or 'unknown'}_artifact"
 
 
+def _document_type_hint_for_source(source_name: str) -> str | None:
+    normalized_source = source_name.strip().lower()
+    if normalized_source == "idx_financial_reports":
+        return "financial_statement"
+    if normalized_source == "idx_disclosures":
+        return "material_disclosure"
+    return None
+
+
+def _download_endpoint_family_for(source_name: str) -> str:
+    normalized_source = source_name.strip().lower()
+    if normalized_source == "idx_financial_reports":
+        return "idx_financial_reports_artifact"
+    if normalized_source == "idx_disclosures":
+        return "idx_disclosures_attachment"
+    return f"{normalized_source or 'unknown'}_artifact"
+
+
 def _load_selected_coverage_rows(
     conn: sqlite3.Connection,
     selected: list[str],
@@ -1204,6 +1301,166 @@ def _retry_ready(row: dict[str, object]) -> bool:
         return True
 
 
+def _load_coverage_controller_from_conn(
+    conn: sqlite3.Connection,
+    *,
+    source_name: str | None = None,
+    source_names: Iterable[str] | None = None,
+) -> dict[str, object]:
+    selected_sources = sorted({str(item) for item in (source_names or []) if str(item).strip()})
+    if source_name and source_name not in selected_sources:
+        selected_sources.append(source_name)
+    if not selected_sources:
+        rows = conn.execute(
+            """
+            SELECT source_name, result_class, delay_applied_ms, created_at
+            FROM coverage_request_telemetry
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (_PACING_LOOKBACK_LIMIT,),
+        ).fetchall()
+    else:
+        placeholders = ",".join("?" for _ in selected_sources)
+        rows = conn.execute(
+            f"""
+            SELECT source_name, result_class, delay_applied_ms, created_at
+            FROM coverage_request_telemetry
+            WHERE source_name IN ({placeholders})
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (*selected_sources, _PACING_LOOKBACK_LIMIT),
+        ).fetchall()
+    parsed_rows = [dict(row) for row in rows]
+    sample_count = len(parsed_rows)
+    friction_count = sum(1 for row in parsed_rows if _telemetry_is_friction(str(row.get("result_class") or "")))
+    consecutive_friction = 0
+    for row in parsed_rows:
+        if _telemetry_is_friction(str(row.get("result_class") or "")):
+            consecutive_friction += 1
+            continue
+        break
+    friction_rate = (friction_count / sample_count) if sample_count else 0.0
+    mode = "bootstrap" if sample_count < _PACING_BOOTSTRAP_THRESHOLD else "adaptive"
+    source_health = "bootstrap" if mode == "bootstrap" else "healthy"
+    recommended_delay_ms = _BOOTSTRAP_DELAY_MS if mode == "bootstrap" else _HEALTHY_DELAY_MS
+    recommended_limit_cap: int | None = None
+    cooldown_until: str | None = None
+    if mode == "adaptive":
+        if consecutive_friction >= 3 or friction_rate >= 0.5:
+            source_health = "constrained"
+            recommended_delay_ms = _CONSTRAINED_DELAY_MS
+            recommended_limit_cap = 3
+            if parsed_rows:
+                cooldown_until = (
+                    datetime.fromisoformat(str(parsed_rows[0]["created_at"])) + timedelta(minutes=30)
+                ).isoformat()
+        elif consecutive_friction >= 2 or friction_rate >= 0.25:
+            source_health = "degraded"
+            recommended_delay_ms = _DEGRADED_DELAY_MS
+            recommended_limit_cap = 5
+            if parsed_rows:
+                cooldown_until = (
+                    datetime.fromisoformat(str(parsed_rows[0]["created_at"])) + timedelta(minutes=10)
+                ).isoformat()
+    source_breakdown: list[dict[str, object]] = []
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in parsed_rows:
+        grouped.setdefault(str(row.get("source_name") or "unknown"), []).append(row)
+    for key, values in sorted(grouped.items()):
+        group_sample_count = len(values)
+        group_friction_count = sum(1 for row in values if _telemetry_is_friction(str(row.get("result_class") or "")))
+        source_breakdown.append(
+            {
+                "source_name": key,
+                "sample_count": group_sample_count,
+                "friction_count": group_friction_count,
+                "friction_rate": round(group_friction_count / group_sample_count, 3) if group_sample_count else 0.0,
+            }
+        )
+    return {
+        "plan_mode": mode,
+        "source_health": source_health,
+        "sample_count": sample_count,
+        "bootstrap_threshold": _PACING_BOOTSTRAP_THRESHOLD,
+        "friction_count": friction_count,
+        "friction_rate": round(friction_rate, 3),
+        "consecutive_friction_count": consecutive_friction,
+        "recommended_delay_ms": recommended_delay_ms,
+        "recommended_limit_cap": recommended_limit_cap,
+        "cooldown_until": cooldown_until,
+        "source_breakdown": source_breakdown,
+    }
+
+
+def _telemetry_is_friction(result_class: str) -> bool:
+    return result_class in {"http_403", "challenge", "timeout"}
+
+
+def _controller_effective_limit(*, controller: dict[str, object], action: str, requested_limit: int) -> int:
+    if action not in {"discover-missing", "download-missing", "rerun-blocked"}:
+        return requested_limit
+    cap = controller.get("recommended_limit_cap")
+    if cap is None:
+        return requested_limit
+    return max(1, min(requested_limit, int(cap)))
+
+
+def _persist_coverage_request_telemetry(
+    conn: sqlite3.Connection,
+    *,
+    events: list[CoverageTelemetryEvent],
+) -> None:
+    for event in events:
+        payload_json = json.dumps(event.payload, sort_keys=True)
+        conn.execute(
+            """
+            INSERT INTO coverage_request_telemetry (
+                telemetry_id, action, source_name, endpoint_family, transport_mode, ticker,
+                document_type, candidate_id, document_id, result_class, http_status, latency_ms,
+                delay_applied_ms, controller_mode, source_health, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _stable_id(
+                    "coverage-telemetry",
+                    event.action,
+                    event.source_name or "",
+                    event.endpoint_family or "",
+                    event.transport_mode or "",
+                    event.ticker or "",
+                    event.candidate_id or "",
+                    event.document_id or "",
+                    event.result_class,
+                    event.created_at,
+                ),
+                event.action,
+                event.source_name,
+                event.endpoint_family,
+                event.transport_mode,
+                event.ticker,
+                event.document_type,
+                event.candidate_id,
+                event.document_id,
+                event.result_class,
+                event.http_status,
+                event.latency_ms,
+                event.delay_applied_ms,
+                event.controller_mode,
+                event.source_health,
+                payload_json,
+                event.created_at,
+            ),
+        )
+
+
+def _sleep_for_controller(delay_ms: int) -> None:
+    if delay_ms <= 0:
+        return
+    time.sleep(delay_ms / 1000.0)
+
+
 def _build_action_plan(
     conn: sqlite3.Connection,
     selected: list[str],
@@ -1272,7 +1529,7 @@ def _count_current_snapshots(conn: sqlite3.Connection, *, selected: list[str]) -
 
 
 def _coverage_planner_mode(conn: sqlite3.Connection) -> tuple[str, int]:
-    row = conn.execute("SELECT COUNT(*) AS count FROM artifact_access_state").fetchone()
+    row = conn.execute("SELECT COUNT(*) AS count FROM coverage_request_telemetry").fetchone()
     telemetry_sample_count = int(row["count"] or 0)
     if telemetry_sample_count < _PLANNER_BOOTSTRAP_THRESHOLD:
         return "bootstrap", telemetry_sample_count
@@ -1307,6 +1564,10 @@ def _build_coverage_plan_rows(
     issuer_map = {str(row["ticker"]): dict(row) for row in issuer_rows}
     watchlist = _effective_watchlist(cfg)
     plan_mode, telemetry_sample_count = _coverage_planner_mode(conn)
+    controller = _load_coverage_controller_from_conn(
+        conn,
+        source_names=sorted({str(row.get("source_name") or "") for row in coverage_rows if row.get("source_name")}),
+    )
     rows_by_ticker: dict[str, list[dict[str, object]]] = {}
     for row in coverage_rows:
         rows_by_ticker.setdefault(str(row["ticker"]), []).append(row)
@@ -1361,6 +1622,8 @@ def _build_coverage_plan_rows(
                 "on_watchlist": ticker in watchlist,
                 "plan_mode": plan_mode,
                 "telemetry_sample_count": telemetry_sample_count,
+                "controller_health": controller.get("source_health"),
+                "recommended_delay_ms": controller.get("recommended_delay_ms"),
                 "recommended_actions": recommended_actions,
                 "recommended_command": f"coverage-run {recommended_actions[0]} --scope ticker-set --ticker {ticker}" if recommended_actions else None,
             }
@@ -1395,6 +1658,7 @@ def _persist_coverage_plan_generated(conn: sqlite3.Connection, *, plan: dict[str
                     "recommended_tickers": plan.get("recommended_tickers") or [],
                     "telemetry_sample_count": plan.get("telemetry_sample_count"),
                     "bootstrap_threshold": plan.get("bootstrap_threshold"),
+                    "controller": plan.get("controller") or {},
                 },
                 sort_keys=True,
             ),
@@ -1456,6 +1720,7 @@ def _persist_coverage_plan_action_event(
                     "extra_targeted_tickers": extra_targeted,
                     "telemetry_sample_count": plan.get("telemetry_sample_count"),
                     "bootstrap_threshold": plan.get("bootstrap_threshold"),
+                    "controller": plan.get("controller") or {},
                 },
                 sort_keys=True,
             ),
@@ -1561,6 +1826,9 @@ def _run_discover_for_scope(
     date_from: date,
     date_to: date,
     source_name: str | None = None,
+    controller_mode: str = "bootstrap",
+    source_health: str = "bootstrap",
+    delay_ms: int = 0,
 ) -> int:
     targets = {ticker.upper() for ticker in target_tickers}
     if not targets:
@@ -1574,10 +1842,49 @@ def _run_discover_for_scope(
         for adapter in adapters:
             window = DiscoveryWindow(start=date_from, end=date_to)
             if adapter.name == "idx_financial_reports":
-                candidates = _discover_financial_reports_for_tickers(cfg, target_tickers=sorted(targets), window=window)
+                candidates, events = _discover_financial_reports_for_tickers(
+                    cfg,
+                    target_tickers=sorted(targets),
+                    window=window,
+                    controller_mode=controller_mode,
+                    source_health=source_health,
+                    delay_ms=delay_ms,
+                )
             else:
-                candidates = [candidate for candidate in adapter.discover(window) if (candidate.ticker or "").upper() in targets]
+                started_at = datetime.now(timezone.utc)
+                result_class = "success"
+                http_status: int | None = None
+                payload: dict[str, object] = {"target_ticker_count": len(targets)}
+                try:
+                    candidates = [candidate for candidate in adapter.discover(window) if (candidate.ticker or "").upper() in targets]
+                except Exception as exc:  # noqa: BLE001
+                    candidates = []
+                    result_class, http_status = _telemetry_result_from_exception(exc)
+                    payload["error_detail"] = str(exc)
+                latency_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+                events = [
+                    CoverageTelemetryEvent(
+                        action="discover-missing",
+                        source_name=adapter.name,
+                        endpoint_family=f"{adapter.name}_discovery",
+                        transport_mode="browser" if adapter.name.startswith("idx_") else "http",
+                        ticker=None,
+                        document_type=None,
+                        candidate_id=None,
+                        document_id=None,
+                        result_class=result_class,
+                        http_status=http_status,
+                        latency_ms=latency_ms,
+                        delay_applied_ms=delay_ms,
+                        controller_mode=controller_mode,
+                        source_health=source_health,
+                        payload=payload,
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                ]
             result = wq.submit(lambda conn, c=candidates: persist_document_candidates(conn, c))
+            if events:
+                wq.submit(lambda conn, e=events: _persist_coverage_request_telemetry(conn, events=e))
             wq.submit(
                 lambda conn, a=adapter, w=window, cnt=len(candidates): persist_watermark(
                     conn,
@@ -1596,7 +1903,10 @@ def _discover_financial_reports_for_tickers(
     *,
     target_tickers: list[str],
     window: DiscoveryWindow,
-) -> list[object]:
+    controller_mode: str,
+    source_health: str,
+    delay_ms: int,
+) -> tuple[list[object], list[CoverageTelemetryEvent]]:
     adapter = IDXFinancialReportAdapter()
     session = PlaywrightSession(
         profile_dir=cfg.browser.profile_dir,
@@ -1608,10 +1918,12 @@ def _discover_financial_reports_for_tickers(
     )
     year = adapter._resolve_year(window)
     candidates = []
+    events: list[CoverageTelemetryEvent] = []
     seen_record_ids: set[str] = set()
     with session.open_page(page_url=adapter.public_url) as page:
         for ticker in target_tickers:
             for report_type in adapter.report_types:
+                _sleep_for_controller(delay_ms)
                 first_url = adapter._build_api_url(
                     year=year,
                     page_size=adapter.default_page_size,
@@ -1619,13 +1931,27 @@ def _discover_financial_reports_for_tickers(
                     report_type=report_type,
                     kode_emiten=ticker,
                 )
-                first = adapter._fetch_payload(session=session, page=page, api_url=first_url)
+                first = _fetch_financial_payload_with_telemetry(
+                    adapter=adapter,
+                    session=session,
+                    page=page,
+                    api_url=first_url,
+                    ticker=ticker,
+                    report_type=report_type,
+                    delay_ms=delay_ms,
+                    controller_mode=controller_mode,
+                    source_health=source_health,
+                    events=events,
+                )
+                if first is None:
+                    continue
                 pages = adapter._total_pages(
                     result_count=int(first.get("ResultCount") or 0),
                     page_size=adapter.default_page_size,
                 )
                 payloads = [first]
                 for page_no in range(2, pages + 1):
+                    _sleep_for_controller(delay_ms)
                     next_url = adapter._build_api_url(
                         year=year,
                         page_size=adapter.default_page_size,
@@ -1633,7 +1959,21 @@ def _discover_financial_reports_for_tickers(
                         report_type=report_type,
                         kode_emiten=ticker,
                     )
-                    payloads.append(adapter._fetch_payload(session=session, page=page, api_url=next_url))
+                    next_payload = _fetch_financial_payload_with_telemetry(
+                        adapter=adapter,
+                        session=session,
+                        page=page,
+                        api_url=next_url,
+                        ticker=ticker,
+                        report_type=report_type,
+                        delay_ms=delay_ms,
+                        controller_mode=controller_mode,
+                        source_health=source_health,
+                        events=events,
+                    )
+                    if next_payload is None:
+                        continue
+                    payloads.append(next_payload)
                 for payload in payloads:
                     for candidate in parse_financial_report_json(payload):
                         if (candidate.ticker or "").upper() != ticker:
@@ -1642,7 +1982,65 @@ def _discover_financial_reports_for_tickers(
                             continue
                         seen_record_ids.add(candidate.source_record_id)
                         candidates.append(candidate)
-    return candidates
+    return candidates, events
+
+
+def _fetch_financial_payload_with_telemetry(
+    *,
+    adapter: IDXFinancialReportAdapter,
+    session: PlaywrightSession,
+    page: object,
+    api_url: str,
+    ticker: str,
+    report_type: str,
+    delay_ms: int,
+    controller_mode: str,
+    source_health: str,
+    events: list[CoverageTelemetryEvent],
+) -> dict[str, object] | None:
+    started_at = datetime.now(timezone.utc)
+    result_class = "success"
+    http_status: int | None = None
+    payload_json: dict[str, object] = {"report_type": report_type, "api_url": api_url}
+    try:
+        payload = adapter._fetch_payload(session=session, page=page, api_url=api_url)
+    except Exception as exc:  # noqa: BLE001
+        payload = None
+        result_class, http_status = _telemetry_result_from_exception(exc)
+        payload_json["error_detail"] = str(exc)
+    latency_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+    events.append(
+        CoverageTelemetryEvent(
+            action="discover-missing",
+            source_name="idx_financial_reports",
+            endpoint_family="idx_financial_reports_api",
+            transport_mode="browser",
+            ticker=ticker,
+            document_type="financial_statement",
+            candidate_id=None,
+            document_id=None,
+            result_class=result_class,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            delay_applied_ms=delay_ms,
+            controller_mode=controller_mode,
+            source_health=source_health,
+            payload=payload_json,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+    return payload
+
+
+def _telemetry_result_from_exception(exc: Exception) -> tuple[str, int | None]:
+    message = str(exc).lower()
+    if "status 403" in message or "http_403" in message:
+        return "http_403", 403
+    if "cloudflare" in message or "blocked" in message or "challenge" in message:
+        return "challenge", None
+    if "timeout" in message or "timed out" in message:
+        return "timeout", None
+    return "error", None
 
 
 def _prioritize_candidate_ids(conn: sqlite3.Connection, candidate_ids: list[str]) -> list[str]:
@@ -1706,7 +2104,14 @@ def _financial_candidate_priority(row: dict[str, object]) -> tuple[int, str]:
     return rank, title
 
 
-def _run_download_for_scope(cfg: Config, *, candidate_ids: list[str]) -> int:
+def _run_download_for_scope(
+    cfg: Config,
+    *,
+    candidate_ids: list[str],
+    controller_mode: str = "bootstrap",
+    source_health: str = "bootstrap",
+    delay_ms: int = 0,
+) -> int:
     if not candidate_ids:
         return 0
     with WriterQueue(cfg) as wq, AttachmentDownloader(cfg) as downloader:
@@ -1742,6 +2147,7 @@ def _run_download_for_scope(cfg: Config, *, candidate_ids: list[str]) -> int:
                 resources = _resources_for_candidate(candidate)
                 existing_downloads = _existing_downloads_for_candidate(reader, candidate)
                 for resource in resources:
+                    _sleep_for_controller(delay_ms)
                     state = _resource_state_for_candidate(reader, candidate, resource)
                     existing = existing_downloads.get(resource.source_file_id)
                     if not _should_fetch_resource(
@@ -1762,8 +2168,47 @@ def _run_download_for_scope(cfg: Config, *, candidate_ids: list[str]) -> int:
                         failure = _attempt_from_exception(exc, started_at=started_at, finished_at=finished_at)
                         wq.submit(lambda conn, c=candidate, r=resource, a=failure: _persist_download_attempt(conn, candidate=c, resource=r, attempt=a))
                         wq.submit(lambda conn, c=candidate, r=resource, a=failure: _upsert_download_resource(conn, cfg=cfg, candidate=c, resource=r, status=a.status, document_id=None, attempt=a))
+                        telemetry = CoverageTelemetryEvent(
+                            action="download-missing",
+                            source_name=candidate.source_name,
+                            endpoint_family=_download_endpoint_family_for(candidate.source_name),
+                            transport_mode="browser" if _requires_browser_session(resource.attachment_url) else "http",
+                            ticker=candidate.ticker,
+                            document_type=_document_type_hint_for_source(candidate.source_name),
+                            candidate_id=candidate.candidate_id,
+                            document_id=None,
+                            result_class=failure.error_code or failure.status,
+                            http_status=failure.http_status,
+                            latency_ms=int((finished_at - started_at).total_seconds() * 1000),
+                            delay_applied_ms=delay_ms,
+                            controller_mode=controller_mode,
+                            source_health=source_health,
+                            payload={"resource_url": resource.attachment_url, "status": failure.status},
+                            created_at=finished_at.isoformat(),
+                        )
+                        wq.submit(lambda conn, e=telemetry: _persist_coverage_request_telemetry(conn, events=[e]))
                         continue
                     if fetched is None:
+                        finished_at = datetime.now(timezone.utc)
+                        telemetry = CoverageTelemetryEvent(
+                            action="download-missing",
+                            source_name=candidate.source_name,
+                            endpoint_family=_download_endpoint_family_for(candidate.source_name),
+                            transport_mode="browser" if _requires_browser_session(resource.attachment_url) else "http",
+                            ticker=candidate.ticker,
+                            document_type=_document_type_hint_for_source(candidate.source_name),
+                            candidate_id=candidate.candidate_id,
+                            document_id=None,
+                            result_class="not_modified",
+                            http_status=304,
+                            latency_ms=int((finished_at - started_at).total_seconds() * 1000),
+                            delay_applied_ms=delay_ms,
+                            controller_mode=controller_mode,
+                            source_health=source_health,
+                            payload={"resource_url": resource.attachment_url},
+                            created_at=finished_at.isoformat(),
+                        )
+                        wq.submit(lambda conn, e=telemetry: _persist_coverage_request_telemetry(conn, events=[e]))
                         continue
                     persist = wq.submit(lambda conn, c=candidate, r=resource, f=fetched: _persist_download(conn, candidate=c, resource=r, fetched=f))
                     finished_at = datetime.now(timezone.utc)
@@ -1776,6 +2221,25 @@ def _run_download_for_scope(cfg: Config, *, candidate_ids: list[str]) -> int:
                     )
                     wq.submit(lambda conn, c=candidate, r=resource, a=success_attempt: _persist_download_attempt(conn, candidate=c, resource=r, attempt=a))
                     wq.submit(lambda conn, c=candidate, r=resource, d=persist.document_id, a=success_attempt: _upsert_download_resource(conn, cfg=cfg, candidate=c, resource=r, status="downloaded", document_id=d, attempt=a))
+                    telemetry = CoverageTelemetryEvent(
+                        action="download-missing",
+                        source_name=candidate.source_name,
+                        endpoint_family=_download_endpoint_family_for(candidate.source_name),
+                        transport_mode="browser" if _requires_browser_session(resource.attachment_url) else "http",
+                        ticker=candidate.ticker,
+                        document_type=_document_type_hint_for_source(candidate.source_name),
+                        candidate_id=candidate.candidate_id,
+                        document_id=persist.document_id,
+                        result_class="success",
+                        http_status=200,
+                        latency_ms=int((finished_at - started_at).total_seconds() * 1000),
+                        delay_applied_ms=delay_ms,
+                        controller_mode=controller_mode,
+                        source_health=source_health,
+                        payload={"resource_url": resource.attachment_url, "persisted": bool(persist.inserted)},
+                        created_at=finished_at.isoformat(),
+                    )
+                    wq.submit(lambda conn, e=telemetry: _persist_coverage_request_telemetry(conn, events=[e]))
                     result += 1
         finally:
             reader.close()
