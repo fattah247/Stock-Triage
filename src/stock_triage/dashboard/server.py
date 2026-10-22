@@ -51,6 +51,7 @@ from .runs import (
     stop_process,
     summarize_run,
 )
+from .market import load_market_view
 from .snapshot import load_company_detail, load_section_detail, load_snapshot_lite
 
 
@@ -423,6 +424,9 @@ def _handler_factory():
                     return
                 detail = load_company_detail(self.server.cfg, ticker)
                 self._write_json(HTTPStatus.OK, detail, emit_body=emit_body)
+                return
+            if parsed.path == "/api/market":
+                self._write_json(HTTPStatus.OK, load_market_view(self.server.cfg), emit_body=emit_body)
                 return
             if parsed.path == "/api/rerun-preview":
                 params = parse_qs(parsed.query)

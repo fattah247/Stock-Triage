@@ -14,8 +14,10 @@ from . import (
     alerts_canary,
     coverage as coverage_cmd,
     dashboard as dashboard_cmd,
+    discovery as discovery_cmd,
     hardening as hardening_cmd,
     intelligence as intelligence_cmd,
+    market as market_cmd,
     pipeline,
     summary as summary_cmd,
 )
@@ -28,6 +30,8 @@ _MODULES = (
     alerts_canary,
     hardening_cmd,
     intelligence_cmd,
+    market_cmd,
+    discovery_cmd,
 )
 
 

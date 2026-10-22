@@ -10,7 +10,7 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
-STATIC_ASSET_NAMES = ("app.css", "app.js")
+STATIC_ASSET_NAMES = ("app.css", "app.js", "market.js")
 
 
 def render_dashboard_html(

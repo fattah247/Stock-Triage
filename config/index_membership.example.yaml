@@ -1,0 +1,12 @@
+# Index membership for the exposure ranking (docs/market_risk_plan.md, component 4).
+#
+# Copy to <paths.data_dir>/index_membership.yaml (default data/index_membership.yaml)
+# and list current constituents from the index providers' own pages. Members of
+# a widely tracked index score higher, because index funds sell them first when
+# foreign money leaves. Lists change at each review, so update them after MSCI's
+# and IDX's review announcements (see the risk calendar).
+
+indexes:
+  # MSCI Indonesia: [BBCA, BBRI, ...]
+  # LQ45: [...]
+  # IDX30: [...]

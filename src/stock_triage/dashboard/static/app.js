@@ -70,8 +70,11 @@
   const companyOverview = document.getElementById("companyOverview");
   const companyStats = document.getElementById("companyStats");
   const marketMonitor = document.getElementById("marketMonitor");
+  const marketState = document.getElementById("marketState");
   const documentList = document.getElementById("documentList");
   const metricList = document.getElementById("metricList");
+  const keyFigures = document.getElementById("keyFigures");
+  const exposureCard = document.getElementById("exposureCard");
   const findingList = document.getElementById("findingList");
   const revisionList = document.getElementById("revisionList");
   const snapshotList = document.getElementById("snapshotList");
@@ -237,6 +240,256 @@
   function renderTimestamp(value) {
     if (!value) return "";
     return `<span class="timeLabel" title="${esc(absoluteTime(value))}">${esc(relativeTime(value))}</span>`;
+  }
+
+  // A filing's date reads better as a date; the relative age stays in the tooltip.
+  function renderDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return esc(value);
+    const label = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(date);
+    return `<span class="timeLabel" title="${esc(relativeTime(value))}">${esc(label)}</span>`;
+  }
+
+  const METRIC_LABELS = {
+    revenue: "Revenue",
+    gross_profit: "Gross profit",
+    operating_profit: "Operating profit",
+    net_profit: "Net profit",
+    net_income: "Net income",
+    total_assets: "Total assets",
+    total_liabilities: "Total liabilities",
+    equity: "Total equity",
+    operating_cash_flow: "Operating cash flow",
+    free_cash_flow: "Free cash flow",
+    capex: "Capital expenditure",
+    cash: "Cash and equivalents",
+    short_term_debt: "Short-term debt",
+    long_term_debt: "Long-term debt",
+    net_debt: "Net debt",
+    share_count: "Shares outstanding",
+    ebitda: "EBITDA",
+    interest_expense: "Interest expense",
+    interest_coverage: "Interest coverage",
+    receivables: "Receivables",
+    inventory: "Inventory",
+    segment_revenue: "Segment revenue",
+    segment_profit: "Segment profit",
+  };
+  // Headline figures for the company summary, in reading order.
+  const KEY_FIGURES = [
+    "revenue",
+    "net_profit",
+    "operating_profit",
+    "operating_cash_flow",
+    "total_assets",
+    "total_liabilities",
+    "equity",
+    "cash",
+  ];
+  const CURRENCY_PREFIX = { IDR: "Rp ", USD: "US$ " };
+  const COMPACT_SCALES = [
+    [1e12, "tn"],
+    [1e9, "bn"],
+    [1e6, "m"],
+  ];
+
+  function metricLabel(name) {
+    const text = String(name || "metric");
+    return METRIC_LABELS[text] || text.charAt(0).toUpperCase() + text.slice(1).replaceAll("_", " ");
+  }
+
+  function formatCompact(value) {
+    const number = Number(value);
+    if (value == null || !Number.isFinite(number)) return "—";
+    const abs = Math.abs(number);
+    const sign = number < 0 ? "\u2212" : "";
+    for (const [size, suffix] of COMPACT_SCALES) {
+      if (abs >= size) {
+        return `${sign}${(abs / size).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${suffix}`;
+      }
+    }
+    return `${sign}${abs.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  }
+
+  function formatMetricValue(item) {
+    const number = Number(item.value_normalized);
+    if (item.value_normalized == null || !Number.isFinite(number)) return "—";
+    if (item.unit_scale === "ratio" || item.metric_name === "interest_coverage") return `${number.toFixed(1)}\u00d7`;
+    if (item.metric_name === "share_count") return `${formatCompact(number)} shares`;
+    const prefix = CURRENCY_PREFIX[item.currency] ?? (item.currency ? `${item.currency} ` : "");
+    const compact = formatCompact(number);
+    return compact.startsWith("\u2212") ? `\u2212${prefix}${compact.slice(1)}` : `${prefix}${compact}`;
+  }
+
+  function exactMetricValue(item) {
+    const number = Number(item.value_normalized);
+    if (item.value_normalized == null || !Number.isFinite(number)) return "";
+    return `${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}${item.currency ? ` ${item.currency}` : ""}`;
+  }
+
+  function periodLabel(item) {
+    if (!item.fiscal_year) return item.fiscal_period || "";
+    return !item.fiscal_period || item.fiscal_period === "Annual" ? `FY ${item.fiscal_year}` : `${item.fiscal_period} ${item.fiscal_year}`;
+  }
+
+  // Headline figures first, in KEY_FIGURES order, then the rest by label.
+  function metricReadingOrder(a, b) {
+    const rank = (item) => {
+      const index = KEY_FIGURES.indexOf(item.metric_name);
+      return index === -1 ? KEY_FIGURES.length : index;
+    };
+    return rank(a) - rank(b) || metricLabel(a.metric_name).localeCompare(metricLabel(b.metric_name));
+  }
+
+  function renderKeyFigures(metrics, docs) {
+    const byName = new Map(metrics.map((item) => [item.metric_name, item]));
+    const shown = KEY_FIGURES.map((name) => byName.get(name)).filter(Boolean);
+    if (!shown.length) return "";
+    const periods = new Set(shown.map(periodLabel));
+    const sharedPeriod = periods.size === 1 ? [...periods][0] : null;
+    const sources = [...new Set(shown.map((item) => item.document_id))]
+      .map((documentId) => docs.find((doc) => doc.document_id === documentId))
+      .filter(Boolean)
+      .map((doc) => `${esc(doc.title || doc.document_type || "filing")}${doc.filed_at ? ` · filed ${renderDate(doc.filed_at)}` : ""}`);
+    return `
+      <div class="meta keyFigureCaption">${sharedPeriod ? `${esc(sharedPeriod)}` : "Latest reported periods"}<span class="hoverHint"> · hover a figure for its exact value</span></div>
+      <div class="keyFigureGrid">${shown
+        .map(
+          (item) => `
+            <div class="keyFigure">
+              <div class="summaryLabel">${esc(metricLabel(item.metric_name))}</div>
+              <strong class="${Number(item.value_normalized) < 0 ? "negative" : ""}" title="${esc(exactMetricValue(item))}">${esc(formatMetricValue(item))}</strong>
+              ${sharedPeriod ? "" : `<div class="meta">${esc(periodLabel(item))}</div>`}
+            </div>`
+        )
+        .join("")}</div>
+      ${sources.length ? `<div class="meta keyFigureSource">Source: ${sources.join("; ")}</div>` : ""}
+    `;
+  }
+
+  const REGIME_LABELS = { calm: "Calm", elevated: "Elevated", stressed: "Stressed", crisis: "Crisis" };
+
+  function renderMarketState(risk) {
+    const state = risk?.state || null;
+    const regime = state?.regime || null;
+    const drivers = (state?.drivers || []).slice(0, 3);
+    const upcoming = risk?.upcoming || [];
+    const exposed = risk?.most_exposed || [];
+    const close = state?.composite_close;
+    const asOf = state
+      ? `IHSG ${close != null ? Number(close).toLocaleString("en-US", { maximumFractionDigits: 2 }) : "—"} · close ${renderDate(state.trade_date)}`
+      : "No market data yet. Run market-sync, then market-signals.";
+    return `
+      <div class="marketStateGrid">
+        <div>
+          <div class="marketStateHead">
+            <span class="regimeBadge regime-${esc(regime || "unknown")}">${esc(REGIME_LABELS[regime] || "No data")}</span>
+            <span class="meta">${asOf}</span>
+          </div>
+          ${
+            drivers.length
+              ? `<ul class="marketList">${drivers
+                  .map((item) => `<li><span class="levelTag level-${esc(item.level)}">${esc(item.level)}</span>${esc(item.text || item.signal_name)}</li>`)
+                  .join("")}</ul>`
+              : regime
+                ? `<div class="meta">No signal is above its normal range.</div>`
+                : ""
+          }
+          ${
+            (state?.event_risk || []).length
+              ? `<div class="meta">Event risk: ${state.event_risk.map((item) => `${esc(item.title)} (${renderDate(item.date)})`).join(" · ")}</div>`
+              : ""
+          }
+        </div>
+        <div>
+          <div class="summaryLabel">Next risk dates</div>
+          ${
+            upcoming.length
+              ? `<ul class="marketList">${upcoming.map((item) => `<li>${renderDate(item.date)} · ${esc(item.title)}</li>`).join("")}</ul>`
+              : `<div class="meta">None in the next 30 days.</div>`
+          }
+        </div>
+        <div>
+          <div class="summaryLabel">Crash risk and themes</div>
+          ${renderRiskSummary(risk)}
+        </div>
+        <div>
+          <div class="summaryLabel">${risk?.exposure_scope === "watchlist" ? "Most exposed on the watchlist" : "Most exposed companies"}</div>
+          ${
+            exposed.length
+              ? `<ul class="marketList">${exposed
+                  .map((item) => `<li><strong>${esc(item.ticker)}</strong> ${Math.round(Number(item.score) || 0)}/100${item.top_reason ? ` · ${esc(item.top_reason)}` : ""}</li>`)
+                  .join("")}</ul>`
+              : `<div class="meta">Run exposure-run to rank companies.</div>`
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  // "emerging_finding" or "claim:claim_unresolved" -> "Emerging finding", "Claim unresolved".
+  function humanizeKey(value) {
+    const text = String(value || "").split(":").pop().replaceAll("_", " ").trim();
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
+  }
+
+  // One reason per line reads faster than a run-on joined by dots.
+  function renderReasonList(reasons) {
+    const shown = reasons.filter(Boolean);
+    if (!shown.length) return "";
+    const extra = shown.length > 4 ? `<li class="meta">and ${shown.length - 4} more</li>` : "";
+    return `<ul class="reasonList">${shown.slice(0, 4).map((reason) => `<li>${esc(reason)}</li>`).join("")}${extra}</ul>`;
+  }
+
+  function renderRiskSummary(risk) {
+    const estimate = risk?.crash_risk;
+    const lines = [];
+    if (!estimate) {
+      lines.push(`<li class="meta prose">Run crash-risk after a market backfill.</li>`);
+    } else if (estimate.trustworthy && estimate.probability != null) {
+      lines.push(`<li class="prose"><strong>${Math.round(estimate.probability * 100)}%</strong> chance of a crash · base rate ${Math.round((estimate.base_rate || 0) * 100)}%</li>`);
+    } else if (estimate.analog) {
+      const analog = estimate.analog;
+      lines.push(
+        `<li class="prose">Estimate withheld; today looks most like the ${renderDate(analog.opened_on)} episode, which fell a further ${esc(Number(analog.further_fall_pct || 0).toFixed(1))}%</li>`
+      );
+    } else {
+      lines.push(`<li class="meta prose">Estimate withheld until it beats its base rate.</li>`);
+    }
+    (risk?.active_themes || []).forEach((theme) => {
+      lines.push(`<li><span class="levelTag severity-${esc(theme.severity)}">${esc(theme.severity)}</span>${esc(theme.title)} · ${esc(theme.items)} items</li>`);
+    });
+    if (risk?.findings_open) lines.push(`<li class="prose">${esc(risk.findings_open)} emerging finding${risk.findings_open === 1 ? "" : "s"} to review</li>`);
+    return `<ul class="marketList">${lines.join("")}</ul><button class="linkButton" type="button" data-view="market">Open the Market view</button>`;
+  }
+
+  function renderExposure(exposure) {
+    if (!exposure) {
+      return `<div class="emptyState"><strong>No exposure score yet.</strong> Run <code>exposure-run</code> to rank companies by how fragile they are if the market breaks.</div>`;
+    }
+    const components = exposure.components || [];
+    const scored = components.filter((item) => Number(item.points) > 0).sort((a, b) => Number(b.points) - Number(a.points));
+    const notes = components.filter((item) => !Number(item.points));
+    const score = Math.round(Number(exposure.score) || 0);
+    const band = score >= 85 ? "exposureHigh" : score >= 70 ? "exposureWarn" : "exposureLow";
+    const source = exposure.source === "xlsx" ? "from the IDX workbook" : exposure.source ? "from PDF text" : "";
+    return `
+      <div class="exposureHeader">
+        <div class="exposureScore ${band}"><strong>${score}</strong><span>/100</span></div>
+        <div class="meta">${[esc(exposure.period || "latest period"), source, exposure.as_of_date ? `scored ${renderDate(exposure.as_of_date)}` : ""]
+          .filter(Boolean)
+          .join(" · ")}</div>
+      </div>
+      ${
+        scored.length
+          ? `<ul class="exposureReasons">${scored
+              .map((item) => `<li><span class="exposurePoints">+${esc(item.points)}</span>${esc(item.reason)}</li>`)
+              .join("")}</ul>`
+          : `<div class="meta">No fragility found in the latest figures.</div>`
+      }
+      ${notes.length ? `<div class="meta">${notes.map((item) => esc(item.reason)).join(" · ")}</div>` : ""}
+    `;
   }
 
   function formatNumber(value, digits = 1) {
@@ -549,7 +802,7 @@
     try {
       const prefs = JSON.parse(window.localStorage.getItem(VIEW_PREFS_KEY) || "null");
       if (!prefs || typeof prefs !== "object") return;
-      if (["home", "company", "review", "ops"].includes(prefs.activeView)) state.activeView = prefs.activeView;
+      if (["home", "market", "company", "review", "ops"].includes(prefs.activeView)) state.activeView = prefs.activeView;
       if (prefs.subviews && typeof prefs.subviews === "object") {
         Object.keys(state.subviews).forEach((scope) => {
           if (typeof prefs.subviews[scope] === "string") state.subviews[scope] = prefs.subviews[scope];
@@ -598,6 +851,7 @@
     if (hint) {
       const hints = {
         home: "Start with ranked names, then open one issuer.",
+        market: "The whole market: state, charts, crash risk, themes and episodes.",
         company: "Move from summary to filings, signals, and context.",
         review: "Resolve or snooze grouped issue families here.",
         ops: "Run actions, inspect system health, and audit checks here.",
@@ -610,6 +864,11 @@
           eyebrow: "Decision Flow",
           title: "Start from ranked market decisions, not from raw documents.",
           lead: "Use Home in three passes: ranked board first, watchlist second, recent changes last.",
+        },
+        market: {
+          eyebrow: "Market",
+          title: "Read the whole market before any one company.",
+          lead: "The market state and what drives it, IHSG and its sectors, the crash-risk estimate with its record, and the themes nobody is tracking yet.",
         },
         company: {
           eyebrow: "Company Workspace",
@@ -638,9 +897,34 @@
       fetchSectionDetail("digest");
     }
     if (view === "review") fetchSectionDetail("review");
+    if (view === "market") fetchMarketView();
     if (view === "ops") {
       fetchSectionDetail("ops");
       fetchRerunPreview();
+    }
+  }
+
+  async function fetchMarketView(force = false) {
+    const host = document.getElementById("marketView");
+    if (!host || !window.StockTriageMarket) return;
+    const fresh = state._marketLoadedAt && Date.now() - state._marketLoadedAt < 5 * 60 * 1000;
+    if ((fresh && !force) || state._marketLoading) return;
+    if (!snapshotEndpoint) {
+      host.innerHTML = `<div class="emptyState"><strong>The Market view needs the live dashboard.</strong> Open it with <code>dashboard-serve</code>.</div>`;
+      return;
+    }
+    state._marketLoading = true;
+    host.classList.add("loading");
+    try {
+      const response = await fetch("/api/market");
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      window.StockTriageMarket.render(host, await response.json());
+      state._marketLoadedAt = Date.now();
+    } catch (error) {
+      host.innerHTML = `<div class="emptyState"><strong>Could not load the market view.</strong> ${esc(error.message || error)}</div>`;
+    } finally {
+      state._marketLoading = false;
+      host.classList.remove("loading");
     }
   }
 
@@ -668,7 +952,11 @@
     const selectedTicker = selectedIssuer?.ticker || null;
     const docs = data.documents
       .filter((item) => (selectedTicker ? item.ticker === selectedTicker : false))
-      .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+      .sort(
+        (a, b) =>
+          String(b.filed_at || "").localeCompare(String(a.filed_at || "")) ||
+          String(b.updated_at || "").localeCompare(String(a.updated_at || ""))
+      );
     const metrics = data.metrics
       .filter((item) => (selectedTicker ? item.ticker === selectedTicker : false))
       .sort((a, b) => String(a.metric_name || "").localeCompare(String(b.metric_name || "")));
@@ -724,6 +1012,9 @@
       .sort((a, b) => (b.urgencyScore - a.urgencyScore) || String(a.ticker).localeCompare(String(b.ticker)));
     renderSelectedIssuerCard(selectedIssuer, companySnapshot);
 
+    if (marketState) {
+      marketState.innerHTML = renderMarketState(data.market_monitor?.market_risk);
+    }
     if (marketMonitor) {
       const counts = marketData.counts || {};
       const coverage = marketData.coverage_status || {};
@@ -1008,7 +1299,7 @@
                 <div class="issuerName">${esc(item.issuer_name)}</div>
                 <div class="issuerMeta">
                   <span class="${!item.sector || item.sector === "unknown" ? "sectorMissing" : ""}">${esc(item.sector || "unknown")}</span>
-                  <span>${item.latest_document_at ? `filed ${renderTimestamp(item.latest_document_at)}` : item.document_count ? renderTimestamp(item.last_seen_at) : "no filings yet"}</span>
+                  <span>${item.latest_filing_at ? `filed ${renderDate(item.latest_filing_at)}` : item.document_count ? renderTimestamp(item.last_seen_at) : "no filings yet"}</span>
                 </div>
                 <div class="issuerCta">${item.ticker === state.selectedTicker ? "Open in company workspace" : "Select issuer"}</div>
               </article>
@@ -1169,19 +1460,19 @@
             .map(
               (item) => `
                 <article class="findingCard sev-${statusTag(item.priority)}">
-                  <div class="findingClaim">${esc(item.ticker || "-")} · ${esc(item.issue_family || item.item_type)}</div>
-                  <div class="meta">${esc(item.priority)} priority · ${esc(item.status)} · ${esc(item.decision_state || "-")} · grouped ${esc(item.group_count || 1)} · score ${esc(item.rank_score || 0)}</div>
+                  <div class="findingClaim"><strong>${esc(item.ticker || "Market")}</strong> · ${esc(humanizeKey(item.issue_family || item.item_type))}</div>
+                  <div class="meta">${esc(item.priority)} priority · ${esc(item.status)}${item.decision_state ? ` · ${esc(item.decision_state)}` : ""} · ${esc(item.group_count || 1)} item${Number(item.group_count || 1) === 1 ? "" : "s"} · score ${esc(item.rank_score || 0)}</div>
                   ${
                     item.has_persistence
                       ? `<div class="meta"><strong>Persistence:</strong> ${esc(item.persistence_summary || "persistent")} </div>`
                       : ""
                   }
-                  <div class="meta">${(item.reasons || [item.rationale || ""]).map(esc).join(" · ")}</div>
+                  ${renderReasonList(item.reasons || [item.rationale || ""])}
                   <div class="heroBar">
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">artifact</a>` : ""}
                     ${(() => {
                       const ids = esc((item.review_item_ids || [item.review_item_id]).join(","));
-                      const label = esc(`${item.ticker || "-"} ${item.issue_family || item.item_type || ""}`.trim());
+                      const label = esc(`${item.ticker || "Market"} ${humanizeKey(item.issue_family || item.item_type || "")}`.trim());
                       const from = esc(item.status || "open");
                       const button = (status, text, ghost) =>
                         `<button class="miniButton ${ghost ? "ghostButton" : ""}" type="button" data-review-ids="${ids}" data-review-status="${status}" data-review-label="${label}" data-review-from="${from}">${text}</button>`;
@@ -1211,6 +1502,12 @@
       sectorExplorer.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Peer ranks, comparability warnings, and sector leaders appear here per issuer.</div>`;
       documentList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Pick one issuer to review grouped filings here.</div>`;
       metricList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Metrics will appear once the workspace is focused on an issuer.</div>`;
+      if (keyFigures) {
+        keyFigures.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Key figures appear once the workspace is focused on an issuer.</div>`;
+      }
+      if (exposureCard) {
+        exposureCard.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> The exposure score appears once the workspace is focused on an issuer.</div>`;
+      }
       revisionList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Revision history is shown per issuer.</div>`;
       findingList.innerHTML = `<div class="emptyState"><strong>No company selected.</strong> Findings and summaries are scoped to the active issuer.</div>`;
     } else {
@@ -1287,7 +1584,7 @@
         <div class="heroBar">
           <span class="chip">${esc(selectedIssuer.sector || "unknown")} / ${esc(selectedIssuer.subsector || "unknown")}</span>
           <span class="chip">Last seen ${renderTimestamp(selectedIssuer.last_seen_at || "")}</span>
-          <span class="chip">Latest filing ${renderTimestamp(selectedIssuer.latest_document_at || "")}</span>
+          <span class="chip">Latest filing ${renderDate(selectedIssuer.latest_filing_at || "") || "none"}</span>
           ${companySnapshot ? `<span class="chip">FY end ${esc(monthLabel(payload.fiscal_year_end_month || 12))} · ${esc(payload.fiscal_year_end_source || "default")}</span>` : ""}
         </div>
         ${
@@ -1622,7 +1919,7 @@
                             <div class="docTitle">${esc(item.document_type || "document")}<span class="meta"> · ${esc(
                         item.source_record_id || ""
                       )}</span></div>
-                            <div class="meta">${renderTimestamp(item.updated_at || item.retrieved_at || "")}</div>
+                            <div class="meta">${item.filed_at ? `filed ${renderDate(item.filed_at)} · ` : ""}processed ${renderTimestamp(item.updated_at || item.retrieved_at || "")}</div>
                             <div class="tagRow">
                               <span class="tag">${esc(item.process_state || "unknown")}</span>
                               <span class="tag">${esc(item.triggered_rules || 0)} rules</span>
@@ -1679,14 +1976,20 @@
             )
             .join("")}</div>`
         : `<div class="emptyState"><strong>No persisted documents yet.</strong> Run discovery and download for this issuer, then the grouped filings will appear here.</div>`;
+      if (keyFigures) {
+        keyFigures.innerHTML = renderKeyFigures(metrics, docs) || metricsEmptyHtml;
+      }
+      if (exposureCard) {
+        exposureCard.innerHTML = renderExposure((data.exposures || {})[selectedTicker]);
+      }
       metricList.innerHTML = (segmentSummary.length || metrics.length)
         ? `${segmentSummary.length
             ? `<table class="metricTable"><thead><tr><th>Segment</th><th>Revenue</th><th>Revenue share</th><th>Profit</th><th>Revenue Δ</th><th>Profit Δ</th><th>Trend</th><th>Concentration</th></tr></thead><tbody>${segmentSummary
                 .map(
                   (item) =>
-                    `<tr><td>${esc(item.segment_name)}${item.dominant ? `<div class="meta">dominant segment</div>` : ""}</td><td>${esc(
-                      formatNumber(item.revenue, 0)
-                    )}</td><td>${esc(formatPct(item.revenue_share_pct))}</td><td>${esc(formatNumber(item.profit, 0))}</td><td>${esc(
+                    `<tr><td>${esc(item.segment_name)}${item.dominant ? `<div class="meta">dominant segment</div>` : ""}</td><td class="num">${esc(
+                      formatCompact(item.revenue)
+                    )}</td><td class="num">${esc(formatPct(item.revenue_share_pct))}</td><td class="num">${esc(formatCompact(item.profit))}</td><td>${esc(
                       formatPct(item.revenue_change_pct)
                     )}</td><td>${esc(formatPct(item.profit_change_pct))}</td><td>${esc(item.trend || "stable")}</td><td>${esc(
                       item.concentration_risk || "low"
@@ -1694,13 +1997,14 @@
                 )
                 .join("")}</tbody></table>`
             : ""
-          }<table class="metricTable"><thead><tr><th>Metric</th><th>Value</th><th>Period</th></tr></thead><tbody>${metrics
+          }<table class="metricTable"><thead><tr><th>Metric</th><th class="num">Value</th><th>Period</th></tr></thead><tbody>${[...metrics]
+            .sort(metricReadingOrder)
             .slice(0, 80)
             .map(
               (item) =>
-                `<tr><td>${esc(item.metric_name)}</td><td>${esc(item.value_normalized)} ${esc(
-                  item.currency || ""
-                )}</td><td>${esc(item.fiscal_year || "")} ${esc(item.fiscal_period || "")}</td></tr>`
+                `<tr><td>${esc(metricLabel(item.metric_name))}</td><td class="num ${
+                  Number(item.value_normalized) < 0 ? "negative" : ""
+                }" title="${esc(exactMetricValue(item))}">${esc(formatMetricValue(item))}</td><td>${esc(periodLabel(item))}</td></tr>`
             )
             .join("")}</tbody></table>`
         : metricsEmptyHtml;
@@ -1708,7 +2012,7 @@
         ? `<table class="metricTable"><thead><tr><th>Source Record</th><th>Revisions</th><th>Latest</th></tr></thead><tbody>${revisions
             .map(
               (item) =>
-                `<tr><td>${esc(item.source_record_id)}</td><td>${esc(item.revision_count)}</td><td>${renderTimestamp(
+                `<tr><td>${esc(item.source_record_id)}</td><td>${esc(item.revision_count)}</td><td>${renderDate(
                   item.latest_revision_at
                 )}</td></tr>`
             )
@@ -2034,6 +2338,7 @@
       data.metrics = (data.metrics || []).filter((m) => m.ticker !== ticker).concat(detail.metrics || []);
       data.findings = (data.findings || []).filter((f) => f.ticker !== ticker).concat(detail.findings || []);
       data.revisions = (data.revisions || []).filter((r) => r.ticker !== ticker).concat(detail.revisions || []);
+      data.exposures = { ...(data.exposures || {}), [ticker]: detail.exposure || null };
       if (detail.company_snapshot) {
         data.company_snapshots = (data.company_snapshots || []).filter((s) => s.ticker !== ticker).concat([detail.company_snapshot]);
       }

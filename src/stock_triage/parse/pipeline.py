@@ -13,9 +13,11 @@ from pathlib import Path
 import fitz
 
 from ..config import Config
-from ..db import WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
+from ..db import WORKBOOK_PARSE_STRATEGY, WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
+from .workbook import WORKBOOK_MIME_TYPES, WorkbookError, WorkbookSheet, read_workbook
 
 PARSER_VERSION = "phase4-v1"
+WORKBOOK_PARSER_VERSION = "phase4-xlsx-v1"
 CHUNK_TARGET_CHARS = 1500
 
 
@@ -56,6 +58,7 @@ class ParsedDocumentResult:
     parse_confidence: float
     ocr_used: bool
     chunks: list[ChunkRecord]
+    parser_version: str = PARSER_VERSION
 
 
 @dataclass(frozen=True)
@@ -290,6 +293,8 @@ def _select_documents(
 
 
 def _parse_document(cfg: Config, document: ParseDocument) -> ParsedDocumentResult:
+    if document.mime_type in WORKBOOK_MIME_TYPES:
+        return _parse_workbook(document)
     if document.mime_type and document.mime_type != "application/pdf":
         raise ParseError("unsupported_mime", f"Unsupported MIME type: {document.mime_type}")
     if not document.local_path.exists():
@@ -348,6 +353,78 @@ def _parse_document(cfg: Config, document: ParseDocument) -> ParsedDocumentResul
         )
     finally:
         pdf.close()
+
+
+def _parse_workbook(document: ParseDocument) -> ParsedDocumentResult:
+    if not document.local_path.exists():
+        raise ParseError("missing_local_file", f"Local file is missing: {document.local_path}")
+    try:
+        sheets = read_workbook(document.local_path)
+    except WorkbookError as exc:
+        raise ParseError(exc.code, exc.detail) from exc
+    chunks = _build_workbook_chunks(document.document_id, sheets)
+    if not chunks:
+        raise ParseError("parse_empty_text", f"Workbook has no visible rows for {document.document_id}")
+    return ParsedDocumentResult(
+        page_count=len(sheets),
+        parse_strategy=WORKBOOK_PARSE_STRATEGY,
+        parse_confidence=1.0,
+        ocr_used=False,
+        chunks=chunks,
+        parser_version=WORKBOOK_PARSER_VERSION,
+    )
+
+
+def _build_workbook_chunks(document_id: str, sheets: list[WorkbookSheet]) -> list[ChunkRecord]:
+    """One "page" per sheet; chunks hold whole rows, so a figure never straddles two."""
+    chunks: list[ChunkRecord] = []
+    for page_number, sheet in enumerate(sheets, start=1):
+        text = "\n".join(sheet.lines)
+        spans: list[tuple[int, int]] = []
+        group: tuple[int, int] | None = None
+        line_start = 0
+        for line in sheet.lines:
+            line_end = line_start + len(line)
+            if group is not None and line_end - group[0] > CHUNK_TARGET_CHARS:
+                spans.append(group)
+                group = None
+            if line_end - line_start > CHUNK_TARGET_CHARS:
+                # Only note text runs this long; split it at spaces like page text.
+                spans.extend(_split_long_line(text, line_start, line_end))
+            else:
+                group = (group[0] if group is not None else line_start, line_end)
+            line_start = line_end + 1
+        if group is not None:
+            spans.append(group)
+        for char_start, char_end in spans:
+            ord_value = len(chunks)
+            chunks.append(
+                ChunkRecord(
+                    chunk_id=_stable_id(f"chunk:{document_id}:{page_number}:{ord_value}:{char_start}:{char_end}"),
+                    document_id=document_id,
+                    section_label=sheet.title,
+                    page_start=page_number,
+                    page_end=page_number,
+                    char_start=char_start,
+                    char_end=char_end,
+                    text=text[char_start:char_end],
+                    ord=ord_value,
+                )
+            )
+    return chunks
+
+
+def _split_long_line(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    while start < end:
+        stop = min(start + CHUNK_TARGET_CHARS, end)
+        if stop < end:
+            space = text.rfind(" ", start, stop)
+            if space > start:
+                stop = space
+        spans.append((start, stop))
+        start = stop + 1 if stop < end and text[stop] == " " else stop
+    return spans
 
 
 def _ocr_available() -> bool:
@@ -517,7 +594,7 @@ def _persist_parse_success(
             "parsed",
             parsed.page_count,
             parsed.parse_strategy,
-            PARSER_VERSION,
+            parsed.parser_version,
             parsed.parse_confidence,
             1 if parsed.ocr_used else 0,
             len(parsed.chunks),

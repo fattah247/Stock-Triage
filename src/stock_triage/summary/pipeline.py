@@ -260,6 +260,7 @@ def generate_summary(
     payload = {
         "model": cfg.llm.model_name,
         "stream": False,
+        "think": cfg.llm.think,
         "format": SummaryDraftOutput.model_json_schema(),
         "messages": [
             {

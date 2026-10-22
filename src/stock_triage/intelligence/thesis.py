@@ -156,6 +156,23 @@ def load_db_theses(conn: sqlite3.Connection, *, ticker: str) -> list[LocalThesis
         """,
         (ticker, ticker),
     ).fetchall()
+    return _theses_from_rows(conn, rows)
+
+
+def load_active_theses(conn: sqlite3.Connection) -> list[LocalThesisDefinition]:
+    """Every active thesis, with and without a ticker."""
+    rows = conn.execute(
+        """
+        SELECT thesis_id, ticker, thesis_name, thesis_text, owner_scope, status
+        FROM thesis_definitions
+        WHERE status = 'active'
+        ORDER BY thesis_name ASC, thesis_id ASC
+        """
+    ).fetchall()
+    return _theses_from_rows(conn, rows)
+
+
+def _theses_from_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[LocalThesisDefinition]:
     out: list[LocalThesisDefinition] = []
     for row in rows:
         condition_rows = conn.execute(
@@ -195,6 +212,38 @@ def load_db_theses(conn: sqlite3.Connection, *, ticker: str) -> list[LocalThesis
             )
         )
     return out
+
+
+def status_for_thesis(
+    *,
+    matched_positive: list[dict[str, Any]],
+    matched_warning: list[dict[str, Any]],
+    matched_stop: list[dict[str, Any]],
+    unsupported: list[dict[str, Any]],
+) -> tuple[str, float, str]:
+    if matched_stop:
+        return "broken", 0.0, "One or more stop-rule conditions were triggered."
+    if matched_warning:
+        return "weakening", 0.35, "Warning conditions are active against the thesis."
+    if matched_positive:
+        return "improving", 0.8, "Positive thesis conditions are currently satisfied."
+    if unsupported and not (matched_positive or matched_warning or matched_stop):
+        return "unsupported", 0.2, "The thesis cannot be fully evaluated from current derived inputs."
+    return "holding", 0.6, "No warning or stop conditions are currently active."
+
+
+def compare_numeric(value: float, operator: str, threshold: float) -> bool:
+    if operator == "gt":
+        return value > threshold
+    if operator == "gte":
+        return value >= threshold
+    if operator == "lt":
+        return value < threshold
+    if operator == "lte":
+        return value <= threshold
+    if operator == "eq":
+        return value == threshold
+    return False
 
 
 def _slugify(text: str) -> str:

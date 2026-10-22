@@ -13,7 +13,14 @@ from statistics import median
 from typing import Any
 
 from ..config import Config
-from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..db import (
+    WORKBOOK_PARSE_STRATEGY,
+    WriterQueue,
+    configure_pragmas,
+    connect,
+    preferred_metric_sql,
+    run_migrations,
+)
 from ..fiscal_year import fiscal_period_end, resolve_fiscal_year_end_month
 from ..logging_setup import get_logger
 from .thesis import (
@@ -24,6 +31,8 @@ from .thesis import (
     load_local_theses,
     sync_local_theses,
 )
+from .thesis import compare_numeric as _compare_numeric
+from .thesis import status_for_thesis as _status_for_thesis
 from .claims import (
     ClaimCredibilitySummary,
     ClaimOutcomeRecord,
@@ -133,6 +142,7 @@ class CompanyDocument:
     source_modified_at: str | None
     updated_at: str
     created_at: str
+    parse_strategy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -649,10 +659,19 @@ def _build_bundle(
     )
     if anchor_index is None:
         return None
+    anchor_index = _prefer_workbook_anchor(conn, documents, anchor_index)
     latest_document = documents[anchor_index]
     newer_documents = documents[:anchor_index]
     older_documents = documents[anchor_index + 1 :]
-    documents = [latest_document, *newer_documents, *older_documents]
+    # A workbook holds only the statements; its filing's events are in the
+    # sibling files, folded in after it so its own rules win a shared name.
+    filing_siblings = (
+        [document for document in older_documents if _same_filing(document, latest_document)]
+        if latest_document.parse_strategy == WORKBOOK_PARSE_STRATEGY
+        else []
+    )
+    older_documents = [document for document in older_documents if document not in filing_siblings]
+    documents = [latest_document, *newer_documents, *filing_siblings, *older_documents]
     baseline = _select_baseline(latest_document, older_documents)
     all_metrics = _load_ticker_metrics(conn, ticker)
     latest_metrics = _load_document_metrics(conn, latest_document.document_id)
@@ -666,7 +685,7 @@ def _build_bundle(
     latest_events = _dedupe_keep_order_by(
         [
             event
-            for document in (*newer_documents, latest_document)
+            for document in (*newer_documents, latest_document, *filing_siblings)
             for event in _load_document_events(conn, document.document_id)
         ],
         key=lambda event: event.event_id,
@@ -675,7 +694,7 @@ def _build_bundle(
     latest_rules = _dedupe_keep_order_by(
         [
             rule
-            for document in (*newer_documents, latest_document)
+            for document in (*newer_documents, latest_document, *filing_siblings)
             for rule in _load_triggered_rules(conn, document.document_id)
         ],
         key=lambda rule: rule.rule_name,
@@ -692,7 +711,11 @@ def _build_bundle(
         latest_events=latest_events,
         latest_rules=latest_rules,
     )
-    theses = load_db_theses(conn, ticker=ticker)
+    # Market theses run once per market day (market/theses.py), not once per company.
+    from ..market.theses import is_market_thesis, load_market_context
+
+    theses = [thesis for thesis in load_db_theses(conn, ticker=ticker) if not is_market_thesis(thesis)]
+    market_context = load_market_context(conn) if _uses_market_conditions(theses) else None
     deltas = _build_deltas(
         ticker=ticker,
         baseline=baseline,
@@ -707,7 +730,7 @@ def _build_bundle(
         current_analysis=latest_analysis,
     )
     timeseries = _build_timeseries(ticker=ticker, metrics=all_metrics)
-    newer_document_ids = frozenset(document.document_id for document in newer_documents)
+    newer_document_ids = frozenset(document.document_id for document in (*newer_documents, *filing_siblings))
     claims = extract_claims_for_documents(
         conn,
         ticker=ticker,
@@ -737,6 +760,7 @@ def _build_bundle(
         events=latest_events,
         triggered_rules=latest_rules,
         review_items=conflict_items,
+        market_context=market_context,
     )
     thesis_items = _build_thesis_review_items(
         ticker=ticker,
@@ -980,7 +1004,8 @@ def _load_company_documents(
             d.version_group_id,
             d.source_modified_at,
             d.updated_at,
-            d.created_at
+            d.created_at,
+            d.parse_strategy
         FROM documents d
         LEFT JOIN document_candidates dc
           ON dc.source_name = d.source_name
@@ -1004,9 +1029,33 @@ def _load_company_documents(
             source_modified_at=row["source_modified_at"],
             updated_at=row["updated_at"],
             created_at=row["created_at"],
+            parse_strategy=row["parse_strategy"],
         )
         for row in rows
     ]
+
+
+def _prefer_workbook_anchor(conn: sqlite3.Connection, documents: list[CompanyDocument], anchor_index: int) -> int:
+    """Index of the anchor filing's IDX workbook, when one with metrics sorts behind the anchor.
+
+    A filing's files share its timestamp, so their order is arbitrary; the
+    workbook holds the statements as structured data, so it anchors the filing.
+    """
+    anchor = documents[anchor_index]
+    for index in range(anchor_index, len(documents)):
+        document = documents[index]
+        if not _same_filing(document, anchor):
+            continue
+        if document.parse_strategy == WORKBOOK_PARSE_STRATEGY and _load_document_metrics(conn, document.document_id):
+            return index
+    return anchor_index
+
+
+def _same_filing(document: CompanyDocument, other: CompanyDocument) -> bool:
+    """Files of one filing share its source and timestamp."""
+    return document.source_name == other.source_name and (
+        document.source_modified_at or document.updated_at or document.created_at
+    ) == (other.source_modified_at or other.updated_at or other.created_at)
 
 
 def _load_last_financial_report_sync(conn: sqlite3.Connection) -> date | None:
@@ -1182,25 +1231,27 @@ def _select_baseline(latest_document: CompanyDocument, prior_documents: list[Com
 
 
 def _load_document_metrics(conn: sqlite3.Connection, document_id: str) -> list[MetricPoint]:
+    """``document_id``'s metrics, less those a workbook reports for the same period."""
     rows = conn.execute(
-        """
+        f"""
         SELECT
-            metric_id,
-            document_id,
-            metric_name,
-            value_normalized,
-            raw_value_text,
-            currency,
-            unit_scale,
-            fiscal_year,
-            fiscal_period,
-            period_end_date,
-            audit_status,
-            consolidation_scope,
-            evidence_span_id
-        FROM metric_items
-        WHERE document_id = ?
-        ORDER BY metric_name ASC, fiscal_year DESC, fiscal_period ASC
+            mi.metric_id,
+            mi.document_id,
+            mi.metric_name,
+            mi.value_normalized,
+            mi.raw_value_text,
+            mi.currency,
+            mi.unit_scale,
+            mi.fiscal_year,
+            mi.fiscal_period,
+            mi.period_end_date,
+            mi.audit_status,
+            mi.consolidation_scope,
+            mi.evidence_span_id
+        FROM metric_items mi
+        WHERE mi.document_id = ?
+          AND {preferred_metric_sql("mi")}
+        ORDER BY mi.metric_name ASC, mi.fiscal_year DESC, mi.fiscal_period ASC
         """,
         (document_id,),
     ).fetchall()
@@ -1226,7 +1277,7 @@ def _load_document_metrics(conn: sqlite3.Connection, document_id: str) -> list[M
 
 def _load_ticker_metrics(conn: sqlite3.Connection, ticker: str) -> list[MetricPoint]:
     rows = conn.execute(
-        """
+        f"""
         SELECT
             mi.metric_id,
             mi.document_id,
@@ -1245,6 +1296,7 @@ def _load_ticker_metrics(conn: sqlite3.Connection, ticker: str) -> list[MetricPo
         JOIN documents d ON d.document_id = mi.document_id
         WHERE mi.ticker = ?
           AND d.process_state IN ('extracted', 'analyzed')
+          AND {preferred_metric_sql("mi")}
         ORDER BY COALESCE(mi.period_end_date, ''), mi.metric_name ASC, mi.document_id ASC
         """,
         (ticker,),
@@ -5234,6 +5286,7 @@ def _evaluate_theses(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     review_items: list[ReviewQueueItem],
+    market_context: Any = None,
 ) -> list[ThesisEvaluationRecord]:
     evaluations: list[ThesisEvaluationRecord] = []
     for thesis in theses:
@@ -5252,6 +5305,8 @@ def _evaluate_theses(
                 events=events,
                 triggered_rules=triggered_rules,
                 review_items=review_items,
+                ticker=ticker,
+                market_context=market_context,
             )
             record = {
                 "severity": condition.severity,
@@ -5315,9 +5370,16 @@ def _match_condition(
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
     review_items: list[ReviewQueueItem],
+    ticker: str | None = None,
+    market_context: Any = None,
 ) -> bool | None:
     kind = condition.kind
     payload = condition.payload
+    if market_context is not None:
+        from ..market.theses import MARKET_CONDITION_KINDS, match_market_condition
+
+        if kind in MARKET_CONDITION_KINDS:
+            return match_market_condition(condition, market_context, ticker=ticker).matched
     if kind == "metric_delta":
         metric_name = payload.get("metric_name")
         operator = payload.get("operator") or "gte"
@@ -5350,22 +5412,10 @@ def _match_condition(
     return None
 
 
-def _status_for_thesis(
-    *,
-    matched_positive: list[dict[str, Any]],
-    matched_warning: list[dict[str, Any]],
-    matched_stop: list[dict[str, Any]],
-    unsupported: list[dict[str, Any]],
-) -> tuple[str, float, str]:
-    if matched_stop:
-        return "broken", 0.0, "One or more stop-rule conditions were triggered."
-    if matched_warning:
-        return "weakening", 0.35, "Warning conditions are active against the thesis."
-    if matched_positive:
-        return "improving", 0.8, "Positive thesis conditions are currently satisfied."
-    if unsupported and not (matched_positive or matched_warning or matched_stop):
-        return "unsupported", 0.2, "The thesis cannot be fully evaluated from current derived inputs."
-    return "holding", 0.6, "No warning or stop conditions are currently active."
+def _uses_market_conditions(theses: list[LocalThesisDefinition]) -> bool:
+    from ..market.theses import MARKET_CONDITION_KINDS
+
+    return any(condition.kind in MARKET_CONDITION_KINDS for thesis in theses for condition in thesis.conditions)
 
 
 def _build_thesis_review_items(
@@ -5505,20 +5555,6 @@ def _persistence_negative_factors(
         if state in {"active", "reappeared"}:
             rows.append(f"{label} persisted")
     return _dedupe_keep_order(rows)[:2]
-
-
-def _compare_numeric(value: float, operator: str, threshold: float) -> bool:
-    if operator == "gt":
-        return value > threshold
-    if operator == "gte":
-        return value >= threshold
-    if operator == "lt":
-        return value < threshold
-    if operator == "lte":
-        return value <= threshold
-    if operator == "eq":
-        return value == threshold
-    return False
 
 
 def _condition_key(record: dict[str, Any]) -> str:

@@ -127,7 +127,9 @@ python -m stock_triage summary-context <document_id>
 python -m stock_triage summary-validate <document_id> --input-file /tmp/output.json --model-name local-model
 
 # If a local Ollama-compatible runtime is running, generate and validate the
-# summary in one step. The default local model is gemma2:9b.
+# summary in one step. The default local model is qwen3.5:9b, picked by
+# `llm-eval` on a 16 GB M1; run `python -m stock_triage llm-eval` to compare the
+# models installed on your machine.
 python -m stock_triage summary-generate <document_id>
 
 # Build the v3-derived layer: revision-aware deltas, current snapshots,
@@ -148,7 +150,46 @@ python -m stock_triage dashboard-export
 # Serve the local operator dashboard so you can click actions instead of typing each command
 python -m stock_triage dashboard-serve --open-browser
 
-# Evaluate watchlist alerts from local config
+# Market risk, phase 1 (docs/market_risk_plan.md): risk calendar, exposure ranking,
+# and stress breadth across filers. Copy config/catalysts.example.yaml to
+# data/catalysts.yaml first.
+python -m stock_triage catalysts-sync
+python -m stock_triage risk-calendar --days 60
+python -m stock_triage exposure-run
+
+# Market risk, phase 2: daily IDX index and stock summaries plus Bank Indonesia's
+# JISDOR rate (IDX history starts in 2020; a full backfill is about an hour, and
+# an interrupted one resumes where it stopped), then the signals and the daily
+# market state.
+python -m stock_triage market-sync --backfill-from 2020-01-02
+python -m stock_triage market-sync
+python -m stock_triage market-signals
+
+# Market risk, phase 5: the crash-risk estimate with its walk-forward track
+# record (withheld until it beats the base rate; see docs/market_calibration.md),
+# past episodes and the analogs today resembles, and a replay of the history.
+python -m stock_triage crash-risk
+python -m stock_triage market-backtest
+python -m stock_triage episodes
+python -m stock_triage episode-note episode-2026-01-29 --cause "MSCI consultation, rupiah" --themes msci_ftse_classification
+
+# The trading-day chain in one command: sync, signals, crash risk, alerts.
+python -m stock_triage market-daily
+
+# Market risk, phase 4: watch news and official sources (config/watch_sources.yaml),
+# tag risk themes (config/risk_themes.yaml), and surface what nobody tracks yet.
+# Run watch-sync hourly; bursts need 14 days of headlines first. Google News is
+# in the registry but disabled (its robots.txt disallows automated access); see
+# docs/phase4_sources_recon.md. LLM tagging uses llm.model_name via Ollama.
+python -m stock_triage watch-sync
+python -m stock_triage watch-sync --source gdelt_indonesia_markets --since 2026-08-01
+python -m stock_triage themes
+python -m stock_triage findings
+python -m stock_triage finding-promote <finding_id> --theme-id msci_standalone --title "MSCI standalone risk" --keywords "standalone market" --severity high
+python -m stock_triage finding-dismiss <finding_id>
+python -m stock_triage watch-replay --from 2026-09-01 --match standalone
+
+# Evaluate watchlist alerts and market alerts (risk dates, breadth, exposure)
 python -m stock_triage alerts-run
 
 # Run and inspect source canary checks
@@ -175,9 +216,16 @@ Defaults live in `config/default.yaml`. Override either by:
 - Setting `STOCK_TRIAGE_CONFIG=/path/to/your.yaml`, or
 - Exporting nested env vars like `STOCK_TRIAGE__LOGGING__LEVEL=DEBUG`.
 
-The dashboard output directory, alerts JSONL, `theses.yaml`, and
-`company_overrides.yaml` default to locations under `paths.data_dir`, so
-moving `data_dir` moves them too; set them explicitly only to split them out.
+The dashboard output directory, alerts JSONL, `theses.yaml`,
+`company_overrides.yaml`, `catalysts.yaml`, and `index_membership.yaml` default
+to locations under `paths.data_dir`, so moving `data_dir` moves them too; set
+them explicitly only to split them out.
+
+Alerts go to `alerts.channels`: `jsonl` (default) appends to
+`data/alerts/alerts.jsonl`, and `macos` shows desktop notifications, at most
+`alerts.push_max_per_run` per run with the rest as one summary. Market alerts
+(risk dates, stress breadth, market-state changes) need no watchlist; company and exposure alerts
+cover `alerts.watchlist` only.
 
 ## Running safely
 
@@ -345,6 +393,35 @@ theses:
       - severity: stop
         kind: rule_present
         rule_name: debt_surge
+```
+
+A thesis whose conditions are all market kinds is checked once per market day
+(after `market-signals` and `crash-risk`) and alerts once when its status
+changes. Written in calm times, it fires when the market breaks:
+
+```yaml
+theses:
+  - thesis_id: watchlist-market-guard
+    thesis_name: Review the watchlist when the market breaks
+    thesis_text: Rules written in calm times.
+    owner_scope: portfolio
+    conditions:
+      - severity: stop
+        kind: market_regime
+        at_least: stressed
+      - severity: stop
+        kind: crash_risk          # counts only while the estimate beats its base rate
+        operator: gte
+        value: 0.4
+      - severity: warning
+        kind: market_signal
+        signal: foreign_sell_streak
+        operator: gte
+        value: 10
+      - severity: warning
+        kind: exposure_score      # any watchlist company at 70 or more
+        operator: gte
+        value: 70
 ```
 - **Content-addressed storage.** Attachment bytes are stored under
   `data/files/<sha[:2]>/<sha[2:4]>/<sha>`. Identical bytes deduplicate; the DB

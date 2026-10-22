@@ -1187,3 +1187,33 @@ def test_artifact_download_names_keep_their_own_extension(tmp_config) -> None:
             assert response.headers.get("Content-Disposition") == 'inline; filename="report.pdf"'
     finally:
         _stop(handle, thread)
+
+
+def test_dashboard_server_serves_the_market_view(tmp_config) -> None:
+    from datetime import date
+
+    from stock_triage.market import run_market_signals
+
+    from .test_market_data import _seed_series, _weekdays
+
+    handle = create_dashboard_server(tmp_config, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        empty = json.loads(urlopen(f"{handle.url}/api/market").read().decode("utf-8"))
+        days = _weekdays(date(2026, 1, 5), 230)
+        _seed_series(tmp_config, {"index:COMPOSITE": {day: 7000.0 - i for i, day in enumerate(days)}})
+        run_market_signals(tmp_config)
+        view = json.loads(urlopen(f"{handle.url}/api/market").read().decode("utf-8"))
+        script = urlopen(f"{handle.url}/static/market.js").read().decode("utf-8")
+        html = urlopen(handle.url).read().decode("utf-8")
+    finally:
+        handle.server.shutdown()
+        thread.join(timeout=5)
+    assert empty["has_data"] is False
+    assert view["has_data"] is True
+    assert len(view["daily"]["dates"]) == 230 and view["daily"]["ma200"][198] is None and view["daily"]["ma200"][199] is not None
+    assert view["latest"]["close"] == 6771.0
+    assert view["state"]["regime"] in {"calm", "elevated", "stressed", "crisis"}
+    assert "window.StockTriageMarket" in script
+    assert 'data-view="market"' in html and "/market.js" in html

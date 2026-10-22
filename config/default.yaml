@@ -44,12 +44,18 @@ ocr:
   languages: "eng+ind"
 
 llm:
-  # Phase 7 — local model. Default to the installed Gemma runtime.
-  model_name: "gemma2:9b"
+  # Local model via Ollama, for filing summaries and risk-theme tagging. Chosen
+  # by `llm-eval` on an Apple M1 with 16 GB (2026-10-22): qwen3.5:9b tagged the
+  # labelled headlines in config/theme_eval.yaml best (93% accuracy, about 7 s
+  # each) and takes 8.5 GB loaded. gemma4:e4b and qwen3.5:4b were faster but
+  # missed half the real risks. Re-run llm-eval after installing a new model.
+  model_name: "qwen3.5:9b"
   base_url: "http://localhost:11434/api"
   context_budget_tokens: 8000
   temperature: 0.0
   timeout_s: 600
+  # Structured output needs no reasoning trace; off keeps answers in seconds.
+  think: false
 
 dashboard:
   # output_dir defaults to <paths.data_dir>/dashboard
@@ -61,7 +67,10 @@ alerts:
   watchlist: []
   min_severity: "warning"
   lookback_days: 7
+  # jsonl writes data/alerts/alerts.jsonl; macos shows desktop notifications,
+  # at most push_max_per_run per run (the rest arrive as one summary).
   channels: ["jsonl"]
+  push_max_per_run: 5
   # jsonl_path defaults to <paths.data_dir>/alerts/alerts.jsonl
 
 canary:
@@ -73,3 +82,47 @@ canary:
 theses: {}
 
 company_overrides: {}
+
+# Market risk layer (docs/market_risk_plan.md). catalysts_path and
+# index_membership_path default to <paths.data_dir>/catalysts.yaml and
+# <paths.data_dir>/index_membership.yaml; see config/*.example.yaml.
+market:
+  catalyst_lead_days: 3
+  exposure_alert_score: 70
+  breadth_alert_level: stressed
+  breadth_thresholds_pts: {elevated: 5, stressed: 10, crisis: 20}
+  breadth_min_filers: 30
+  # Market data and state (phase 2). Thresholds are starting points until the
+  # phase 5 backtest; see docs/market_risk_plan.md, component 2.
+  thresholds:
+    drawdown_pct: {elevated: 5, stressed: 10, crisis: 20}
+    vol_ratio: {elevated: 1.5, stressed: 2.0, crisis: 3.0}
+    foreign_sell_streak: {elevated: 5, stressed: 10, crisis: 15}
+    usdidr_change_20d_pct: {elevated: 2, stressed: 3, crisis: 5}
+    decline_share_pct: {elevated: 60, stressed: 70, crisis: 80}
+    sector_drawdown_pct: {elevated: 7, stressed: 12, crisis: 25}  # used when sector_signal is worst
+    # Share of IDX-IC sectors at least sector_breadth_cutoff_pct below their high.
+    sector_breadth_pct: {elevated: 50, stressed: 70, crisis: 90}
+    # High-severity risk themes active at once (phase 4, watch-sync).
+    active_themes: {elevated: 1, stressed: 2, crisis: 3}
+    # Suspensions plus UMA notices over 5 sessions, versus the past year (phase 2b).
+    exchange_notices_ratio: {elevated: 2.5, stressed: 3.5, crisis: 5.0}
+  regime_min_signals: 2
+  regime_step_down_after_sessions: 5
+  # Calibrated by the phase 5 backtest (docs/market_calibration.md).
+  regime_crisis_needs_index: stressed
+  sector_signal: share
+  sector_breadth_cutoff_pct: 10
+  # Crash-risk estimate: a crash is a fall of crash_risk_drawdown_pct from a day's
+  # close within crash_risk_horizon_sessions. It shows as a forecast only while its
+  # walk-forward Brier score beats the base rate by crash_risk_min_skill.
+  crash_risk_drawdown_pct: 10
+  crash_risk_horizon_sessions: 63
+  crash_risk_alert_probability: 0.4
+  crash_risk_min_skill: 0.05
+  episode_close_after_calm_sessions: 20
+  # Risk discovery: watched sources and the theme taxonomy (config/*.yaml by
+  # default), and how many items over three days make a theme active.
+  # watch_sources_path: config/watch_sources.yaml
+  # risk_themes_path: config/risk_themes.yaml
+  theme_active_min_items: 3

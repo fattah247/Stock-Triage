@@ -99,10 +99,11 @@ def test_run_alerts_includes_broken_thesis_signals(tmp_config):
     run_intelligence(tmp_config, ticker="TAMU")
     result = run_alerts(tmp_config)
 
-    assert result.selected == 3
-    assert result.emitted == 3
-
     lines = [json.loads(line) for line in tmp_config.alerts.jsonl_path.read_text(encoding="utf-8").strip().splitlines()]
+    # Filing-deadline reminders join when a deadline falls within a few days of
+    # the day the test runs, so only the company signals are counted.
+    assert result.selected == result.emitted == len(lines)
+    assert len([line for line in lines if line["signal_kind"] != "catalyst"]) == 3
     thesis_payload = next(line for line in lines if line["signal_kind"] == "thesis")
     assert thesis_payload["signal_name"] == "TAMU debt cleanup (broken)"
     assert thesis_payload["severity"] == "critical"

@@ -1,0 +1,83 @@
+# Risk calendar (docs/market_risk_plan.md, component 3).
+#
+# Copy to <paths.data_dir>/catalysts.yaml (default data/catalysts.yaml), then:
+#   python -m stock_triage catalysts-sync
+#   python -m stock_triage risk-calendar --days 60
+# alerts-run sends a reminder market.catalyst_lead_days before each date.
+#
+# kind: fomc | bi_rate | msci_review | msci_classification | ftse_classification |
+#       sovereign_rating | us_cpi | bps_release | election | lockup_expiry |
+#       enso_outlook | policy | policy_speech | custom
+# severity: low | medium | high (low is below the default alert floor)
+#
+# Dates below were gathered on 2026-10-20 from the linked pages. Organisers can
+# move them, so confirm against the official calendar before relying on one.
+
+catalysts:
+  - date: 2026-10-21
+    kind: bi_rate
+    title: Bank Indonesia board meeting decision (quarterly and annual review)
+    severity: high
+    region: ID
+    source_url: https://www.bi.go.id/id/publikasi/kalender
+    notes: Meeting 20-21 October 2026.
+
+  - date: 2026-10-28
+    kind: fomc
+    title: FOMC rate decision
+    severity: high
+    region: US
+    source_url: https://www.chicagofed.org/utilities/about-us/federal-reserve-calendars
+    notes: Meeting 27-28 October; the decision lands early 29 October in Jakarta time.
+
+  - date: 2026-11-11
+    kind: msci_review
+    title: MSCI November index review announcement
+    severity: high
+    region: Global
+    source_url: https://en.antaranews.com/news/426943/idx-to-maintain-communication-with-msci-after-august-review
+    notes: Changes take effect 1 December 2026.
+
+  - date: 2026-11-18
+    kind: bi_rate
+    title: Bank Indonesia board meeting decision
+    severity: high
+    region: ID
+    source_url: https://finansial.bisnis.com/read/20251222/11/1938911/jadwal-rapat-dewan-gubernur-rdg-bank-indonesia-2026-ini-daftar-lengkap-tanggal-resminya
+    notes: Meeting 17-18 November 2026.
+
+  - date: 2026-12-01
+    kind: msci_review
+    title: MSCI November index review changes take effect
+    severity: medium
+    region: Global
+    source_url: https://en.antaranews.com/news/426943/idx-to-maintain-communication-with-msci-after-august-review
+
+  - date: 2026-12-09
+    kind: fomc
+    title: FOMC rate decision, with economic projections
+    severity: high
+    region: US
+    source_url: https://www.chicagofed.org/utilities/about-us/federal-reserve-calendars
+    notes: Meeting 8-9 December 2026.
+
+  - date: 2026-12-16
+    kind: bi_rate
+    title: Bank Indonesia board meeting decision
+    severity: high
+    region: ID
+    source_url: https://finansial.bisnis.com/read/20251222/11/1938911/jadwal-rapat-dewan-gubernur-rdg-bank-indonesia-2026-ini-daftar-lengkap-tanggal-resminya
+    notes: Meeting 15-16 December 2026.
+
+  # Every August the President gives the state address (Pidato Kenegaraan) and
+  # presents the next year's budget (Nota Keuangan and RAPBN). It is held on
+  # 16 August, or the nearest weekday when that is a weekend: 15 August in 2025,
+  # 14 August in 2026. 16 August 2027 is a Monday. The MPR and DPR confirm the
+  # date nearer the time, so check it before relying on it.
+  - date: 2027-08-16
+    kind: policy_speech
+    title: President's state address and 2028 budget speech (expected date)
+    severity: high
+    region: ID
+    source_url: https://infobanknews.com/alasan-sidang-tahunan-mpr-dan-penyampaian-rapbn-2027-digelar-14-agustus-2026
+    notes: State address in the morning, budget speech in the afternoon. Fiscal targets and new programmes move bank and state-owned stocks.

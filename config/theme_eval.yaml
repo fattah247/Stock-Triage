@@ -1,0 +1,138 @@
+# Labelled headlines for `llm-eval`, which compares local models on the job
+# watch-sync gives them: pick the one risk theme a headline is about, or none,
+# and quote the words that show it.
+#
+# Most are real headlines from October 2026 that the keyword rules missed,
+# which is exactly where the LLM is used; the last five are written to test
+# risks described without any keyword. `expect` is the best theme (null for
+# none); `also` lists other answers that are equally fair.
+
+cases:
+  # Rupiah and Bank Indonesia
+  - title: "BI Buka Suara soal Dolar AS Tembus Rp 18.000 Lagi"
+    expect: rupiah_weakness
+  - title: "BI Kerek Diskon Premi Lindung Nilai Valas Tenor 12 Bulan Jadi 45%"
+    expect: bi_policy_surprise
+    also: [rupiah_weakness]
+  - title: "BI Tahan Suku Bunga 5,75%, Bagaimana Nasib Rupiah?"
+    expect: bi_policy_surprise
+    also: [rupiah_weakness]
+  - title: "BI Turunkan GWM Bank Konvensional Jadi 7%, Syariah 5,5%"
+    expect: bi_policy_surprise
+  - title: "Rupiah Menguat, Nilai Tukar Dolar AS Turun ke 17.980"
+    expect: null
+    also: [rupiah_weakness]
+  - title: "Dolar AS Melemah ke Rp 17.982"
+    expect: null
+    also: [rupiah_weakness]
+
+  # Market structure, the exchange and foreign money
+  - title: "Bakal Didepak Bursa dari Perhitungan IHSG, Ini Daftar 80 Saham HSC"
+    expect: exchange_rules_halts
+    also: [large_cap_index_change]
+  - title: "Bos Bursa Buka-bukaan Alasan Pangkas Batas ARB"
+    expect: exchange_rules_halts
+  - title: "CIMB Niaga (BNGA) Dikabarkan Mau Delisting dari BEI, Ini Alasannya"
+    expect: large_cap_index_change
+    also: [exchange_rules_halts]
+  - title: "Malaysia CIMB mulls taking Indonesia CIMB Niaga private"
+    expect: large_cap_index_change
+    also: [null]
+  - title: "Wamenko Perekonomian: Asing Keluar, Harga Turun, Investor Domestik Serok!"
+    expect: foreign_outflow
+  - title: "Global money trickles back to Indonesia as markets recover"
+    expect: foreign_outflow
+    also: [null]
+  - title: "IHSG Dibuka Lengser ke 4.934"
+    expect: market_panic
+    also: [null]
+
+  # Governance and enforcement
+  - title: "Kasus IPO CUAN, OJK Beri Sanksi 2 Sekuritas dan Direkturnya"
+    expect: fraud_governance
+  - title: "OJK Bongkar Daftar Pihak Terkait Pelanggaran 3 Emiten Konglomerat"
+    expect: fraud_governance
+
+  # The economy, the budget and the President
+  - title: "Prabowo Mau Lanjut Efisiensi Besar-besaran"
+    expect: presidential_policy_speech
+    also: [fiscal_deficit]
+  - title: "Indonesias medium term growth to remain below government target"
+    expect: growth_slowdown
+  - title: "BI Ungkap Kredit Nganggur Tembus Rp2.562 T hingga September 2026"
+    expect: growth_slowdown
+    also: [bank_health]
+  - title: "Sentimen Global Masih Membayangi, CDS Indonesia Diproyeksi Bergerak Terbatas"
+    expect: sovereign_rating
+    also: [global_risk_off, em_contagion]
+  - title: "Perlinsos Digital Bakal Meluncur 10 November, Bansos Ditransfer Tunai"
+    expect: tax_subsidy_change
+    also: [fiscal_deficit, null]
+  - title: "Video: Raih PMN Rp 1,3 Triliun, Geo Dipa Energi Kebut 2 Proyek PLTP"
+    expect: state_fund_soe
+    also: [null]
+
+  # Commodities, oil and global money
+  - title: "Airlangga Prediksi Rata-rata Harga Minyak Mentah RI Melonjak Jadi US$95"
+    expect: oil_price_shock
+  - title: "Sensex plunges 593 points, Nifty falls 0.88% at open as crude price surge to 4-month high"
+    expect: oil_price_shock
+    also: [global_risk_off, null]
+  - title: "IHSG Down 1.43 Percent on Rising Oil, Fed Fears"
+    expect: us_rates_fed
+    also: [oil_price_shock, market_panic]
+  - title: "Revisi RKAB 2026 Berdampak ke Emiten Nikel dan Batubara, Simak Rekomendasi Sahamnya"
+    expect: nickel_policy_price
+    also: [coal_policy_price, policy_shock]
+
+  # Unrest and operations
+  - title: "JCI Falls 1.48% as Investors Weigh Risks Ahead of August 27 Protest"
+    expect: social_unrest
+    also: [market_panic]
+  - title: "Hacker Serang Bank Kelas Kakap India, Data Nasabah Bocor"
+    expect: cyber_attack
+    also: [null]
+
+  # Nothing to do with market risk
+  - title: "Puasa 1 Ramadhan 2027 Tanggal Berapa? Cek Perkiraan Tanggalnya"
+    expect: null
+  - title: "Harga Emas Antam Turun Rp10 Ribu Jadi Rp2,554 Juta per Gram"
+    expect: null
+  - title: "BRI Siap Buyback Saham, Ini Strategi Perseroan"
+    expect: null
+  - title: "Survei Poltracking: Kepercayaan Publik kepada Pemerintahan Prabowo-Gibran 64,8 Persen"
+    expect: null
+  - title: "16 Tanda Bahwa Seseorang Sedang Memata-matai Ponsel Anda"
+    expect: null
+  - title: "5 Aplikasi Nonton Drama AI Gratis Full Episode, Bisa Nonton Puas"
+    expect: null
+  - title: "Kemenhub Beber Kronologi Kebakaran KMP Batumandi"
+    expect: null
+  - title: "Akhiri Perdagangan IHSG Parkir Naik 0,9%"
+    expect: null
+  - title: "Isu Muktamar, Saifullah Yusuf Ancam Pidanakan Pengurus PCNU"
+    expect: null
+  - title: "Hari ATC Sedunia, AirNav Tegaskan Komitmen Penguatan Layanan Navigasi"
+    expect: null
+  - title: "Pengamat: Aksi profit taking pascarebound picu koreksi IHSG"
+    expect: null
+  - title: "Getty Images Ajukan Kebangkrutan, Beralih Jadi Perusahaan Privat"
+    expect: null
+    also: [corporate_defaults]
+  - title: "Truk Listrik-BBM Hijau Bukti Nyata Transisi Energi RI Bukan Cuma Mimpi"
+    expect: null
+    also: [climate_policy]
+
+  # Written to test risks described without any keyword
+  - title: "Indeks global kaji penurunan status bursa RI, investor asing waspada"
+    expect: msci_ftse_classification
+    also: [foreign_outflow]
+  - title: "Kapal penjaga pantai asing masuk perairan utara Indonesia, TNI AL siaga"
+    expect: south_china_sea_taiwan
+  - title: "Pemerintah siapkan aturan baru kewajiban parkir devisa hasil ekspor 100 persen"
+    expect: policy_shock
+    also: [rupiah_weakness, bi_policy_surprise]
+  - title: "Wabah penyakit misterius menyebar di Tiongkok selatan, WHO pantau ketat"
+    expect: pandemic_outbreak
+  - title: "Peluncuran produk kopi kemasan baru di Bandung"
+    expect: null

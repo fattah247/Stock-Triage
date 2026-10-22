@@ -1,0 +1,348 @@
+# Risk themes (docs/market_risk_plan.md, component 5c), seeded from every "Theme"
+# row of docs/market_risk_factors.md. watch-sync tags each watched headline with
+# the themes whose keywords it contains; the local LLM tags the rest, citing the
+# exact words it relied on.
+#
+# Fields:
+#   theme_id     stable id; findings, episodes and alerts refer to it
+#   category     the catalog category letter (A-M)
+#   severity     high | medium | low. Active high-severity themes count toward the
+#                market state and appear on companies' exposure cards
+#   keywords     any one of them tags an item (case-insensitive, whole words)
+#   require_any  optional: the item must also contain one of these, to keep broad
+#                words like "war" to the conflicts that matter for Indonesia
+#   sectors      IDX-IC sector index codes the theme tends to hit
+#
+# Promoted findings (finding-promote) are added in the database, not here.
+# market.risk_themes_path points at a different file if you keep your own.
+
+themes:
+  # A. Global money and risk appetite
+  - theme_id: us_rates_fed
+    category: A
+    title: US rates and the Fed
+    severity: medium
+    keywords: [the fed, federal reserve, fomc, powell, suku bunga as, us treasury yield, treasury yields, imbal hasil treasury, us rate hike, kenaikan suku bunga fed]
+    sectors: [IDXFINANCE, IDXPROPERT]
+  - theme_id: global_risk_off
+    category: A
+    title: Global sell-off and risk aversion
+    severity: high
+    keywords: [global sell-off, global selloff, wall street anjlok, wall street plunges, risk-off, risk off, aksi jual global, bursa global anjlok, market crash, black monday]
+    sectors: []
+  - theme_id: em_contagion
+    category: A
+    title: Emerging-market contagion
+    severity: medium
+    keywords: [emerging market contagion, contagion, krisis pasar berkembang, emerging markets sell-off, capital outflow from emerging, arus modal keluar]
+    sectors: []
+
+  # B. China and world trade
+  - theme_id: china_slowdown
+    category: B
+    title: China slowdown and property crisis
+    severity: medium
+    keywords: [china slowdown, ekonomi china melambat, ekonomi tiongkok melambat, evergrande, country garden, china property crisis, krisis properti china, yuan devaluation, devaluasi yuan]
+    sectors: [IDXENERGY, IDXBASIC]
+  - theme_id: tariffs_trade_war
+    category: B
+    title: Tariffs and trade wars
+    severity: high
+    keywords: [tariff, tariffs, tarif impor, tarif resiprokal, reciprocal tariff, perang dagang, trade war, bea masuk, import duties]
+    require_any: [indonesia, ri, us, as, trump, china, tiongkok, amerika, ekspor, export]
+    sectors: [IDXBASIC, IDXCYCLIC, IDXINDUST]
+  - theme_id: shipping_chokepoints
+    category: B
+    title: Shipping chokepoints
+    severity: medium
+    keywords: [red sea, laut merah, strait of malacca, selat malaka, strait of hormuz, selat hormuz, suez canal, terusan suez, freight rates, ongkos kapal]
+    sectors: [IDXTRANS, IDXENERGY]
+
+  # C. Commodities
+  - theme_id: coal_policy_price
+    category: C
+    title: Coal price and policy
+    severity: medium
+    keywords: [harga batu bara, coal price, coal prices, larangan ekspor batu bara, coal export ban, dmo batu bara, coal dmo, royalti batu bara, coal royalty]
+    sectors: [IDXENERGY]
+  - theme_id: nickel_policy_price
+    category: C
+    title: Nickel price and policy
+    severity: medium
+    keywords: [harga nikel, nickel price, nickel prices, smelter nikel, nickel smelter, larangan ekspor nikel, nickel export ban, hilirisasi nikel]
+    sectors: [IDXBASIC]
+  - theme_id: palm_oil_policy
+    category: C
+    title: Palm oil price and policy
+    severity: medium
+    keywords: [cpo, crude palm oil, minyak sawit, kelapa sawit, palm oil, pungutan ekspor sawit, palm oil levy, larangan ekspor cpo, palm oil export ban, b40, b50]
+    sectors: [IDXNONCYC]
+  - theme_id: oil_price_shock
+    category: C
+    title: Oil price shock
+    severity: high
+    keywords: [harga minyak melonjak, oil price surge, oil prices surge, oil spikes, harga minyak dunia naik, brent melonjak, brent surges, harga bbm naik, fuel price hike]
+    sectors: [IDXTRANS, IDXCYCLIC, IDXBASIC]
+  - theme_id: food_prices
+    category: C
+    title: Rice and food prices
+    severity: medium
+    keywords: [harga beras, rice price, rice prices, harga pangan, food prices, inflasi pangan, food inflation, krisis pangan, food crisis]
+    sectors: [IDXNONCYC]
+
+  # D. Domestic economy and the rupiah
+  - theme_id: rupiah_weakness
+    category: D
+    title: Rupiah weakness
+    severity: high
+    keywords: [rupiah melemah, rupiah anjlok, rupiah terpuruk, rupiah tembus, rupiah weakens, rupiah slides, rupiah slumps, rupiah record low, rupiah hits, intervensi rupiah, rupiah intervention]
+    sectors: [IDXFINANCE, IDXCYCLIC, IDXBASIC]
+  - theme_id: bi_policy_surprise
+    category: D
+    title: Bank Indonesia policy surprise
+    severity: medium
+    keywords: [bi rate, bi-rate, suku bunga acuan, bank indonesia naikkan, bank indonesia pangkas, bank indonesia raises, bank indonesia cuts, rapat dewan gubernur, rdg bi]
+    sectors: [IDXFINANCE, IDXPROPERT]
+  - theme_id: bi_independence
+    category: D
+    title: Bank Indonesia independence and burden sharing
+    severity: high
+    keywords: [independensi bi, independensi bank indonesia, central bank independence, bank indonesia independence, burden sharing, revisi uu bi, bi law revision, monetisasi utang, debt monetisation, debt monetization]
+    sectors: [IDXFINANCE]
+  - theme_id: fiscal_deficit
+    category: D
+    title: Fiscal deficit and budget stress
+    severity: high
+    keywords: [defisit apbn, budget deficit, fiscal deficit, defisit fiskal, batas defisit 3%, 3% deficit cap, pelebaran defisit, wider deficit, shortfall pajak, tax shortfall, penerimaan pajak turun]
+    sectors: [IDXFINANCE, IDXINFRA]
+  - theme_id: tax_subsidy_change
+    category: D
+    title: Tax and subsidy changes
+    severity: medium
+    keywords: [ppn 12%, kenaikan ppn, vat hike, vat increase, subsidi bbm, fuel subsidy, pertalite, harga bbm, cukai, excise, tax amnesty, pengampunan pajak]
+    sectors: [IDXCYCLIC, IDXNONCYC]
+  - theme_id: sovereign_rating
+    category: D
+    title: Sovereign rating action
+    severity: high
+    keywords: [peringkat utang, sovereign rating, credit rating, outlook negatif, negative outlook, downgrade, menurunkan peringkat, moody's, s&p global ratings, fitch ratings, r&i, jcr]
+    require_any: [indonesia, ri, sovereign, negara, pemerintah, government]
+    sectors: [IDXFINANCE]
+  - theme_id: growth_slowdown
+    category: D
+    title: Growth slowdown and weak demand
+    severity: medium
+    keywords: [pertumbuhan ekonomi melambat, economic growth slows, gdp growth slows, daya beli melemah, weakening purchasing power, pmi manufaktur kontraksi, manufacturing pmi contraction, phk massal, mass layoffs, deflasi, deflation]
+    sectors: [IDXCYCLIC, IDXNONCYC, IDXFINANCE]
+
+  # E. Market structure and index providers
+  - theme_id: msci_ftse_classification
+    category: E
+    title: MSCI and FTSE classification and index reviews
+    severity: high
+    keywords: [msci, ftse russell, ftse, standalone market, frontier market, pasar perbatasan, reklasifikasi, reclassification, market classification, klasifikasi pasar, index review, rebalancing indeks, free float msci]
+    sectors: [IDXFINANCE, IDXBASIC, IDXINFRA]
+  - theme_id: exchange_rules_halts
+    category: E
+    title: Exchange rules, trading halts and suspensions
+    severity: high
+    keywords: [trading halt, penghentian sementara perdagangan, auto rejection, ara arb, arb asimetris, suspensi saham, saham disuspensi, suspended shares, unusual market activity, uma, short selling, papan pemantauan khusus, full call auction, free float rule]
+    sectors: []
+  - theme_id: foreign_outflow
+    category: E
+    title: Foreign selling and capital outflow
+    severity: medium
+    keywords: [net sell asing, asing net sell, foreign net sell, foreign selling, foreign investors sold, jual bersih asing, capital outflow, dana asing keluar, aliran modal keluar, outflow asing]
+    sectors: [IDXFINANCE]
+  - theme_id: large_cap_index_change
+    category: E
+    title: Large-cap index inclusion or removal
+    severity: medium
+    keywords: [masuk indeks msci, keluar indeks msci, dikeluarkan dari indeks, index deletion, index inclusion, lq45 rebalancing, idx80, deleted from the index]
+    sectors: []
+
+  # F. Politics, policy and governance
+  - theme_id: elections_reshuffle
+    category: F
+    title: Elections and cabinet changes
+    severity: medium
+    keywords: [reshuffle kabinet, cabinet reshuffle, menteri keuangan baru, new finance minister, sri mulyani mundur, finance minister resigns, pilkada, pemilu, election result, hasil pemilu]
+    sectors: []
+  - theme_id: policy_shock
+    category: F
+    title: Sudden policy shock
+    severity: high
+    keywords: [larangan ekspor, export ban, nasionalisasi, nationalisation, nationalization, pencabutan izin, permit revoked, divestasi wajib, mandatory divestment, windfall tax, pajak windfall, kebijakan mendadak]
+    sectors: [IDXENERGY, IDXBASIC, IDXNONCYC]
+  - theme_id: state_fund_soe
+    category: F
+    title: State fund (Danantara) and state-owned enterprises
+    severity: high
+    keywords: [danantara, sovereign wealth fund, bumn, soe, state-owned, holding bumn, restrukturisasi bumn, soe restructuring, superholding]
+    sectors: [IDXFINANCE, IDXINFRA, IDXENERGY, IDXBASIC]
+  # The President is in the news daily; this theme is the economic-policy part:
+  # the August state address and budget speech, and statements that name the
+  # budget, taxes, state firms, exports, the rupiah or the stock market.
+  - theme_id: presidential_policy_speech
+    category: F
+    title: Presidential speeches and policy announcements
+    severity: medium
+    keywords: [pidato kenegaraan, state address, nota keuangan, rapbn, presiden, president, prabowo]
+    require_any: [pidato kenegaraan, nota keuangan, rapbn, apbn, anggaran, budget, pajak, tax, bumn, danantara, nasionalisasi, nationalisation, larangan ekspor, export ban, subsidi, subsidy, utang, debt, suku bunga, rupiah, pasar modal, saham, ihsg, investor, msci, defisit, deficit]
+    sectors: [IDXFINANCE, IDXNONCYC, IDXINFRA]
+  - theme_id: social_unrest
+    category: F
+    title: Protests and social unrest
+    severity: high
+    keywords: [demo, demonstrasi, unjuk rasa, kerusuhan, protest, protests, riot, riots, aksi massa, penjarahan, looting]
+    require_any: [jakarta, dpr, indonesia, ri, mahasiswa, students, ojol, buruh, workers]
+    sectors: [IDXCYCLIC, IDXPROPERT]
+  - theme_id: fraud_governance
+    category: F
+    title: Fraud and governance scandals
+    severity: medium
+    keywords: [korupsi, corruption, fraud, penipuan, manipulasi laporan keuangan, accounting fraud, kejaksaan agung, attorney general, tersangka, suspect, gagal bayar asuransi, insurance default, jiwasraya, asabri]
+    sectors: [IDXFINANCE]
+
+  # G. Banks and credit
+  - theme_id: bank_health
+    category: G
+    title: Bank health and bad loans
+    severity: high
+    keywords: [kredit macet, non-performing loan, npl, bad loans, rush money, bank run, likuiditas bank, bank liquidity, bank gagal, bank failure, restrukturisasi kredit, loan restructuring]
+    sectors: [IDXFINANCE]
+  - theme_id: corporate_defaults
+    category: G
+    title: Corporate and bond defaults
+    severity: medium
+    keywords: [gagal bayar, default, pkpu, penundaan kewajiban pembayaran utang, pailit, bankruptcy, bankrupt, obligasi gagal bayar, bond default, missed coupon, peringkat turun pefindo]
+    sectors: [IDXFINANCE, IDXPROPERT, IDXINFRA]
+  - theme_id: fintech_lending_stress
+    category: G
+    title: Online lending stress
+    severity: medium
+    keywords: [pinjol, pinjaman online, online lending, fintech lending, paylater, tkb90, kredit macet pinjol]
+    sectors: [IDXFINANCE]
+  - theme_id: property_construction_stress
+    category: G
+    title: Property and construction stress
+    severity: medium
+    keywords: [bumn karya, kontraktor gagal bayar, contractor default, waskita, wijaya karya, wika, pengembang gagal bayar, developer default, proyek mangkrak]
+    sectors: [IDXPROPERT, IDXINFRA]
+
+  # H. War, geopolitics and security
+  - theme_id: middle_east_conflict
+    category: H
+    title: Middle East conflict
+    severity: high
+    keywords: [perang, war, serangan, attack, attacks, airstrike, serangan udara, rudal, missile, missiles, eskalasi, escalation, gencatan senjata, ceasefire]
+    require_any: [israel, iran, gaza, lebanon, hezbollah, houthi, yaman, yemen, timur tengah, middle east, hormuz, saudi, irak, iraq, suriah, syria]
+    sectors: [IDXENERGY, IDXTRANS]
+  - theme_id: russia_ukraine
+    category: H
+    title: Russia, Ukraine and sanctions
+    severity: medium
+    keywords: [perang, war, invasi, invasion, sanksi, sanctions, serangan, attack]
+    require_any: [rusia, russia, ukraina, ukraine, nato, kremlin, putin]
+    sectors: [IDXENERGY, IDXNONCYC]
+  - theme_id: south_china_sea_taiwan
+    category: H
+    title: South China Sea, Natuna and Taiwan Strait
+    severity: high
+    keywords: [laut china selatan, south china sea, natuna, laut natuna utara, selat taiwan, taiwan strait, blokade taiwan, taiwan blockade, coast guard china, kapal china]
+    sectors: [IDXTRANS, IDXENERGY]
+  - theme_id: korea_flashpoints
+    category: H
+    title: Korean peninsula and other flashpoints
+    severity: medium
+    keywords: [korea utara, north korea, pyongyang, uji rudal, missile test, nuclear test, uji nuklir]
+    sectors: []
+  - theme_id: terrorism_security
+    category: H
+    title: Terrorism and domestic security
+    severity: medium
+    keywords: [teroris, terrorist, terrorism, terorisme, bom, bomb, bombing, ledakan, explosion, densus 88]
+    require_any: [indonesia, jakarta, ri, polri, surabaya, bali, medan, makassar]
+    sectors: [IDXCYCLIC, IDXTRANS]
+
+  # I. Pandemics and disease
+  - theme_id: pandemic_outbreak
+    category: I
+    title: Pandemic or new outbreak
+    severity: high
+    keywords: [pandemi, pandemic, wabah, outbreak, virus baru, new virus, varian baru, new variant, lockdown, karantina wilayah, phei, pheic, public health emergency, darurat kesehatan, kejadian luar biasa, klb]
+    sectors: [IDXTRANS, IDXCYCLIC, IDXPROPERT, IDXHEALTH]
+  - theme_id: animal_crop_disease
+    category: I
+    title: Animal and crop disease
+    severity: low
+    keywords: [penyakit mulut dan kuku, pmk, foot-and-mouth, avian flu, flu burung, bird flu, african swine fever, demam babi afrika, hama, crop blight, gagal panen, crop failure]
+    sectors: [IDXNONCYC]
+
+  # J. Natural disasters and climate
+  - theme_id: earthquake_tsunami
+    category: J
+    title: Major earthquake or tsunami
+    severity: high
+    keywords: [gempa, gempa bumi, earthquake, tsunami, magnitudo, magnitude]
+    require_any: [jakarta, jawa, java, sumatra, sumatera, sulawesi, bali, banten, surabaya, bandung, indonesia, bmkg, tsunami]
+    sectors: [IDXPROPERT, IDXINFRA, IDXFINANCE]
+  - theme_id: volcano
+    category: J
+    title: Volcanic eruption
+    severity: medium
+    keywords: [erupsi, eruption, gunung meletus, volcano, volcanic, abu vulkanik, volcanic ash, awas level iv, status awas]
+    sectors: [IDXTRANS]
+  - theme_id: floods
+    category: J
+    title: Major floods
+    severity: medium
+    keywords: [banjir, flood, floods, flooding, banjir bandang, flash flood]
+    require_any: [jakarta, jabodetabek, bekasi, tangerang, semarang, jawa, java, kawasan industri, industrial estate]
+    sectors: [IDXPROPERT, IDXINDUST, IDXCYCLIC]
+  - theme_id: enso_drought
+    category: J
+    title: El Niño, La Niña and drought
+    severity: medium
+    keywords: [el nino, el niño, la nina, la niña, kemarau panjang, kekeringan, drought]
+    sectors: [IDXNONCYC]
+  - theme_id: haze_fires
+    category: J
+    title: Haze and forest fires
+    severity: low
+    keywords: [kabut asap, haze, karhutla, kebakaran hutan, forest fires, hotspot, titik panas]
+    sectors: [IDXNONCYC]
+  - theme_id: climate_policy
+    category: J
+    title: Climate policy (coal phase-out, carbon, EU rules)
+    severity: medium
+    keywords: [pensiun dini pltu, coal phase-out, coal phaseout, pajak karbon, carbon tax, carbon pricing, bursa karbon, carbon exchange, eudr, eu deforestation regulation, jetp]
+    sectors: [IDXENERGY, IDXNONCYC]
+
+  # K. Technology and operations
+  - theme_id: cyber_attack
+    category: K
+    title: Cyber attacks
+    severity: high
+    keywords: [serangan siber, cyber attack, cyberattack, ransomware, peretasan, hacked, hack, kebocoran data, data breach, data leak, pdn, pusat data nasional]
+    sectors: [IDXFINANCE, IDXTECHNO]
+  - theme_id: exchange_payment_outage
+    category: K
+    title: Exchange or payment outage
+    severity: high
+    keywords: [gangguan sistem perdagangan, trading system outage, jats, bei gangguan, gangguan bi-fast, payment outage, gangguan layanan bank, bank system outage, qris down, gangguan qris]
+    sectors: [IDXFINANCE]
+  - theme_id: power_blackout
+    category: K
+    title: Power blackouts
+    severity: medium
+    keywords: [pemadaman listrik, blackout, power outage, listrik padam, gangguan pln, pln blackout]
+    sectors: [IDXINDUST, IDXINFRA]
+
+  # M. Sentiment and valuation
+  - theme_id: market_panic
+    category: M
+    title: Market panic and sell-off coverage
+    severity: medium
+    keywords: [ihsg anjlok, ihsg ambruk, ihsg terjun bebas, ihsg longsor, ihsg rontok, ihsg terkapar, indonesian stocks plunge, indonesia stocks slump, jakarta stocks plunge, trading halt ihsg, panic selling, aksi panik]
+    sectors: []

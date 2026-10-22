@@ -77,11 +77,15 @@ class OCRConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    model_name: str = "gemma2:9b"
+    model_name: str = "qwen3.5:9b"
     base_url: str = "http://localhost:11434/api"
     context_budget_tokens: int = 8000
     temperature: float = 0.0
     timeout_s: int = 600
+    # Reasoning models (Qwen 3.5 and similar) think before answering unless told
+    # not to; structured JSON output does not need it, and on a laptop it costs
+    # minutes. Models without a thinking mode ignore it.
+    think: bool = False
 
 
 class DownloadConfig(BaseModel):
@@ -107,6 +111,8 @@ class AlertsConfig(BaseModel):
     min_severity: str = "warning"
     lookback_days: int = 7
     channels: list[str] = Field(default_factory=lambda: ["jsonl"])
+    # Most desktop notifications one run may show; the rest arrive as one summary.
+    push_max_per_run: int = 5
     jsonl_path: Path = REPO_ROOT / "data" / "alerts" / "alerts.jsonl"
 
     @field_validator("jsonl_path", mode="before")
@@ -141,6 +147,93 @@ class CompanyOverridesConfig(BaseModel):
         return p if p.is_absolute() else (REPO_ROOT / p)
 
 
+class MarketConfig(BaseModel):
+    """Market risk layer (docs/market_risk_plan.md)."""
+
+    catalysts_path: Path = REPO_ROOT / "data" / "catalysts.yaml"
+    index_membership_path: Path = REPO_ROOT / "data" / "index_membership.yaml"
+    # Days ahead of a risk date that its reminder fires.
+    catalyst_lead_days: int = 3
+    # Watchlist companies at or above this exposure score raise an alert.
+    exposure_alert_score: float = 70.0
+    # Fundamental stress breadth raises an alert from this level up.
+    breadth_alert_level: str = "stressed"
+    # Rise, in percentage points versus the prior fiscal year, for each level.
+    breadth_thresholds_pts: dict[str, float] = Field(
+        default_factory=lambda: {"elevated": 5.0, "stressed": 10.0, "crisis": 20.0}
+    )
+    # Fewer companies than this reporting a figure in both years makes the
+    # comparison noise: with 20, four companies flipping moves it 20 points.
+    breadth_min_filers: int = 30
+    # Market data (docs/phase2_market_recon.md).
+    idx_page_url: str = "https://www.idx.co.id/en/market-data/trading-summary/index-summary"
+    jisdor_url: str = "https://www.bi.go.id/id/statistik/informasi-kurs/jisdor/default.aspx"
+    # IDX-IC sector indices tracked for the sector-drawdown signal.
+    sectors: list[str] = Field(
+        default_factory=lambda: [
+            "IDXENERGY",
+            "IDXBASIC",
+            "IDXINDUST",
+            "IDXNONCYC",
+            "IDXCYCLIC",
+            "IDXHEALTH",
+            "IDXFINANCE",
+            "IDXPROPERT",
+            "IDXTECHNO",
+            "IDXINFRA",
+            "IDXTRANS",
+        ]
+    )
+    # Signal thresholds per level; starting points until the phase 5 backtest.
+    thresholds: dict[str, dict[str, float]] = Field(
+        default_factory=lambda: {
+            "drawdown_pct": {"elevated": 5.0, "stressed": 10.0, "crisis": 20.0},
+            "vol_ratio": {"elevated": 1.5, "stressed": 2.0, "crisis": 3.0},
+            "foreign_sell_streak": {"elevated": 5.0, "stressed": 10.0, "crisis": 15.0},
+            "usdidr_change_20d_pct": {"elevated": 2.0, "stressed": 3.0, "crisis": 5.0},
+            "decline_share_pct": {"elevated": 60.0, "stressed": 70.0, "crisis": 80.0},
+            "sector_drawdown_pct": {"elevated": 7.0, "stressed": 12.0, "crisis": 25.0},
+            "sector_breadth_pct": {"elevated": 50.0, "stressed": 70.0, "crisis": 90.0},
+            "active_themes": {"elevated": 1.0, "stressed": 2.0, "crisis": 3.0},
+            "exchange_notices_ratio": {"elevated": 2.5, "stressed": 3.5, "crisis": 5.0},
+        }
+    )
+    # The state is the highest level reached by at least this many signals.
+    regime_min_signals: int = 2
+    # The state steps down only after this many sessions at a lower level.
+    regime_step_down_after_sessions: int = 5
+    # A two-signal crisis also needs IHSG's own drawdown at this level (none: off).
+    regime_crisis_needs_index: str | None = "stressed"
+    # The sector signal: "share" counts sectors at least sector_breadth_cutoff_pct
+    # below their 52-week high; "worst" takes the worst sector, which the phase 5
+    # backtest found reads crisis on most days (docs/market_calibration.md).
+    sector_signal: str = "share"
+    sector_breadth_cutoff_pct: float = 10.0
+    # Crash-risk estimate (component 6): a crash is a fall of at least this many
+    # percent from a day's close at any point within the horizon.
+    crash_risk_drawdown_pct: float = 10.0
+    crash_risk_horizon_sessions: int = 63
+    # The probability that counts as a warning, for the track record and alerts.
+    crash_risk_alert_probability: float = 0.4
+    # The estimate is shown as a forecast only when its walk-forward Brier score
+    # beats the base rate's by at least this share; otherwise only analogs show.
+    crash_risk_min_skill: float = 0.05
+    # An episode closes after this many calm sessions in a row.
+    episode_close_after_calm_sessions: int = 20
+    # Risk discovery (component 5). Both files ship in config/; point these at
+    # your own copies to change the sources or the theme taxonomy.
+    watch_sources_path: Path = REPO_ROOT / "config" / "watch_sources.yaml"
+    risk_themes_path: Path = REPO_ROOT / "config" / "risk_themes.yaml"
+    # A theme is active with at least this many tagged items over three days.
+    theme_active_min_items: int = 3
+
+    @field_validator("catalysts_path", "index_membership_path", "watch_sources_path", "risk_themes_path", mode="before")
+    @classmethod
+    def _to_path(cls, v: Any) -> Path:
+        p = Path(v)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+
 class Config(BaseModel):
     paths: PathsConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -155,6 +248,7 @@ class Config(BaseModel):
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
     theses: ThesesConfig = Field(default_factory=ThesesConfig)
     company_overrides: CompanyOverridesConfig = Field(default_factory=CompanyOverridesConfig)
+    market: MarketConfig = Field(default_factory=MarketConfig)
 
     @model_validator(mode="after")
     def _derive_data_paths(self) -> "Config":
@@ -172,6 +266,10 @@ class Config(BaseModel):
             self.theses.definition_path = data_dir / "theses.yaml"
         if "definition_path" not in self.company_overrides.model_fields_set:
             self.company_overrides.definition_path = data_dir / "company_overrides.yaml"
+        if "catalysts_path" not in self.market.model_fields_set:
+            self.market.catalysts_path = data_dir / "catalysts.yaml"
+        if "index_membership_path" not in self.market.model_fields_set:
+            self.market.index_membership_path = data_dir / "index_membership.yaml"
         return self
 
     def ensure_dirs(self) -> None:
@@ -187,6 +285,7 @@ class Config(BaseModel):
             self.alerts.jsonl_path.parent,
             self.theses.definition_path.parent,
             self.company_overrides.definition_path.parent,
+            self.market.catalysts_path.parent,
         ):
             p.mkdir(parents=True, exist_ok=True)
 

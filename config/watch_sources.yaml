@@ -1,0 +1,160 @@
+# Watched sources for risk discovery (docs/market_risk_plan.md, component 5a).
+# Each was checked by plain HTTP on 2026-10-21; docs/phase4_sources_recon.md
+# records what works, what is blocked, and why some are left out.
+#
+# Fields:
+#   source_id   stable id, stored on every item
+#   kind        rss | html_links | sitemap | json_list | gdelt | google_news
+#   trust       high (official bodies, rating agencies), medium (news), low
+#   url, query  where to fetch; query for gdelt and google_news
+#   match       keep only items containing one of these words (optional)
+#   exclude     drop items containing one of these words (optional)
+#   enabled     false to keep an entry without fetching it
+# html_links needs link_pattern; json_list needs items_path and a title_field
+# or title_template. Only headlines, short excerpts and links are stored.
+#
+# market.watch_sources_path points at your own copy if you change this list.
+
+sources:
+  # --- Indonesian business news (RSS; robots.txt allows these feeds) ---
+  - source_id: cnbc_market
+    name: CNBC Indonesia, market
+    kind: rss
+    trust: medium
+    url: https://www.cnbcindonesia.com/market/rss
+    language: id
+  - source_id: kontan_investasi
+    name: Kontan, investasi
+    kind: rss
+    trust: medium
+    url: https://investasi.kontan.co.id/rss
+    language: id
+    notes: About 25 items cover 4-5 hours; run watch-sync at least hourly to miss none.
+  - source_id: detik_bursa
+    name: Detik Finance, bursa dan valas
+    kind: rss
+    trust: medium
+    url: https://finance.detik.com/bursa-dan-valas/rss
+    language: id
+  - source_id: antara_bursa
+    name: Antara, ekonomi bursa
+    kind: rss
+    trust: medium
+    url: https://www.antaranews.com/rss/ekonomi-bursa.xml
+    language: id
+  - source_id: antara_finansial
+    name: Antara, ekonomi finansial
+    kind: rss
+    trust: medium
+    url: https://www.antaranews.com/rss/ekonomi-finansial.xml
+    language: id
+  - source_id: katadata
+    name: Katadata
+    kind: rss
+    trust: medium
+    url: https://katadata.co.id/rss
+    language: id
+  - source_id: cnn_ekonomi
+    name: CNN Indonesia, ekonomi
+    kind: rss
+    trust: medium
+    url: https://www.cnnindonesia.com/ekonomi/rss
+    language: id
+  - source_id: bloomberg_technoz
+    name: Bloomberg Technoz
+    kind: rss
+    trust: medium
+    url: https://www.bloombergtechnoz.com/rss
+    language: id
+
+  # --- Official bodies ---
+  - source_id: setkab
+    name: Sekretariat Kabinet (the President's statements and cabinet news)
+    kind: rss
+    trust: medium
+    url: https://setkab.go.id/feed/
+    language: id
+    notes: Official, but mostly ceremonial; the presidential-speech theme picks out the economic-policy items. Its firewall blocks paging, so only the feed's first page is read.
+  - source_id: bi_press
+    name: Bank Indonesia, press releases
+    kind: html_links
+    trust: high
+    url: https://www.bi.go.id/id/publikasi/ruang-media/news-release/default.aspx
+    link_pattern: news-release/Pages/sp_\d+\.aspx
+    language: id
+  - source_id: ojk_press
+    name: OJK, press releases
+    kind: html_links
+    trust: high
+    url: https://ojk.go.id/id/berita-dan-kegiatan/siaran-pers/default.aspx
+    link_pattern: siaran-pers/Pages/.+\.aspx
+    language: id
+    notes: The page is slow; a timeout is recorded as an error and retried next run.
+
+  # --- Rating agencies and index providers ---
+  - source_id: fitch_research
+    name: Fitch Ratings research on Indonesia
+    kind: sitemap
+    trust: high
+    url: https://www.fitchratings.com/sitemap-research.xml
+    match: [indonesia]
+    language: en
+
+  # --- Hazards and health ---
+  - source_id: bmkg_quakes
+    name: BMKG, earthquakes of magnitude 6 and above
+    kind: json_list
+    trust: high
+    url: https://data.bmkg.go.id/DataMKG/TEWS/gempaterkini.json
+    items_path: Infogempa.gempa
+    title_template: "Gempa M{Magnitude} {Wilayah}, {Potensi} (BMKG)"
+    date_field: DateTime
+    url_template: "https://www.bmkg.go.id/gempabumi/gempabumi-terkini#{DateTime}"
+    min_values: {Magnitude: 6.0}
+    language: id
+  - source_id: gdacs
+    name: GDACS disaster alerts for Indonesia (orange and red)
+    kind: rss
+    trust: high
+    url: https://www.gdacs.org/xml/rss.xml
+    match: [indonesia]
+    exclude: [green]
+    language: en
+  - source_id: who_outbreaks
+    name: WHO Disease Outbreak News
+    kind: json_list
+    trust: high
+    url: https://www.who.int/api/news/diseaseoutbreaknews?$orderby=PublicationDateAndTime%20desc&$top=20
+    items_path: value
+    title_field: Title
+    date_field: PublicationDateAndTime
+    url_template: "https://www.who.int/emergencies/disease-outbreak-news/item{ItemDefaultUrl}"
+    language: en
+
+  # --- Wide net ---
+  - source_id: gdelt_indonesia_markets
+    name: GDELT, Indonesian market news worldwide
+    kind: gdelt
+    trust: medium
+    query: '("Indonesian stocks" OR "Indonesia stocks" OR IHSG OR "Jakarta Composite" OR "Bursa Efek Indonesia")'
+    notes: GDELT throttles hard (HTTP 429); a refused call is recorded and skipped. Use --since to reach back months for a replay.
+
+  # --- Off by default ---
+  # Google News caught the MSCI consultation hours before GDELT and is the only
+  # route to some blocked sites (presidenri.go.id, S&P, Moody's). Its robots.txt
+  # disallows automated access and its feed terms allow personal, non-commercial
+  # feed readers only; enable these only if you accept that for your own use.
+  - source_id: google_news_msci_indonesia
+    name: Google News, MSCI and Indonesia
+    kind: google_news
+    trust: medium
+    query: MSCI Indonesia when:7d
+    language: id
+    enabled: false
+  - source_id: google_news_presidenri
+    name: Google News, presidenri.go.id
+    kind: google_news
+    trust: medium
+    query: site:presidenri.go.id when:7d
+    language: id
+    enabled: false

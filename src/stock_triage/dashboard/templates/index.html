@@ -31,6 +31,7 @@
     <nav class="viewNav" id="viewNav" aria-label="Workspace views">
       <div class="viewTabs" role="tablist">
         <button class="viewTab active" data-view="home" type="button" role="tab" aria-selected="true">Home</button>
+        <button class="viewTab" data-view="market" type="button" role="tab" aria-selected="false">Market</button>
         <button class="viewTab" data-view="company" type="button" role="tab" aria-selected="false">Company</button>
         <button class="viewTab" data-view="review" type="button" role="tab" aria-selected="false">Review</button>
         <button class="viewTab" data-view="ops" type="button" role="tab" aria-selected="false">Ops</button>
@@ -68,6 +69,11 @@
 
       <section class="mainColumn">
         <section class="screenStack" data-views="home">
+        <article class="panel" data-views="home">
+          <div class="sectionEyebrow">Market State</div>
+          <div id="marketState"></div>
+        </article>
+
         <article class="subViewNavShell panel" data-views="home">
           <div class="sectionEyebrow">Home Modes</div>
           <div class="subViewNav">
@@ -118,6 +124,10 @@
 
         </section>
 
+        <section class="screenStack" data-views="market">
+          <div id="marketView" aria-live="polite"></div>
+        </section>
+
         <section class="screenStack" data-views="review">
         <article class="panel">
           <div class="sectionEyebrow">Review Loop</div>
@@ -150,6 +160,16 @@
         </article>
 
         <section class="companyStack" data-subpanels="company:summary">
+          <article class="panel">
+            <div class="sectionEyebrow">Latest Financials</div>
+            <h2>Key figures</h2>
+            <div id="keyFigures"></div>
+          </article>
+          <article class="panel">
+            <div class="sectionEyebrow">Market Risk</div>
+            <h2>Exposure</h2>
+            <div id="exposureCard"></div>
+          </article>
           <article class="panel">
             <div class="sectionEyebrow">Company Intelligence</div>
             <h2>Summary</h2>
@@ -350,6 +370,7 @@
   <div id="toastRegion" class="toastRegion" aria-live="polite" aria-atomic="false"></div>
 
   <script id="dashboardBootstrap" type="application/json">__BOOTSTRAP_JSON__</script>
+  <script src="__STATIC_ROOT__/market.js"></script>
   <script src="__STATIC_ROOT__/app.js"></script>
 </body>
 </html>

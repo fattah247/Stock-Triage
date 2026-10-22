@@ -10,10 +10,13 @@ from datetime import date, datetime, timedelta, timezone
 from ..canary import load_canary_status
 from ..config import Config
 from ..coverage import default_coverage_range, load_coverage_plan, load_coverage_plan_audit, load_coverage_status_from_conn
-from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..db import WriterQueue, connect, configure_pragmas, preferred_metric_sql, run_migrations
 from ..fiscal_year import resolve_fiscal_year_end_month
 from ..hardening import load_backlog
 from ..intelligence.pipeline import DERIVED_VERSION
+from ..market.catalysts import load_upcoming_catalysts
+from ..market.exposure import load_latest_exposure
+from ..market.signals import load_market_state
 from ..intelligence.review import (
     load_intelligence_kpis,
     load_nuance_audit,
@@ -143,6 +146,7 @@ def load_company_detail(cfg: Config, ticker: str) -> dict[str, object]:
         revisions = _load_revision_history_for_ticker(conn, ticker=ticker_upper, limit=50)
         company_snapshot = _load_company_snapshot_for_ticker(conn, ticker=ticker_upper)
         sector_rollup = _load_sector_rollup_for_ticker(conn, ticker=ticker_upper, company_snapshot=company_snapshot)
+        exposure = load_latest_exposure(conn, ticker=ticker_upper)
     finally:
         conn.close()
 
@@ -154,6 +158,7 @@ def load_company_detail(cfg: Config, ticker: str) -> dict[str, object]:
         "revisions": revisions,
         "company_snapshot": company_snapshot,
         "sector_rollup": sector_rollup,
+        "exposure": exposure,
     }
 
 
@@ -215,11 +220,13 @@ def _load_issuers(conn: sqlite3.Connection) -> list[dict[str, object]]:
             c.active_status,
             c.last_seen_at,
             COUNT(d.document_id) AS document_count,
-            MAX(d.updated_at) AS latest_document_at
+            -- When the filing was published, not when a pipeline stage last touched it.
+            MAX(COALESCE(d.source_modified_at, d.retrieved_at)) AS latest_filing_at
         FROM companies c
         LEFT JOIN documents d ON d.ticker = c.ticker
         GROUP BY c.ticker, c.issuer_name, c.sector, c.subsector, c.active_status, c.last_seen_at
-        ORDER BY COALESCE(MAX(d.updated_at), c.last_seen_at) DESC, c.ticker ASC
+        -- Issuers with filings first, newest filing first; discovery recency only orders the rest.
+        ORDER BY latest_filing_at IS NULL, latest_filing_at DESC, c.last_seen_at DESC, c.ticker ASC
         """
     ).fetchall()
     return [dict(row) for row in rows]
@@ -237,6 +244,8 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
             d.process_state,
             d.retrieved_at,
             d.updated_at,
+            COALESCE(d.source_modified_at, d.retrieved_at) AS filed_at,
+            dc.title,
             d.local_path,
             d.original_url,
             d.version_group_id,
@@ -246,6 +255,9 @@ def _load_latest_documents(conn: sqlite3.Connection, *, limit: int) -> list[dict
                 WHERE rr.document_id = d.document_id AND rr.triggered = 1
             ), 0) AS triggered_rules
         FROM documents d
+        LEFT JOIN document_candidates dc
+          ON dc.source_name = d.source_name
+         AND dc.source_record_id = d.source_record_id
         ORDER BY d.updated_at DESC, d.document_id DESC
         LIMIT ?
         """,
@@ -271,6 +283,8 @@ def _load_documents_for_ticker(
             d.process_state,
             d.retrieved_at,
             d.updated_at,
+            COALESCE(d.source_modified_at, d.retrieved_at) AS filed_at,
+            dc.title,
             d.local_path,
             d.original_url,
             d.version_group_id,
@@ -280,13 +294,83 @@ def _load_documents_for_ticker(
                 WHERE rr.document_id = d.document_id AND rr.triggered = 1
             ), 0) AS triggered_rules
         FROM documents d
+        LEFT JOIN document_candidates dc
+          ON dc.source_name = d.source_name
+         AND dc.source_record_id = d.source_record_id
         WHERE d.ticker = ?
-        ORDER BY d.updated_at DESC, d.document_id DESC
+        ORDER BY filed_at DESC, d.updated_at DESC, d.document_id DESC
         LIMIT ?
         """,
         (ticker, limit),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_market_risk(conn: sqlite3.Connection, cfg: Config, *, today: date) -> dict[str, object]:
+    """Home's Market State strip: the state, the next risk dates, and the most exposed names."""
+    watchlist = {ticker.upper() for ticker in cfg.alerts.watchlist}
+    upcoming = load_upcoming_catalysts(conn, today=today, days=30, watchlist=watchlist)[:4]
+    where = f"AND es.ticker IN ({','.join('?' for _ in watchlist)})" if watchlist else ""
+    exposed = conn.execute(
+        f"""
+        SELECT es.ticker, es.score, es.components_json
+        FROM exposure_scores es
+        WHERE es.as_of_date = (SELECT MAX(as_of_date) FROM exposure_scores)
+          {where}
+        ORDER BY es.score DESC, es.ticker ASC
+        LIMIT 3
+        """,
+        tuple(sorted(watchlist)),
+    ).fetchall()
+    from ..market.discovery import active_themes
+    from ..market.forecast import load_crash_risk
+    from ..market.themes import ThemeFileError, load_themes
+
+    risk = load_crash_risk(conn, history=1)
+    try:
+        themes = active_themes(
+            conn, themes=load_themes(conn, cfg.market.risk_themes_path), as_of=today, min_items=cfg.market.theme_active_min_items
+        )
+    except ThemeFileError:
+        themes = []
+    findings_open = conn.execute("SELECT COUNT(*) FROM emerging_findings WHERE status = 'open'").fetchone()[0]
+    return {
+        "state": load_market_state(conn),
+        "crash_risk": None
+        if risk is None
+        else {
+            "trade_date": risk["trade_date"],
+            "trustworthy": risk["trustworthy"],
+            # The number is withheld until the estimate beats its base rate.
+            "probability": risk["probability"] if risk["trustworthy"] else None,
+            "base_rate": risk["base_rate"],
+            "analog": (risk["analogs"] or [None])[0],
+        },
+        "active_themes": [
+            {"title": item["title"], "severity": item["severity"], "items": item["items"]} for item in themes[:3]
+        ],
+        "findings_open": findings_open,
+        "upcoming": [
+            {"date": item.catalyst_date.isoformat(), "kind": item.kind, "title": item.title, "severity": item.severity}
+            for item in upcoming
+        ],
+        "exposure_scope": "watchlist" if watchlist else "all",
+        "most_exposed": [
+            {
+                "ticker": row["ticker"],
+                "score": row["score"],
+                "top_reason": next(
+                    (
+                        item["reason"]
+                        for item in sorted(json.loads(row["components_json"]).get("components", []), key=lambda item: -item["points"])
+                        if item["points"]
+                    ),
+                    None,
+                ),
+            }
+            for row in exposed
+        ],
+    }
 
 
 def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, object]:
@@ -589,6 +673,7 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
 
     return {
         "as_of": now.isoformat(),
+        "market_risk": _load_market_risk(conn, cfg, today=now.date()),
         "counts": {
             "new_disclosures_since_sync": new_disclosures_since_sync,
             "material_event_filings_since_sync": material_event_filings_today,
@@ -972,7 +1057,7 @@ def _load_late_periodic_rows(
 
 def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
-        """
+        f"""
         SELECT
             mi.ticker,
             mi.metric_name,
@@ -985,6 +1070,7 @@ def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
         FROM metric_items mi
         JOIN documents d ON d.document_id = mi.document_id
         WHERE mi.ticker IS NOT NULL
+          AND {preferred_metric_sql("mi")}
         ORDER BY COALESCE(mi.period_end_date, '') DESC, mi.fiscal_year DESC, d.updated_at DESC
         """
     ).fetchall()
@@ -997,7 +1083,7 @@ def _load_metric_snapshot(conn: sqlite3.Connection) -> list[dict[str, object]]:
 
 def _load_metrics_for_ticker(conn: sqlite3.Connection, *, ticker: str) -> list[dict[str, object]]:
     rows = conn.execute(
-        """
+        f"""
         SELECT
             mi.ticker,
             mi.metric_name,
@@ -1010,6 +1096,7 @@ def _load_metrics_for_ticker(conn: sqlite3.Connection, *, ticker: str) -> list[d
         FROM metric_items mi
         JOIN documents d ON d.document_id = mi.document_id
         WHERE mi.ticker = ?
+          AND {preferred_metric_sql("mi")}
         ORDER BY COALESCE(mi.period_end_date, '') DESC, mi.fiscal_year DESC, d.updated_at DESC
         """,
         (ticker,),
@@ -1141,7 +1228,7 @@ def _load_revision_history(conn: sqlite3.Connection, *, limit: int) -> list[dict
             source_record_id,
             ticker,
             COUNT(*) AS revision_count,
-            MAX(updated_at) AS latest_revision_at
+            MAX(COALESCE(source_modified_at, retrieved_at)) AS latest_revision_at
         FROM documents
         WHERE version_group_id IS NOT NULL
         GROUP BY version_group_id, source_name, source_record_id, ticker
@@ -1167,7 +1254,7 @@ def _load_revision_history_for_ticker(
             source_record_id,
             ticker,
             COUNT(*) AS revision_count,
-            MAX(updated_at) AS latest_revision_at
+            MAX(COALESCE(source_modified_at, retrieved_at)) AS latest_revision_at
         FROM documents
         WHERE version_group_id IS NOT NULL
           AND ticker = ?
@@ -1449,12 +1536,14 @@ def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, 
             ae.created_at AS happened_at,
             ae.ticker,
             ae.document_id,
+            ae.signal_kind,
             ae.signal_name,
             ae.severity,
             d.local_path,
             d.original_url
         FROM alert_events ae
-        JOIN documents d ON d.document_id = ae.document_id
+        -- Market alerts have no document.
+        LEFT JOIN documents d ON d.document_id = ae.document_id
         ORDER BY ae.created_at DESC, ae.alert_event_id DESC
         LIMIT ?
         """,
@@ -1470,7 +1559,7 @@ def _load_inbox_rows(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, 
                 "source_name": "alert_events",
                 "severity": row["severity"] or "warning",
                 "title": row["signal_name"],
-                "summary": "Watchlist alert emitted.",
+                "summary": "Market alert emitted." if row["document_id"] is None else "Watchlist alert emitted.",
                 "local_path": row["local_path"],
                 "original_url": row["original_url"],
             }

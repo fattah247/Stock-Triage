@@ -36,7 +36,7 @@ def test_phase0_end_to_end(tmp_config):
     # 1. Migrations apply via the writer queue.
     with WriterQueue(cfg) as wq:
         applied = wq.submit(run_migrations)
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
 
         # 2. Re-running is a no-op.
         again = wq.submit(run_migrations)
@@ -93,7 +93,7 @@ def test_phase0_end_to_end(tmp_config):
         version = rconn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        assert [r["version"] for r in version] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     finally:
         rconn.close()
 
@@ -119,10 +119,18 @@ def test_migrations_tolerate_duplicate_add_column_on_partial_upgrade(tmp_config)
         conn.execute("CREATE TABLE IF NOT EXISTS nuance_findings (finding_id TEXT PRIMARY KEY, severity_tier TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS company_snapshots (snapshot_id TEXT PRIMARY KEY, issuer_condition TEXT NOT NULL DEFAULT 'watch')")
         conn.execute("CREATE TABLE IF NOT EXISTS review_queue_items (review_item_id TEXT PRIMARY KEY)")
+        # A version-16 database also has these; 0022 rebuilds alert_events, whose key references documents.
+        conn.execute("CREATE TABLE IF NOT EXISTS documents (document_id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS alert_events (alert_event_id TEXT PRIMARY KEY, channel TEXT NOT NULL, "
+            "source_name TEXT NOT NULL, document_id TEXT NOT NULL, ticker TEXT, signal_kind TEXT NOT NULL, "
+            "signal_name TEXT NOT NULL, severity TEXT NOT NULL, alert_key TEXT NOT NULL, payload_json TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)"
+        )
         applied = run_migrations(conn)
-        assert applied == [17, 18, 19, 20, 21]
+        assert applied == [17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
         versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-        assert [row["version"] for row in versions][-5:] == [17, 18, 19, 20, 21]
+        assert [row["version"] for row in versions][-10:] == [17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     finally:
         conn.close()
 

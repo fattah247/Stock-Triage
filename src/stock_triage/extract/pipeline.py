@@ -12,10 +12,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..config import Config
-from ..db import WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
+from ..db import WORKBOOK_PARSE_STRATEGY, WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
 from ..fiscal_year import IDX_REPORT_PERIODS, fiscal_period_end, resolve_fiscal_year_end_month
 
-EXTRACTOR_VERSION = "phase5-v3"
+EXTRACTOR_VERSION = "phase5-v4"
 FINANCIAL_REQUIRED_METRICS = {
     "revenue",
     "gross_profit",
@@ -57,6 +57,7 @@ class ExtractDocument:
     raw_metadata: dict[str, Any]
     title: str | None
     fiscal_year_end_month: int | None = None
+    parse_strategy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -368,6 +369,7 @@ def _select_documents(
                 d.ticker,
                 d.parser_version,
                 d.process_state,
+                d.parse_strategy,
                 dc.raw_metadata,
                 dc.title,
                 c.fiscal_year_end_month
@@ -393,6 +395,7 @@ def _select_documents(
                 raw_metadata=json.loads(row["raw_metadata"]) if row["raw_metadata"] else {},
                 title=row["title"],
                 fiscal_year_end_month=row["fiscal_year_end_month"],
+                parse_strategy=row["parse_strategy"],
             )
             for row in rows
         ]
@@ -412,6 +415,7 @@ def _select_documents(
             d.ticker,
             d.parser_version,
             d.process_state,
+            d.parse_strategy,
             dc.raw_metadata,
             dc.title,
             c.fiscal_year_end_month
@@ -441,6 +445,7 @@ def _select_documents(
             raw_metadata=json.loads(row["raw_metadata"]) if row["raw_metadata"] else {},
             title=row["title"],
             fiscal_year_end_month=row["fiscal_year_end_month"],
+            parse_strategy=row["parse_strategy"],
         )
         for row in rows
     ]
@@ -482,7 +487,13 @@ def _extract_document(
     metrics: list[ExtractedMetric] = []
     events: list[ExtractedEvent] = []
 
-    if document.source_name == "idx_financial_reports":
+    if document.source_name == "idx_financial_reports" and document.parse_strategy == WORKBOOK_PARSE_STRATEGY:
+        # Statement rows only: the event patterns read narrative text, which the
+        # filing's PDF siblings carry. Imported here because workbook builds on this module.
+        from .workbook import extract_workbook_metrics
+
+        metrics.extend(extract_workbook_metrics(document, chunks, fiscal_year_end_month=fiscal_year_end_month))
+    elif document.source_name == "idx_financial_reports":
         metrics.extend(_extract_financial_metrics(document, chunks, fiscal_year_end_month=fiscal_year_end_month))
         events.extend(_extract_financial_events(document, chunks))
     if document.source_name == "idx_disclosures":

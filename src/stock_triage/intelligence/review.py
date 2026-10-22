@@ -372,8 +372,55 @@ def _build_digest_payload(conn, cfg: Config, *, digest_date: date, scope: str, l
             "tickers_with_alerts": sum(1 for items in alerts_by_ticker.values() if items),
             "highest_severity": _highest_alert_severity(alert_rows),
         },
+        "market": _digest_market_section(conn, cfg, digest_date=digest_date),
     }
     return payload
+
+
+def _digest_market_section(conn, cfg: Config, *, digest_date: date) -> dict[str, object] | None:
+    """The market state, crash risk, active themes and emerging findings for the week."""
+    from ..market.discovery import active_themes, load_open_findings
+    from ..market.forecast import load_crash_risk
+    from ..market.signals import load_market_state
+    from ..market.themes import ThemeFileError, load_themes
+
+    state = load_market_state(conn, history=5)
+    risk = load_crash_risk(conn, history=1)
+    try:
+        themes = active_themes(
+            conn,
+            themes=load_themes(conn, cfg.market.risk_themes_path),
+            as_of=digest_date,
+            min_items=cfg.market.theme_active_min_items,
+        )
+    except ThemeFileError:
+        themes = []
+    findings = load_open_findings(conn, limit=10)
+    if state is None and risk is None and not themes and not findings:
+        return None
+    return {
+        "state": None
+        if state is None
+        else {
+            "trade_date": state["trade_date"],
+            "regime": state["regime"],
+            "drivers": [item.get("text") for item in state.get("drivers", [])[:3]],
+        },
+        "crash_risk": None
+        if risk is None
+        else {
+            "trade_date": risk["trade_date"],
+            "probability": risk["probability"] if risk["trustworthy"] else None,
+            "trustworthy": risk["trustworthy"],
+            "base_rate": risk["base_rate"],
+            "analogs": risk["analogs"][:3],
+        },
+        "active_themes": themes[:8],
+        "emerging_findings": [
+            {"finding_id": item["finding_id"], "kind": item["kind"], "term": item["term"], "detected_on": item["detected_on"]}
+            for item in findings
+        ],
+    }
 
 
 def _persist_digest(conn, payload: dict[str, object], *, digest_date: str, scope: str) -> DigestRunResult:
@@ -1104,6 +1151,20 @@ def _build_golden_set_payload(conn, *, ticker: str | None, limit: int) -> dict[s
         summary = no_case_reason
     else:
         summary = f"Audited {len(rows)} snapshot row(s): {passed} passed, {failed} failed, {warning} warning."
+
+    # Golden dates for the market state join the sample run once market data exists.
+    if not ticker and conn.execute("SELECT 1 FROM market_regime_days LIMIT 1").fetchone() is not None:
+        from ..market.backtest import golden_cases_from_db
+
+        for case in golden_cases_from_db(conn):
+            cases.append({"ticker": "MARKET", **case})
+            if case["status"] == "pass":
+                passed += 1
+            elif case["status"] == "fail":
+                failed += 1
+            else:
+                warning += 1
+        summary = f"{summary} Market golden dates included."
 
     return {
         "scope": "ticker" if ticker else "snapshot_sample",
