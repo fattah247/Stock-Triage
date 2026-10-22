@@ -48,10 +48,10 @@ def test_market_sync_stores_notices_and_daily_counts(tmp_config, monkeypatch):
         yield fake
 
     result = run_market_sync(
-        tmp_config, start=date(2026, 10, 15), end=date(2026, 10, 16), idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
+        tmp_config, start=date(2026, 10, 15), end=date(2026, 10, 16), history=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
     )
     again = run_market_sync(
-        tmp_config, start=date(2026, 10, 15), end=date(2026, 10, 17), idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
+        tmp_config, start=date(2026, 10, 15), end=date(2026, 10, 17), history=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
     )
 
     assert result.notices_new == 3 and again.notices_new == 0

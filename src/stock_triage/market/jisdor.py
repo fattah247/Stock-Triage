@@ -20,6 +20,8 @@ from ..parse.workbook import WorkbookError, read_workbook, split_cells
 
 SOURCE_NAME = "bi_jisdor"
 SERIES_ID = "fx:USDIDR_JISDOR"
+# Bank Indonesia's first JISDOR fixing; an export of an earlier year is empty.
+FIRST_DAY = date(2013, 5, 20)
 _HIDDEN_INPUT = re.compile(r'<input[^>]+type="hidden"[^>]+name="([^"]+)"[^>]+value="([^"]*)"')
 _PAUSE_S = 1.5
 

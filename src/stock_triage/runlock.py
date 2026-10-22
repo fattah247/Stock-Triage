@@ -42,6 +42,7 @@ PIPELINE_COMMANDS = frozenset(
         "catalysts-sync",
         "exposure-run",
         "market-sync",
+        "market-import",
         "market-signals",
         "market-daily",
         "crash-risk",

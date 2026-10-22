@@ -1,4 +1,9 @@
-"""``market-sync``: daily IDX summaries and Bank Indonesia's JISDOR into ``market_series_daily``."""
+"""``market-sync``: daily IDX summaries and Bank Indonesia's JISDOR into ``market_series_daily``.
+
+The first sync also fetches the history before IDX's summaries begin in 2020:
+the composite's daily closes from 2009 out of IDX's statistics reports
+(``idx_history``), and JISDOR from its first fixing in 2013.
+"""
 
 from __future__ import annotations
 
@@ -26,10 +31,16 @@ from .jisdor import SERIES_ID as JISDOR_SERIES
 from .jisdor import SOURCE_NAME as JISDOR_SOURCE
 from .exchange_notices import SOURCE_NAME as NOTICES_SOURCE
 from .exchange_notices import fetch_exchange_notices, persist_notices, write_notice_series
+from .idx_history import SOURCE_NAME as HISTORY_SOURCE
+from .idx_history import fetch_history, store_history
+from .jisdor import FIRST_DAY as JISDOR_FIRST_DAY
 from .jisdor import fetch_jisdor_export, parse_jisdor_export
 
 # Without a backfill, a sync looks back this far for missing days.
 DEFAULT_LOOKBACK_DAYS = 10
+# History fills the years before IDX's summaries start (2020-01-02); from then
+# on, the sync's own range covers both sources.
+HISTORY_END_YEAR = 2019
 # This many failed days in a row means the source is down or the browser is gone,
 # not that a few days are bad: stop and leave the rest for the next run.
 MAX_CONSECUTIVE_FAILURES = 3
@@ -46,6 +57,9 @@ class MarketSyncResult:
     idx_days_left: int = 0
     jisdor_rates: int = 0
     notices_new: int = 0
+    history_days: int = 0
+    history_first: date | None = None
+    history_last: date | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -55,10 +69,16 @@ def run_market_sync(
     start: date | None = None,
     end: date | None = None,
     refresh: bool = False,
+    history: bool = True,
     idx_fetcher_factory: Callable[[], AbstractContextManager[IDXMarketFetcher]] | None = None,
     jisdor_client: httpx.Client | None = None,
 ) -> MarketSyncResult:
-    """Fetch every weekday in ``start``..``end`` not yet synced (all of them with ``refresh``)."""
+    """Fetch every weekday in ``start``..``end`` not yet synced (all of them with ``refresh``).
+
+    With ``history``, also fetch the pre-2020 history still missing: IDX's
+    statistics reports once (again with ``refresh``), and each JISDOR year
+    from 2013 that holds no rate yet.
+    """
     cfg.ensure_dirs()
     end = end or datetime.now(timezone.utc).date()
     start = start or end - timedelta(days=DEFAULT_LOOKBACK_DAYS)
@@ -72,12 +92,14 @@ def run_market_sync(
             done = set() if refresh else _synced_days(reader, IDX_SOURCE)
             # Notices are fetched once a day, even when every trading day is already synced.
             notices_due = refresh or end not in _synced_days(reader, NOTICES_SOURCE)
+            history_due = history and (refresh or not _synced_days(reader, HISTORY_SOURCE))
+            jisdor_history = _missing_jisdor_years(reader) if history else []
         finally:
             reader.close()
 
         pending = [day for day in _weekdays(start, end) if day not in done]
         result.idx_days_skipped = len(list(_weekdays(start, end))) - len(pending)
-        if pending or notices_due:
+        if pending or notices_due or history_due:
             factory = idx_fetcher_factory or (lambda: open_idx_fetcher(cfg))
             with factory() as fetcher:
                 failures = 0
@@ -110,11 +132,23 @@ def run_market_sync(
                     else:
                         result.notices_new = wq.submit(lambda conn, n=notices: persist_notices(conn, notices=n))
                         wq.submit(lambda conn, n=len(notices): _record_ledger(conn, source_name=NOTICES_SOURCE, trade_date=end, row_count=n))
+                if history_due and not result.idx_days_left:
+                    try:
+                        closes = fetch_history(fetcher)
+                        stored = wq.submit(lambda conn, c=closes: store_history(conn, closes=c, fetched_on=end))
+                    except Exception as exc:  # noqa: BLE001 - the daily sync must not fail with it
+                        result.errors.append(f"{HISTORY_SOURCE}: {exc}")
+                    else:
+                        result.history_days = stored.stored
+                        result.history_first, result.history_last = stored.first, stored.last
         wq.submit(write_notice_series)
 
+        ranges = list(_year_ranges(start, end))
+        covered = {year_start.year for year_start, _ in ranges}
+        ranges += [_full_year(year) for year in jisdor_history if year not in covered]
         client_context = nullcontext(jisdor_client) if jisdor_client is not None else _jisdor_client(cfg)
         with client_context as client:
-            for year_start, year_end in _year_ranges(start, end):
+            for year_start, year_end in sorted(ranges):
                 try:
                     rates = parse_jisdor_export(
                         fetch_jisdor_export(client, url=cfg.market.jisdor_url, start=year_start, end=year_end)
@@ -207,6 +241,22 @@ def _weekdays(start: date, end: date) -> Iterator[date]:
 def _year_ranges(start: date, end: date) -> Iterator[tuple[date, date]]:
     for year in range(start.year, end.year + 1):
         yield max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
+
+
+def _full_year(year: int) -> tuple[date, date]:
+    return max(JISDOR_FIRST_DAY, date(year, 1, 1)), date(year, 12, 31)
+
+
+def _missing_jisdor_years(conn: sqlite3.Connection) -> list[int]:
+    """Years from JISDOR's first fixing up to ``HISTORY_END_YEAR`` that hold no rate yet."""
+    present = {
+        int(row["year"])
+        for row in conn.execute(
+            "SELECT DISTINCT substr(trade_date, 1, 4) AS year FROM market_series_daily WHERE series_id = ?",
+            (JISDOR_SERIES,),
+        )
+    }
+    return [year for year in range(JISDOR_FIRST_DAY.year, HISTORY_END_YEAR + 1) if year not in present]
 
 
 def _jisdor_client(cfg: Config) -> httpx.Client:

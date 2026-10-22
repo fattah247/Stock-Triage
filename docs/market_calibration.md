@@ -108,7 +108,40 @@ its walk-forward record beats the base rate by `market.crash_risk_min_skill`
 - **`exchange_notices`** (suspensions plus UMA notices over five sessions, against the past year's usual): data starts on 2023-10-23, and the signal reads only from about April 2024. It has been elevated on 3% of days and stressed on 1%. Speculative frenzies drive UMA more than crashes do, so it is a weak crash signal; the backtest should keep judging it.
 - **`active_themes`** (high-severity risk themes active at once): it has no history before watch-sync started, so it cannot be backtested yet. It needs news archives from past episodes (plan, risk 3).
 
-## 4. Caveats
+## 4. Re-run on IDX's history from 2009 (2026-10-22)
+
+`market-sync` now also fetches IHSG daily closes for 2009–2019 from IDX's own
+statistics reports, and JISDOR from May 2013 (plan, "History before 2020").
+That gives 4,304 trading days, 2009-01-05 to 2026-10-21. The days before 2020
+carry only the close and the rupiah, so on them the state rests on drawdown,
+volatility and the rupiah.
+
+- **Golden dates:** all four still pass.
+- **States:** calm 60%, elevated 22%, stressed 9%, crisis 9% of days.
+- **Episodes:** 11, five of them before 2020.
+
+| Opened | Closed | Worst | Max drawdown | Bottom | Further 10% fall within 63 sessions |
+|---|---|---|---:|---|---|
+| 2011-09-22 | 2011-12-16 | crisis | 22.0% | 2011-10-04 | no |
+| 2013-06-13 | 2014-02-18 | crisis | 23.9% | 2013-08-27 | yes |
+| 2015-08-12 | 2016-02-25 | crisis | 25.4% | 2015-09-28 | no |
+| 2016-05-20 | 2016-07-14 | stressed | 11.5% | 2016-05-24 | no |
+| 2018-05-07 | 2018-12-03 | stressed | 15.8% | 2018-07-03 | no |
+
+The bottoms match the known lows of the 2011 euro crisis, the 2013 taper
+tantrum, the 2015 yuan devaluation and the 2018 rupiah slide. The finding in
+section 1, that every episode reaching crisis was a real crash, no longer
+holds. In 2011 and 2015 the state reached crisis only after most of the fall,
+so less than 10% followed.
+
+**The crash-risk estimate is still withheld.** On 3,871 scored days, 645 of
+which a crash followed, its Brier score is 0.163 against the base rate's
+0.144: skill −13%. Its warnings caught a crash 7% of the time, and 83% of them
+were false alarms. Five more crashes did not make the price features
+predictive. Before 2020 the model sees only drawdown, volatility, trend,
+momentum and the rupiah, and counts its other inputs as average.
+
+## 5. Caveats
 
 - **The rules were tuned on the same history they are judged on,** which holds three crashes. The structural change (share instead of worst) is motivated by how a maximum over 11 sectors behaves, not by the data alone. The 10% cutoff and the 50/70/90 levels were picked from six candidates.
 - **Re-run `market-backtest` after each new episode closes,** and compare against this table before changing a threshold.
@@ -117,7 +150,7 @@ its walk-forward record beats the base rate by `market.crash_risk_min_skill`
 ## How to reproduce
 
 ```bash
-python -m stock_triage market-sync --backfill-from 2020-01-02
+python -m stock_triage market-sync --backfill-from 2020-01-02   # the first run also fetches 2009-2019
 python -m stock_triage market-signals
 python -m stock_triage crash-risk
 python -m stock_triage market-backtest      # writes <data_dir>/reports/market_backtest.md

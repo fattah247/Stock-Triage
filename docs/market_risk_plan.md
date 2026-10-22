@@ -109,7 +109,8 @@ access (IDX sits behind a managed challenge; see `docs/phase1_recon.md`), and
 Bank Indonesia for JISDOR. The exact endpoints are unverified; phase 2 opens
 with a recon spike written up the way `phase1_recon.md` is.
 
-Commands: `market-sync` (daily) and `market-sync --backfill-from YYYY-MM-DD`.
+Commands: `market-sync` (daily) and `market-sync --backfill-from YYYY-MM-DD`;
+`market-import --csv PATH` for IHSG history from before IDX's endpoints begin.
 
 ### 2. Signals and market state (`market/signals.py`)
 
@@ -426,6 +427,7 @@ Departures from the design above, each for a reason found while building:
 - **Commands:**
   - `market-sync` (IDX index and stock summaries, plus Bank Indonesia's JISDOR; `--backfill-from`, `--to`, `--refresh`);
   - `market-signals` (signals and the daily state);
+  - `market-import` (added 2026-10-22: daily index closes from a CSV the user downloaded, for history before 2009; see below);
   - `alerts-run` now also emits a `market_regime` alert once for each stretch of the same state, even when the first run after the change comes days later (or after a backfill).
 - **Resuming:** each day is stored as it arrives, and a later run fetches only the days still missing. After three failed days in a row (the IDX page closed, or the site is down), the sync stops, exits 1, and leaves the rest for the next run.
 - **Code and schema:** `market/idx_market.py`, `market/jisdor.py`, `market/sync.py` and `market/signals.py`. Migration `0023_market_series.sql` adds `market_series_daily`, a per-day `market_sync_days` ledger, `market_signal_runs` and `market_regime_days`.
@@ -433,12 +435,41 @@ Departures from the design above, each for a reason found while building:
 
 Departures from the design, each for a reason found while building:
 
-- **History starts in January 2020,** because that is as far back as IDX's endpoints go, not ten years. Backtests can cover 2020, 2025 and October 2026, but not 2015 or 2018.
+- **IDX's daily summaries start in January 2020,** because that is as far back as its endpoints go, not ten years. The composite's close alone goes back to 2009 in IDX's statistics reports, which `market-sync` also fetches (below). The 2008 crash needs closes imported with `market-import`.
 - **Foreign net flow is an estimate** (`flow:foreign_net_value_est`). IDX publishes foreign trades as share volumes, valued here at each stock's average traded price.
 - **Sector drawdown** only has data from when the IDX-IC sector indices start. They are absent in early 2020.
 - **Phase 1's stress breadth counts toward the state only from 31 March of the following year,** when that year's annual reports are due, so it never colours days before the figures were known.
 - **Market calls fetch inside the IDX page without saving response bodies.** The shared helpers save each body, which would be about 0.7 GB for a backfill.
 - **Golden dates wait for a backfill:** for example, 2020-03-23 (the COVID low) should read `crisis`. They belong with the phase 5 backtest.
+
+**History before 2020 (`market-sync`, added 2026-10-22).** IDX's daily
+summaries serve nothing before 2020-01-02. Its quarterly digital statistics
+still chart the composite's daily close: the report "Composite Stock Price
+Index and Stock Trading Volume" (`/primary/DigitalStatistic/GetApiData`,
+`urlName=LINK_DPS_COMPOSITE_STOCK_PRICE`, a base64 JSON query of year and
+quarter). Each Q4 report covers the year it names and the two before it, back
+to 2009-01-05. Reports for earlier years come back empty, and no other IDX
+report goes further: the daily index table starts in 2018, and the old sector
+indices in 2009.
+
+- **Fetching:** the first `market-sync` walks the reports back from 2020, three years at a time, through the IDX page it already opens (five calls). `--refresh` fetches them again. The same run fills each JISDOR year from 2013 (first fixing 2013-05-20) that holds no rate yet. Code: `market/idx_history.py` and `market/sync.py`.
+- **Storage:** closes go into `market_series_daily` under `source_name = 'idx_statistics'`, with one `market_sync_days` row per fetch.
+- **Checked before writing:** the 2018–2020 report overlaps `GetIndexSummary`'s 2020 days. If most shared closes differ by more than 2%, nothing is written, and the next sync tries again. On 2026-10-22 the reports matched to two decimals (2020-01-02: 6,283.58 against 6,283.581).
+- **IDX's summaries win:** a day `GetIndexSummary` supplied is never overwritten. A day imported from a CSV is replaced by IDX's figure.
+- **Result on 2026-10-22:** 2,666 closes, 2009-01-05 to 2019-12-30, and JISDOR from 2013-05-20. Backtest results are in `docs/market_calibration.md`, section 4.
+
+**History before 2009 (`market-import`, added 2026-10-22).** IDX publishes
+nothing earlier (checked on 2026-10-22). Yahoo Finance (`^JKSE`), Stooq
+(`^JCI`) and Investing.com hold longer IHSG history, but all three forbid
+automated access (Stooq's robots.txt disallows every bot, and it runs a
+proof-of-work check). So the tool never fetches them: the user downloads the
+CSV with the site's own button, and `market-import --csv PATH` reads it.
+
+- **Layouts:** Yahoo (`Date,Open,High,Low,Close,Adj Close,Volume`) and Stooq (`Date,Open,High,Low,Close,Volume`) work as they are. Any other file works if `--date-column` and `--close-column` name its columns. Dates must be ISO; Indonesian separators (`7.123,45`) are read. Rows with no usable date or close (Yahoo writes `null` for missing days) are counted and skipped.
+- **Storage:** rows go into `market_series_daily` under `source_name = 'import:<file name>'` (`--series` defaults to `index:COMPOSITE`). Code: `market/importer.py`.
+- **IDX wins both ways.** An import never overwrites a day IDX supplied (from either source), and `market-sync` replaces an imported day when it fetches that day. A re-import only fills days still missing.
+- **A wrong file writes nothing.** Where the file and IDX share days, their closes are compared. If most differ by more than 2%, the file is another index or its numbers were misread, and the import stops without writing.
+- **Pre-2020 days carry only the index close and, from May 2013, the rupiah.** Drawdown and volatility work on closes alone. Foreign flow, breadth, sectors and exchange notices read `no_data` there. With the default settings, the state on those days can rise only when two of drawdown, volatility and the rupiah do, except that a fall of 20% is a crisis on its own. So a pre-2020 sell-off reads milder than the same fall would after 2020. The crash-risk estimate sees drawdown, volatility, the 200-session trend, 20-session momentum and the rupiah there, and counts its other inputs as average.
 
 ### Phase 2b as built (2026-10-21)
 

@@ -20,6 +20,7 @@ from ..market import (
 )
 from ..market.backtest import run_market_backtest, write_report
 from ..market.forecast import MODEL_VERSION, load_episodes, record_episode_note, run_crash_risk
+from ..market.importer import AGREEMENT_PCT, DEFAULT_SERIES, MarketImportError, run_market_import
 from ..market.sync import MAX_CONSECUTIVE_FAILURES
 
 
@@ -105,6 +106,11 @@ def cmd_market_sync(args: argparse.Namespace) -> int:
         f"already_synced={result.idx_days_skipped} jisdor_rates={result.jisdor_rates} "
         f"notices_new={result.notices_new} errors={len(result.errors)}"
     )
+    if result.history_days:
+        print(
+            f"  history: {result.history_days} IHSG closes from IDX's statistics reports, "
+            f"{result.history_first.isoformat()} to {result.history_last.isoformat()}; run market-signals to use them"
+        )
     for error in result.errors[:10]:
         print(f"  error: {error}")
     if result.idx_days_left:
@@ -115,6 +121,47 @@ def cmd_market_sync(args: argparse.Namespace) -> int:
         return 1
     # Some days fetched means progress was kept; only total failure is a failure.
     return 1 if result.errors and not (result.idx_days_fetched or result.jisdor_rates) else 0
+
+
+def cmd_market_import(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    cfg.ensure_dirs()
+    setup_logging(cfg)
+
+    try:
+        result = run_market_import(
+            cfg,
+            csv_path=Path(args.csv).expanduser(),
+            series_id=args.series,
+            date_column=args.date_column,
+            close_column=args.close_column,
+        )
+    except MarketImportError as exc:
+        print(f"market-import: error: {exc}")
+        return 1
+    print(
+        "market-import: "
+        f"series={result.series_id} source={result.source_name} rows={result.rows_read} "
+        f"inserted={result.inserted} already_present={result.skipped_present} "
+        f"unparseable={result.skipped_unparseable}"
+        + (f" duplicate_dates={result.duplicate_dates}" if result.duplicate_dates else "")
+    )
+    if result.first_inserted is not None:
+        print(f"  inserted days from {result.first_inserted.isoformat()} to {result.last_inserted.isoformat()}")
+    if result.idx_overlap:
+        print(
+            f"  checked against IDX on {result.idx_overlap} shared days: "
+            f"{result.idx_disagreeing} differ by more than {AGREEMENT_PCT:g}% (IDX's closes were kept)"
+        )
+    if result.rows_read and result.skipped_unparseable == result.rows_read:
+        print(
+            f"  no row had an ISO date (YYYY-MM-DD) in {args.date_column!r} and a positive close in "
+            f"{args.close_column!r}; check the column names and the date format"
+        )
+        return 1
+    if result.inserted:
+        print("  run market-signals, then crash-risk or market-backtest, to use the new history")
+    return 0
 
 
 def cmd_market_signals(_args: argparse.Namespace) -> int:
@@ -309,12 +356,25 @@ def register(sub) -> None:
 
     p_sync = sub.add_parser(
         "market-sync",
-        help="Fetch daily IDX index and stock summaries and Bank Indonesia's JISDOR rate",
+        help=(
+            "Fetch daily IDX index and stock summaries and Bank Indonesia's JISDOR rate; the first run also fetches "
+            "IHSG closes from 2009 and JISDOR from 2013"
+        ),
     )
     p_sync.add_argument("--backfill-from", help="First day to fetch, YYYY-MM-DD (default: the last 10 days)")
     p_sync.add_argument("--to", help="Last day to fetch, YYYY-MM-DD (default today, UTC)")
     p_sync.add_argument("--refresh", action="store_true", help="Fetch days again even if already synced")
     p_sync.set_defaults(func=cmd_market_sync)
+
+    p_import = sub.add_parser(
+        "market-import",
+        help="Load daily index closes from a CSV you downloaded (e.g. IHSG before 2020); never overwrites IDX's days",
+    )
+    p_import.add_argument("--csv", required=True, help="The downloaded file (Yahoo or Stooq layout, ISO dates)")
+    p_import.add_argument("--series", default=DEFAULT_SERIES, help=f"Series to load into (default {DEFAULT_SERIES})")
+    p_import.add_argument("--date-column", default="Date", help="Name of the date column (default Date)")
+    p_import.add_argument("--close-column", default="Close", help="Name of the close column (default Close)")
+    p_import.set_defaults(func=cmd_market_import)
 
     p_signals = sub.add_parser(
         "market-signals",

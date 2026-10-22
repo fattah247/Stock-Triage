@@ -158,11 +158,24 @@ python -m stock_triage risk-calendar --days 60
 python -m stock_triage exposure-run
 
 # Market risk, phase 2: daily IDX index and stock summaries plus Bank Indonesia's
-# JISDOR rate (IDX history starts in 2020; a full backfill is about an hour, and
-# an interrupted one resumes where it stopped), then the signals and the daily
-# market state.
+# JISDOR rate (IDX's summaries start in 2020; a full backfill is about an hour,
+# and an interrupted one resumes where it stopped), then the signals and the
+# daily market state. The first sync also fetches the history before that by
+# itself: IHSG daily closes from 2009 out of IDX's own statistics reports, and
+# JISDOR from its first fixing in May 2013. Those days carry only the close and
+# the rupiah, so breadth, foreign-flow and sector signals read no_data on them.
 python -m stock_triage market-sync --backfill-from 2020-01-02
 python -m stock_triage market-sync
+python -m stock_triage market-signals
+
+# IHSG before 2009 (the 2008 crash), which IDX does not publish. Yahoo Finance
+# (^JKSE), Stooq (^JCI) and Investing.com hold it but forbid automated access,
+# so download the daily CSV with the site's own download button; the tool only
+# reads the file. Yahoo and Stooq layouts work as they are (--date-column and
+# --close-column name other columns); dates must be YYYY-MM-DD, and Indonesian
+# separators (7.123,45) are fine. Days IDX already supplied are never
+# overwritten. Re-run market-signals afterwards.
+python -m stock_triage market-import --csv ~/Downloads/ihsg.csv
 python -m stock_triage market-signals
 
 # Market risk, phase 5: the crash-risk estimate with its walk-forward track
