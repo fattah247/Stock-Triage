@@ -19,6 +19,8 @@ from stock_triage.sources.idx_artifacts import (
     parse_financial_report_json,
 )
 
+_EMPTY_PAGE = {"ResultCount": 0, "Results": []}
+
 
 def test_parse_company_profiles_html_extracts_candidates():
     html = """
@@ -329,8 +331,10 @@ def test_financial_report_adapter_paginates_and_combines_report_types(tmp_path, 
             self.counter += 1
             qs = parse_qs(urlparse(api_url).query)
             key = (qs["reportType"][0], int(qs["indexFrom"][0]))
+            if qs["periode"][0] != "audit":
+                key = (qs["reportType"][0], qs["periode"][0], int(qs["indexFrom"][0]))
             body_path = tmp_path / f"payload-{self.counter}.json"
-            body_path.write_text(json.dumps(payloads[key]), encoding="utf-8")
+            body_path.write_text(json.dumps(payloads.get(key, _EMPTY_PAGE)), encoding="utf-8")
             return SimpleNamespace(status=200, api_url=api_url, body_path=body_path)
 
     fake_config = SimpleNamespace(
@@ -441,8 +445,10 @@ def test_financial_report_adapter_stops_at_saved_cursors(tmp_path, monkeypatch):
             self.counter += 1
             qs = parse_qs(urlparse(api_url).query)
             key = (qs["reportType"][0], int(qs["indexFrom"][0]))
+            if qs["periode"][0] != "audit":
+                key = (qs["reportType"][0], qs["periode"][0], int(qs["indexFrom"][0]))
             body_path = tmp_path / f"payload-stop-{self.counter}.json"
-            body_path.write_text(json.dumps(payloads[key]), encoding="utf-8")
+            body_path.write_text(json.dumps(payloads.get(key, _EMPTY_PAGE)), encoding="utf-8")
             return SimpleNamespace(status=200, api_url=api_url, body_path=body_path)
 
     fake_config = SimpleNamespace(
@@ -506,4 +512,89 @@ def test_financial_report_watermark_merges_new_and_existing_type_cursors():
         candidates=candidates,
     )
 
-    assert json.loads(watermark.cursor) == {"rdf": "rdf-old", "rda": "rda-new"}
+    # New cursors are keyed by report year so a rolling multi-year scan can stop
+    # per year; legacy type-only keys are kept for single-year windows.
+    assert json.loads(watermark.cursor) == {"rdf": "rdf-old", "rda": "rda-old", "2025:rda": "rda-new"}
+
+
+def test_financial_report_years_cover_prior_year_and_explicit_spans():
+    resolve = IDXFinancialReportAdapter._resolve_years
+
+    assert resolve(DiscoveryWindow(), today=date(2026, 10, 13)) == [2026, 2025]
+    assert resolve(DiscoveryWindow(start=date(2024, 1, 1), end=date(2026, 12, 31))) == [2026, 2025, 2024]
+    assert resolve(DiscoveryWindow(start=date(2025, 1, 1), end=date(2025, 12, 31))) == [2025]
+
+
+def test_financial_report_resume_ignores_upload_dates_in_watermark():
+    adapter = IDXFinancialReportAdapter()
+    # A FY2025 scan persists the newest *upload* date (2026) as ``end``.
+    persisted = DiscoveryWindow(start=date(2025, 1, 1), end=date(2026, 4, 8), cursor='{"2025:rdf": "x"}')
+
+    resumed = adapter.resume_window(persisted)
+
+    assert resumed.start is None and resumed.end is None
+    assert resumed.cursor == persisted.cursor
+
+
+def test_financial_report_adapter_scans_interim_periods_with_their_own_cursors(tmp_path, monkeypatch):
+    interim = {
+        "ResultCount": 1,
+        "Results": [
+            {
+                "KodeEmiten": "ABCD",
+                "NamaEmiten": "Issuer ABCD",
+                "Report_Period": "TW1",
+                "Report_Year": "2026",
+                "Attachments": [
+                    {
+                        "File_ID": "rdf-q1",
+                        "File_Modified": "2026-04-28T10:00:00.000",
+                        "File_Name": "FinancialStatement-2026-I-ABCD.pdf",
+                        "File_Path": "/files/FinancialStatement-2026-I-ABCD.pdf",
+                        "Report_Type": "rdf",
+                    }
+                ],
+            }
+        ],
+    }
+    requested: list[tuple[str, str]] = []
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            self.page = SimpleNamespace(url=IDXFinancialReportAdapter.public_url)
+
+        @contextmanager
+        def open_page(self, *, page_url):
+            del page_url
+            yield self.page
+
+        def fetch_json_from_page(self, *, source_id, page, api_url):
+            del source_id, page
+            qs = parse_qs(urlparse(api_url).query)
+            requested.append((qs["reportType"][0], qs["periode"][0]))
+            payload = interim if (qs["reportType"][0], qs["periode"][0]) == ("rdf", "tw1") else _EMPTY_PAGE
+            body_path = tmp_path / f"payload-{len(requested)}.json"
+            body_path.write_text(json.dumps(payload), encoding="utf-8")
+            return SimpleNamespace(status=200, api_url=api_url, body_path=body_path)
+
+    fake_config = SimpleNamespace(
+        browser=SimpleNamespace(
+            profile_dir=tmp_path / "profile",
+            artifacts_dir=tmp_path / "artifacts",
+            headless=True,
+            challenge_timeout_s=1,
+            page_settle_ms=1,
+            channel="",
+        )
+    )
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.PlaywrightSession", FakeSession)
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_financial_reports.load_config", lambda: fake_config)
+
+    adapter = IDXFinancialReportAdapter()
+    window = DiscoveryWindow(start=date(2026, 1, 1), end=date(2026, 12, 31))
+    candidates = list(adapter.discover(window))
+
+    assert sorted(set(requested)) == [("rda", "audit"), ("rdf", "audit"), ("rdf", "tw1"), ("rdf", "tw2"), ("rdf", "tw3")]
+    assert [candidate.raw_metadata["requested_period"] for candidate in candidates] == ["tw1"]
+    watermark = adapter.watermark_window(requested_window=window, candidates=candidates)
+    assert json.loads(watermark.cursor) == {"2026:rdf:tw1": "rdf-q1"}

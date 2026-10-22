@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import date
 
 from ..config import load_config
 from ..fiscal_year import save_fiscal_year_override
-from ..intelligence import DERIVED_VERSION, rederive_intelligence, run_intelligence
+from ..intelligence import DERIVED_VERSION, IntelligenceRunResult, rederive_intelligence, run_intelligence
 from ..intelligence.review import (
     load_intelligence_observability,
     load_intelligence_kpis,
@@ -44,9 +45,10 @@ def cmd_intelligence_run(args: argparse.Namespace) -> int:
         f"sector_rollups={result.sector_rollups} "
         f"thesis_evaluations={result.thesis_evaluations} "
         f"claims={result.claims} "
-        f"claim_outcomes={result.claim_outcomes}"
+        f"claim_outcomes={result.claim_outcomes} "
+        f"failed_tickers={len(result.failed_tickers)}"
     )
-    return 0
+    return _report_failed_tickers(result)
 
 
 def cmd_digest_run(args: argparse.Namespace) -> int:
@@ -109,6 +111,7 @@ def cmd_review_update(args: argparse.Namespace) -> int:
         review_item_id=args.review_item_id,
         status=args.status,
         note=args.note,
+        snooze_days=args.snooze_days,
     )
     print(
         "review-update: "
@@ -190,9 +193,10 @@ def cmd_intelligence_rederive(args: argparse.Namespace) -> int:
         f"sector_rollups={result.sector_rollups} "
         f"thesis_evaluations={result.thesis_evaluations} "
         f"claims={result.claims} "
-        f"claim_outcomes={result.claim_outcomes}"
+        f"claim_outcomes={result.claim_outcomes} "
+        f"failed_tickers={len(result.failed_tickers)}"
     )
-    return 0
+    return _report_failed_tickers(result)
 
 
 def cmd_fiscal_year_override(args: argparse.Namespace) -> int:
@@ -249,6 +253,11 @@ def register(sub) -> None:
     p_review_update.add_argument("review_item_id", help="Review item id to update")
     p_review_update.add_argument("--status", required=True, choices=["open", "resolved", "snoozed"])
     p_review_update.add_argument("--note", help="Optional operator note")
+    p_review_update.add_argument(
+        "--snooze-days",
+        type=int,
+        help="With --status snoozed: days until the item reopens (default 14)",
+    )
     p_review_update.set_defaults(func=cmd_review_update)
 
     p_intelligence_kpis = sub.add_parser("intelligence-kpis", help="Show v3 derived-layer KPI counts")
@@ -277,3 +286,10 @@ def register(sub) -> None:
     p_fye_group.add_argument("--month", type=int, help="Fiscal year end month (1-12)")
     p_fye_group.add_argument("--clear", action="store_true", help="Remove the local override")
     p_fye.set_defaults(func=cmd_fiscal_year_override)
+
+
+def _report_failed_tickers(result: IntelligenceRunResult) -> int:
+    for failure in result.failed_tickers:
+        print(f"failed: {failure}", file=sys.stderr)
+    # Failed issuers keep their previous snapshot, so only a run that derived nothing fails.
+    return 1 if result.failed_tickers and not result.snapshots else 0

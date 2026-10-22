@@ -138,3 +138,50 @@ def test_disclosure_resume_window_rehydrates_empty_legacy_watermark():
     resumed = adapter.resume_window(DiscoveryWindow())
 
     assert resumed == adapter.default_window()
+
+
+DAY_2_NEW_HTML = """
+<div class="attach-card">
+  <time>21 April 2026 10:02:11</time>
+  <h6 class="title"><a href="https://www.idx.co.id/StaticData/NewsAndAnnouncement/ANNOUNCEMENTSTOCK/From_EREP/202604/day2-main.pdf">
+    Information Disclosure Regarding Rights Issue [<span>ABBA</span>]
+  </a></h6>
+  <ul><li><a href="https://www.idx.co.id/StaticData/NewsAndAnnouncement/ANNOUNCEMENTSTOCK/From_EREP/202604/day2-att1.pdf" download="day2.pdf"></a></li></ul>
+</div>
+"""
+
+
+def test_disclosure_incremental_resume_finds_items_published_after_first_run(monkeypatch):
+    """Day 1 bootstraps; day 2 must see what was published since.
+
+    Regression: the persisted ``end`` date used to be reapplied as an upper
+    bound, so every later disclosure was filtered out and discovery returned
+    nothing forever while still exiting successfully.
+    """
+    fake_config = SimpleNamespace(
+        browser=SimpleNamespace(
+            profile_dir="unused",
+            artifacts_dir="unused",
+            headless=True,
+            challenge_timeout_s=1,
+            page_settle_ms=1,
+            channel="",
+        )
+    )
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_disclosures.PlaywrightSession", _FakePlaywrightSession)
+    monkeypatch.setattr("stock_triage.sources.adapters.idx_disclosures.load_config", lambda: fake_config)
+    adapter = IDXDisclosureAdapter()
+
+    _FakePlaywrightSession.html_pages = [PAGE_1_HTML, PAGE_2_HTML]
+    day_1_window = adapter.default_window()
+    day_1 = list(adapter.discover(day_1_window))
+    watermark = adapter.watermark_window(requested_window=day_1_window, candidates=day_1)
+
+    _FakePlaywrightSession.html_pages = [DAY_2_NEW_HTML + PAGE_1_HTML, PAGE_2_HTML]
+    day_2_window = adapter.resume_window(watermark)
+    day_2 = list(adapter.discover(day_2_window))
+
+    assert [candidate.title for candidate in day_2] == ["Information Disclosure Regarding Rights Issue"]
+    day_2_watermark = adapter.watermark_window(requested_window=day_2_window, candidates=day_2)
+    assert day_2_watermark.end == date(2026, 4, 21)
+    assert day_2_watermark.cursor == day_2[0].source_record_id

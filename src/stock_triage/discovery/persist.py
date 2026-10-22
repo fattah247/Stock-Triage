@@ -222,6 +222,29 @@ def persist_watermark(
     )
 
 
+def record_historical_discovery(
+    conn: sqlite3.Connection,
+    *,
+    source_name: str,
+    source_class: SourceClass,
+    window: DiscoveryWindow,
+    raw_state: dict[str, Any] | None = None,
+) -> None:
+    """Note a backfill or coverage scan without moving incremental discovery.
+
+    Those scans cover a historical window with no cursor. Writing it over an
+    existing watermark made the next ``discover`` resume from that window
+    (or, for a window ending in the future, find nothing at all).
+    """
+    persist_watermark(
+        conn,
+        source_name=source_name,
+        source_class=source_class,
+        window=load_watermark(conn, source_name) or window,
+        raw_state=raw_state,
+    )
+
+
 def load_watermark(conn: sqlite3.Connection, source_name: str) -> DiscoveryWindow | None:
     row = conn.execute(
         "SELECT window_start, window_end, cursor FROM source_watermarks WHERE source_name = ?",

@@ -13,7 +13,7 @@ from pathlib import Path
 import fitz
 
 from ..config import Config
-from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..db import WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
 
 PARSER_VERSION = "phase4-v1"
 CHUNK_TARGET_CHARS = 1500
@@ -482,7 +482,7 @@ def _persist_parse_success(
     parsed: ParsedDocumentResult,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute("DELETE FROM evidence_spans WHERE document_id = ?", (document.document_id,))
+    release_evidence_spans(conn, document.document_id)
     conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document.document_id,))
     for chunk in parsed.chunks:
         conn.execute(
@@ -534,7 +534,7 @@ def _persist_parse_failure(
     error: ParseError,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute("DELETE FROM evidence_spans WHERE document_id = ?", (document.document_id,))
+    release_evidence_spans(conn, document.document_id)
     conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document.document_id,))
     conn.execute(
         """

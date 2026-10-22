@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from stock_triage.commands.intelligence import cmd_intelligence_run
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
@@ -13,10 +13,12 @@ from stock_triage.intelligence.pipeline import (
     AnalysisSummary,
     BaselineChoice,
     CompanyDocument,
+    CompanyProfile,
     ContradictionHistoryRow,
     ContradictionRecord,
     EvidenceContext,
     EventSignal,
+    FilingDocument,
     FilingExpectationRecord,
     FocusHistoryRow,
     MetricPoint,
@@ -24,6 +26,7 @@ from stock_triage.intelligence.pipeline import (
     NuanceFindingRecord,
     RECOMMENDATION_BUCKET_AVOID,
     RECOMMENDATION_BUCKET_STOCK_PICK,
+    _build_filing_expectations,
     _build_nuance_findings,
     _build_narrative_signals,
     _build_next_read_guidance,
@@ -36,7 +39,6 @@ from stock_triage.intelligence.pipeline import (
     _build_recommendation_summary,
     _build_segment_summary,
     _derive_stance,
-    _next_expected_filing_window,
     _resolved_nuance_severity_tier,
     UncertaintyRecord,
 )
@@ -169,6 +171,9 @@ def test_run_intelligence_persists_phase10_foundation_rows(tmp_config):
         assert any("SAFE: currency mismatch" in warning for warning in payload["peer_comparison"]["comparability_warnings"])
         assert payload["peer_comparison"]["metric_ranks"]["revenue_growth_pct"]["rank"] == 1
         assert payload["peer_comparison"]["metric_ranks"]["event_density"]["anomaly"] == "negative_outlier"
+        # Peers have no events (median 0): worst in group, but not a measurable gap.
+        assert payload["peer_comparison"]["metric_ranks"]["event_density"]["relative_gap_pct"] is None
+        assert payload["peer_comparison"]["metric_ranks"]["event_density"]["severity"] == "warning"
         assert payload["sector_context"]["heatmap"]["red_flag_density"] == 0.6
         assert any(anomaly["ticker"] == "TAMU" for anomaly in payload["sector_context"]["top_anomalies"])
 
@@ -566,7 +571,7 @@ def test_recommendation_summary_classifies_pick_and_avoid_candidates():
         review_items=[],
         events=[],
         triggered_rules=[],
-        peer_anomaly_count=0,
+        peer_weakness_count=0,
         decision_constraints=["Keep leverage stable.", "Debt surge appears.", "Watch the next H1 filing window."],
         persistent_risk_signals=[],
         persistent_contradiction_signals=[],
@@ -598,7 +603,7 @@ def test_recommendation_summary_classifies_pick_and_avoid_candidates():
         review_items=[],
         events=[],
         triggered_rules=[],
-        peer_anomaly_count=1,
+        peer_weakness_count=1,
         decision_constraints=["Clear critical rules.", "Debt surge appears.", "Resolve the active debt stress before revisiting the name."],
         persistent_risk_signals=[],
         persistent_contradiction_signals=[],
@@ -632,7 +637,7 @@ def test_recommendation_summary_demotes_pick_when_persistent_critical_risk_is_ac
         review_items=[],
         events=[],
         triggered_rules=[],
-        peer_anomaly_count=0,
+        peer_weakness_count=0,
         decision_constraints=["Keep leverage stable.", "Debt surge appears.", "Watch the next H1 filing window."],
         persistent_risk_signals=[
             {
@@ -650,26 +655,41 @@ def test_recommendation_summary_demotes_pick_when_persistent_critical_risk_is_ac
     assert recommendation["eligible"] is False
 
 
-def test_next_expected_filing_window_matches_v3_2_deadline_table():
-    h1 = _next_expected_filing_window(
+def test_filing_expectations_follow_the_deadline_table_and_skip_unobserved_periods():
+    profile = CompanyProfile(
+        ticker="ABCD",
+        issuer_name="Issuer ABCD",
+        sector=None,
+        subsector=None,
+        industry=None,
+        listing_board=None,
+        active_status="listed",
         fiscal_year_end_month=12,
-        now=datetime(2026, 7, 10, tzinfo=timezone.utc).date(),
-        latest_period_end=datetime(2026, 3, 31, tzinfo=timezone.utc).date(),
-        latest_document_type="financial_statement",
+        fiscal_year_end_source="default",
     )
-    assert h1 is not None
-    assert h1["label"] == "H1 filing due"
-    assert h1["window_start"] == "2026-08-08"
+    observed = FilingDocument(
+        document_id="doc-fy25",
+        document_type="financial_statement",
+        as_of="2026-03-28T10:00:00+07:00",
+        period_end_dates=("2025-12-31",),
+        fiscal_periods=("Annual",),
+    )
+    rows = {
+        (row.period_label, row.period_end_date): row
+        for row in _build_filing_expectations(
+            profile=profile,
+            filing_documents=[observed],
+            now=date(2026, 7, 10),
+        )
+    }
 
-    annual_report = _next_expected_filing_window(
-        fiscal_year_end_month=12,
-        now=datetime(2026, 3, 1, tzinfo=timezone.utc).date(),
-        latest_period_end=datetime(2025, 12, 31, tzinfo=timezone.utc).date(),
-        latest_document_type="financial_statement",
-    )
-    assert annual_report is not None
-    assert annual_report["report_type"] == "annual_report"
-    assert annual_report["window_start"] == "2026-03-31"
+    h1 = rows[("H1 filing", "2026-06-30")]
+    assert (h1.window_start, h1.deadline_at, h1.state) == ("2026-08-08", "2026-08-29", "upcoming")
+    assert rows[("Annual report", "2026-12-31")].window_start == "2027-03-31"
+    assert rows[("Annual FS", "2025-12-31")].state == "satisfied"
+    # Due before anything was collected for the issuer: not evidence of a late filing.
+    assert rows[("Q3 filing", "2025-09-30")].state == "unobserved"
+    assert rows[("Q1 filing", "2026-03-31")].state == "late"
 
 
 def test_build_segment_summary_tracks_trend_and_concentration():
@@ -1761,7 +1781,7 @@ def _seed_phase10_inputs(tmp_config) -> None:
                     (now - timedelta(days=730)).isoformat(),
                     (now - timedelta(days=730)).isoformat(),
                     "https://example.test/tamu-2023.pdf",
-                    str(tmp_config.paths.data_dir / "tamu-annual-report.pdf"),
+                    str(tmp_config.paths.files_dir / "tamu-annual-report.pdf"),
                     "sha-c",
                     "application/pdf",
                     "annual_report",
@@ -2234,3 +2254,585 @@ def _write_phase12_theses(tmp_config) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_persistence_state_is_anchored_to_filings_not_the_wall_clock(monkeypatch):
+    """An idle operator must not see recurring risks expire on their own."""
+    import datetime as real_datetime
+
+    import stock_triage.intelligence.pipeline as pipeline_module
+
+    class FarFuture(real_datetime.date):
+        @classmethod
+        def today(cls):
+            return cls(2031, 1, 1)
+
+    history = [
+        FocusHistoryRow(
+            document_id="doc-1",
+            document_type="annual_report",
+            as_of="2026-04-01T00:00:00+00:00",
+            focus_keys=("accounting_audit",),
+        ),
+        FocusHistoryRow(
+            document_id="doc-2",
+            document_type="financial_statement",
+            as_of="2025-12-31T00:00:00+00:00",
+            focus_keys=("accounting_audit",),
+        ),
+    ]
+    before = _build_persistent_risk_signals(history)
+    monkeypatch.setattr(pipeline_module, "date", FarFuture)
+    after = _build_persistent_risk_signals(history)
+
+    assert before == after
+    assert after[0]["persistence_state"] == "active"
+    assert after[0]["latest_age_days"] == 0
+
+
+def test_persistence_state_turns_stale_only_when_later_filings_omit_it():
+    rows = _build_persistent_risk_signals(
+        [
+            FocusHistoryRow(
+                document_id="doc-old-1",
+                document_type="annual_report",
+                as_of="2024-06-30T00:00:00+00:00",
+                focus_keys=("legal_regulatory",),
+            ),
+            FocusHistoryRow(
+                document_id="doc-old-2",
+                document_type="annual_report",
+                as_of="2024-03-31T00:00:00+00:00",
+                focus_keys=("legal_regulatory",),
+            ),
+        ],
+        reference_date=datetime(2026, 3, 31, tzinfo=timezone.utc).date(),
+    )
+
+    assert rows[0]["persistence_state"] == "stale"
+    assert "older than the latest filing" in rows[0]["summary"]
+
+
+def test_rederive_keeps_review_item_ids_that_have_audit_history(tmp_config):
+    """A new filing changes the computed id; the audited row must keep its own."""
+    from stock_triage.intelligence.review import update_review_status
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+    conn = connect(tmp_config.paths.db_path)
+    try:
+        configure_pragmas(conn, tmp_config)
+        row = conn.execute(
+            "SELECT review_item_id, source_key FROM review_queue_items WHERE ticker = 'TAMU' AND status = 'open' LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "UPDATE review_queue_items SET review_item_id = 'review-from-older-filing' WHERE review_item_id = ?",
+            (row["review_item_id"],),
+        )
+    finally:
+        conn.close()
+    # Resolve then reopen: the item is open again and now has audit history.
+    update_review_status(tmp_config, review_item_id="review-from-older-filing", status="resolved")
+    update_review_status(tmp_config, review_item_id="review-from-older-filing", status="open")
+
+    result = run_intelligence(tmp_config, ticker="TAMU")
+
+    assert result.failed_tickers == ()
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        ids = {
+            r["review_item_id"]
+            for r in conn.execute(
+                "SELECT review_item_id FROM review_queue_items WHERE source_key = ?", (row["source_key"],)
+            )
+        }
+    finally:
+        conn.close()
+    assert "review-from-older-filing" in ids
+
+
+def test_one_failing_issuer_does_not_abort_the_run(tmp_config, monkeypatch):
+    import stock_triage.intelligence.pipeline as pipeline_module
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    real_build = pipeline_module._build_bundle
+
+    def flaky_build(reader, cfg, ticker, *, as_of):
+        if ticker == "BROKEN":
+            raise ValueError("malformed metric payload")
+        return real_build(reader, cfg, ticker, as_of=as_of)
+
+    monkeypatch.setattr(pipeline_module, "_select_tickers", lambda conn, ticker, limit: ["BROKEN", "TAMU"])
+    monkeypatch.setattr(pipeline_module, "_build_bundle", flaky_build)
+
+    result = run_intelligence(tmp_config)
+
+    assert result.snapshots >= 1
+    assert len(result.failed_tickers) == 1
+    assert result.failed_tickers[0].startswith("BROKEN: ValueError")
+
+
+def test_snapshot_anchors_on_newest_filing_with_metrics_and_keeps_newer_events(tmp_config):
+    """A newer attachment without metrics must not hide the issuer or its events."""
+    _seed_phase10_inputs(tmp_config)
+    newest = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+    def _add_metricless_notice(conn):
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(documents)")]
+        overrides = {
+            "document_id": "'doc-tamu-notice'",
+            "source_record_id": "'notice-1'",
+            "source_file_id": "'notice-1-file'",
+            "sha256": "'sha-tamu-notice'",
+            "document_type": "'financial_statement'",
+            "source_modified_at": "?",
+            "updated_at": "?",
+            "created_at": "?",
+        }
+        select = ", ".join(overrides.get(column, column) for column in columns)
+        conn.execute(
+            f"INSERT INTO documents ({', '.join(columns)}) SELECT {select} FROM documents WHERE document_id = 'doc-tamu-a'",
+            (newest, newest, newest),
+        )
+        conn.execute(
+            """
+            INSERT INTO events (
+                event_id, document_id, ticker, event_type, matched_pattern, severity, rationale, evidence_span_id, detected_at
+            ) VALUES ('event-tamu-going-concern', 'doc-tamu-notice', 'TAMU', 'going_concern_warning',
+                      'going concern', 'critical', 'Auditor flags material uncertainty.', NULL, ?)
+            """,
+            (newest,),
+        )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(_add_metricless_notice)
+
+    result = run_intelligence(tmp_config, ticker="TAMU")
+
+    assert result.snapshots == 1
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT as_of_document_id, payload_json FROM company_snapshots WHERE ticker = 'TAMU' AND snapshot_kind = 'current'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["as_of_document_id"] == "doc-tamu-a"
+    top_card = json.loads(row["payload_json"])["top_card"]
+    assert top_card["overall_state"] == "critical"
+
+
+def test_filing_expectations_due_after_the_last_discovery_sync_are_unobserved():
+    profile = CompanyProfile(
+        ticker="ABCD",
+        issuer_name="Issuer ABCD",
+        sector=None,
+        subsector=None,
+        industry=None,
+        listing_board=None,
+        active_status="listed",
+        fiscal_year_end_month=12,
+        fiscal_year_end_source="default",
+    )
+    observed = FilingDocument(
+        document_id="doc-fy25",
+        document_type="financial_statement",
+        as_of="2026-03-28T10:00:00+07:00",
+        period_end_dates=("2025-12-31",),
+        fiscal_periods=("Annual",),
+    )
+    rows = {
+        row.period_label + ":" + row.period_end_date: row.state
+        for row in _build_filing_expectations(
+            profile=profile,
+            filing_documents=[observed],
+            now=date(2026, 10, 17),
+            last_checked=date(2026, 4, 18),
+        )
+    }
+
+    # Nobody looked for these after 18 April, so their absence is not lateness.
+    assert rows["Q1 filing:2026-03-31"] == "unobserved"
+    assert rows["H1 filing:2026-06-30"] == "unobserved"
+    # Not due yet: still tracked normally.
+    assert rows["Q3 filing:2026-09-30"] == "due"
+
+
+def _document(document_id: str, as_of: str) -> CompanyDocument:
+    return CompanyDocument(
+        document_id=document_id,
+        source_name="idx_financial_reports",
+        source_record_id=document_id,
+        ticker="ABCD",
+        title=None,
+        document_type="financial_statement",
+        version_group_id=None,
+        source_modified_at=as_of,
+        updated_at=as_of,
+        created_at=as_of,
+    )
+
+
+def _metric(document_id: str, name: str, value: float, *, scope: str = "consolidated") -> MetricPoint:
+    return MetricPoint(
+        metric_id=f"{document_id}-{name}-{scope}",
+        document_id=document_id,
+        metric_name=name,
+        value_normalized=value,
+        raw_value_text=str(value),
+        currency="IDR",
+        unit_scale="units",
+        fiscal_year=2025,
+        fiscal_period="Annual",
+        period_end_date="2025-12-31",
+        audit_status=None,
+        consolidation_scope=scope,
+        evidence_span_id=None,
+    )
+
+
+def test_metric_deltas_keep_segments_apart_and_only_score_comparable_plausible_changes():
+    from stock_triage.intelligence.pipeline import _build_deltas, _match_condition
+    from stock_triage.intelligence.thesis import LocalThesisCondition
+
+    previous, current = _document("doc-a", "2025-03-01T00:00:00"), _document("doc-b", "2026-03-01T00:00:00")
+    comparable = BaselineChoice(kind="revision", document=previous, comparable=True, reason="same period")
+
+    def deltas(baseline, previous_metrics, current_metrics):
+        return _build_deltas(
+            ticker="ABCD",
+            baseline=baseline,
+            to_document=current,
+            previous_metrics=previous_metrics,
+            current_metrics=current_metrics,
+            previous_events=[],
+            current_events=[],
+            previous_rules=[],
+            current_rules=[],
+            previous_analysis=None,
+            current_analysis=None,
+        )
+
+    segments = [
+        _metric("doc-a", "segment_revenue", 10.0, scope="segment:Shipping"),
+        _metric("doc-a", "segment_revenue", 90.0, scope="segment:Mining"),
+    ]
+    # Same segment values, listed in a different order by the later filing.
+    unchanged = [_metric("doc-b", m.metric_name, m.value_normalized, scope=m.consolidation_scope) for m in reversed(segments)]
+    assert [d for d in deltas(comparable, segments, unchanged) if d.delta_kind == "metric_change"] == []
+
+    growth = LocalThesisCondition(severity="positive", kind="metric_delta", payload={"metric_name": "revenue", "value": 20})
+
+    def matches(baseline, current_revenue):
+        records = deltas(baseline, [_metric("doc-a", "revenue", 100.0)], [_metric("doc-b", "revenue", current_revenue)])
+        return _match_condition(growth, baseline=baseline, deltas=records, events=[], triggered_rules=[], review_items=[])
+
+    assert matches(comparable, 130.0) is True
+    not_comparable = BaselineChoice(kind="source_prior", document=previous, comparable=False, reason="different period")
+    assert matches(not_comparable, 130.0) is None
+    # A 200x jump is almost certainly a unit or parsing error, not growth.
+    assert matches(comparable, 20_000.0) is None
+
+
+def test_review_status_follows_the_reviewed_filing():
+    from stock_triage.intelligence.pipeline import StoredReviewState, _effective_review_status
+
+    def state(status, document_id="doc-a", snoozed_until=None):
+        return StoredReviewState("r1", status, document_id, snoozed_until)
+
+    today = date(2026, 10, 18)
+    effective = lambda stored, document_id="doc-a": _effective_review_status(stored, document_id=document_id, as_of=today)
+
+    assert effective(None) == ("open", None)
+    assert effective(state("resolved")) == ("resolved", None)
+    assert effective(state("resolved"), "doc-b") == ("open", "raised again by a newer filing")
+    assert effective(state("snoozed", snoozed_until="2026-10-30")) == ("snoozed", None)
+    assert effective(state("snoozed", snoozed_until="2026-10-18")) == ("open", "snooze expired")
+    assert effective(state("superseded")) == ("open", "signal raised again")
+
+
+def test_rederive_reopens_supersedes_and_audits_review_items(tmp_config):
+    from stock_triage.intelligence.review import update_review_status
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    def rows():
+        conn = connect(tmp_config.paths.db_path, read_only=True)
+        try:
+            return {
+                row["review_item_id"]: dict(row)
+                for row in conn.execute(
+                    "SELECT review_item_id, item_type, source_key, status, document_id, snoozed_until "
+                    "FROM review_queue_items WHERE ticker = 'TAMU' AND derived_version = ?",
+                    (DERIVED_VERSION,),
+                )
+            }
+        finally:
+            conn.close()
+
+    by_type = {row["item_type"]: row for row in rows().values()}
+    resolved, reviewed_earlier, snoozed = by_type["rule_trigger"], by_type["event_signal"], by_type["thesis_broken"]
+    update_review_status(tmp_config, review_item_id=resolved["review_item_id"], status="resolved")
+    update_review_status(tmp_config, review_item_id=reviewed_earlier["review_item_id"], status="resolved")
+    update_review_status(tmp_config, review_item_id=snoozed["review_item_id"], status="snoozed", snooze_days=3)
+    assert rows()[snoozed["review_item_id"]]["snoozed_until"] is not None
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(
+            lambda conn: conn.execute(
+                "UPDATE review_queue_items SET document_id = 'doc-tamu-b' WHERE review_item_id = ?",
+                (reviewed_earlier["review_item_id"],),
+            )
+        )
+        wq.submit(
+            lambda conn: conn.execute(
+                """
+                INSERT INTO review_queue_items (
+                    review_item_id, item_type, ticker, document_id, source_key, priority, status,
+                    rationale, payload_json, derived_version, created_at, updated_at
+                ) VALUES ('stale-item', 'rule_trigger', 'TAMU', 'doc-tamu-a', 'no-longer-raised', 'medium', 'open',
+                          'An old rule outcome.', '{}', ?, '2026-01-01', '2026-01-01')
+                """,
+                (DERIVED_VERSION,),
+            )
+        )
+
+    run_intelligence(tmp_config, ticker="TAMU", as_of=date.today() + timedelta(days=5))
+    after = rows()
+
+    assert after[resolved["review_item_id"]]["status"] == "resolved"
+    assert after[reviewed_earlier["review_item_id"]]["status"] == "open"
+    assert after[snoozed["review_item_id"]]["status"] == "open"
+    assert after["stale-item"]["status"] == "superseded"
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        audit = {
+            (row["review_item_id"], row["action"], row["note"])
+            for row in conn.execute("SELECT review_item_id, action, note FROM review_audit_log WHERE action LIKE 'auto_%'")
+        }
+    finally:
+        conn.close()
+    assert (reviewed_earlier["review_item_id"], "auto_reopen", "raised again by a newer filing") in audit
+    assert (snoozed["review_item_id"], "auto_reopen", "snooze expired") in audit
+    assert ("stale-item", "auto_supersede", "no longer raised by the latest filings") in audit
+
+
+def test_group_review_updates_are_all_or_nothing(tmp_config):
+    import pytest
+
+    from stock_triage.intelligence.review import update_review_statuses
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        first_id = conn.execute("SELECT review_item_id FROM review_queue_items WHERE status = 'open' LIMIT 1").fetchone()[0]
+    finally:
+        conn.close()
+
+    with pytest.raises(ValueError):
+        update_review_statuses(tmp_config, review_item_ids=[first_id, "missing-item"], status="resolved")
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        status = conn.execute("SELECT status FROM review_queue_items WHERE review_item_id = ?", (first_id,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert status == "open"
+
+
+def test_thesis_ids_survive_reordering_and_removed_theses_retire(tmp_path):
+    import sqlite3
+
+    from stock_triage.intelligence.thesis import load_local_theses, sync_local_theses
+
+    def write(names):
+        path = tmp_path / "theses.yaml"
+        path.write_text(
+            "theses:\n"
+            + "".join(f"  - ticker: TAMU\n    thesis_name: {name}\n    thesis_text: {name}.\n" for name in names),
+            encoding="utf-8",
+        )
+        return load_local_theses(path)
+
+    first = {thesis.thesis_name: thesis.thesis_id for thesis in write(["Debt cleanup", "Margin repair"])}
+    reordered = {thesis.thesis_name: thesis.thesis_id for thesis in write(["Margin repair", "Debt cleanup"])}
+    assert first == reordered
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    run_migrations(conn)
+    sync_local_theses(conn, theses=write(["Debt cleanup", "Margin repair"]))
+    sync_local_theses(conn, theses=write(["Margin repair"]))
+    statuses = {row["thesis_name"]: row["status"] for row in conn.execute("SELECT thesis_name, status FROM thesis_definitions")}
+    assert statuses == {"Debt cleanup": "retired", "Margin repair": "active"}
+
+
+def test_rederive_keeps_contradiction_history_from_earlier_filings(tmp_config):
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(
+            lambda conn: conn.execute(
+                """
+                INSERT INTO contradiction_rows (
+                    contradiction_id, ticker, document_id, contradiction_class, severity, summary,
+                    source_claim_id, evidence_span_id, payload_json, derived_version, created_at, updated_at
+                ) VALUES ('older-contradiction', 'TAMU', 'doc-tamu-b', 'claim_vs_outcome', 'critical',
+                          'Earlier filing contradiction.', NULL, NULL, '{}', ?, '2025-01-01', '2025-01-01')
+                """,
+                (DERIVED_VERSION,),
+            )
+        )
+
+    rederive_intelligence(tmp_config, ticker="TAMU")
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        kept = conn.execute("SELECT 1 FROM contradiction_rows WHERE contradiction_id = 'older-contradiction'").fetchone()
+    finally:
+        conn.close()
+    assert kept is not None
+
+
+def test_persistence_ageing_compares_naive_and_offset_idx_timestamps():
+    """Financial reports are stored naive (WIB), disclosures with +07:00."""
+    rows = _build_persistent_risk_signals(
+        [
+            FocusHistoryRow(
+                document_id="doc-notice",
+                document_type="disclosure",
+                as_of="2026-04-08T22:34:05+07:00",
+                focus_keys=("legal_regulatory",),
+            ),
+            FocusHistoryRow(
+                document_id="doc-fs",
+                document_type="financial_statement",
+                as_of="2025-04-30T14:45:15.073",
+                focus_keys=("legal_regulatory",),
+            ),
+        ]
+    )
+
+    assert rows[0]["gap_days"] == 343
+    assert rows[0]["persistence_state"] == "reappeared"
+
+
+def test_a_newer_disclosure_reopens_a_resolved_event_and_points_at_it(tmp_config):
+    from stock_triage.intelligence.review import update_review_status
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    def event_item():
+        conn = connect(tmp_config.paths.db_path, read_only=True)
+        try:
+            return dict(
+                conn.execute(
+                    "SELECT review_item_id, status, document_id FROM review_queue_items "
+                    "WHERE ticker = 'TAMU' AND item_type = 'event_signal' AND derived_version = ?",
+                    (DERIVED_VERSION,),
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+
+    item = event_item()
+    update_review_status(tmp_config, review_item_id=item["review_item_id"], status="resolved")
+    newest = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+    def add_notice_raising_the_same_event(conn):
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(documents)")]
+        overrides = {
+            "document_id": "'doc-tamu-notice'",
+            "source_record_id": "'notice-2'",
+            "source_file_id": "'notice-2-file'",
+            "sha256": "'sha-tamu-notice-2'",
+            "document_type": "'disclosure'",
+            "source_modified_at": "?",
+            "updated_at": "?",
+            "created_at": "?",
+        }
+        select = ", ".join(overrides.get(column, column) for column in columns)
+        conn.execute(
+            f"INSERT INTO documents ({', '.join(columns)}) SELECT {select} FROM documents WHERE document_id = 'doc-tamu-a'",
+            (newest, newest, newest),
+        )
+        event_type = conn.execute(
+            "SELECT event_type FROM events WHERE document_id = 'doc-tamu-a' AND severity IN ('warning', 'critical') LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO events (event_id, document_id, ticker, event_type, matched_pattern, severity, rationale,
+                                evidence_span_id, detected_at)
+            VALUES ('event-tamu-notice', 'doc-tamu-notice', 'TAMU', ?, ?, 'warning', 'Raised again.', NULL, ?)
+            """,
+            (event_type, event_type, newest),
+        )
+
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(add_notice_raising_the_same_event)
+    run_intelligence(tmp_config, ticker="TAMU")
+
+    reopened = event_item()
+    assert reopened["review_item_id"] == item["review_item_id"]
+    assert (reopened["status"], reopened["document_id"]) == ("open", "doc-tamu-notice")
+
+
+def test_claims_made_after_the_anchor_filing_are_not_yet_testable():
+    from stock_triage.intelligence.claims import ClaimRecord, _evaluate_claim
+
+    claim = ClaimRecord(
+        claim_id="claim-new",
+        ticker="TAMU",
+        source_document_id="doc-notice",
+        claim_text="Proceeds will be allocated to fleet renewal.",
+        claim_type="funding_use",
+        claim_topic="capital_allocation",
+        claim_subject=None,
+        claim_date=None,
+        claim_time_horizon=None,
+        claim_confidence=0.8,
+        evidence_span_id=None,
+        status="open",
+        payload_json="{}",
+    )
+
+    status, _, _, _ = _evaluate_claim(
+        None, claim=claim, latest_document_id="doc-anchor", newer_document_ids=frozenset({"doc-notice"})
+    )
+
+    assert status == "Not Yet Testable"
+
+
+def test_undoing_a_snooze_reopens_without_a_leftover_snooze_date(tmp_config):
+    from stock_triage.intelligence.review import update_review_status
+
+    _seed_phase10_inputs(tmp_config)
+    _write_phase12_theses(tmp_config)
+    run_intelligence(tmp_config, ticker="TAMU")
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        item_id = conn.execute("SELECT review_item_id FROM review_queue_items WHERE status = 'open' LIMIT 1").fetchone()[0]
+    finally:
+        conn.close()
+
+    update_review_status(tmp_config, review_item_id=item_id, status="snoozed")
+    # The dashboard only lists open items, so Undo always restores "open".
+    update_review_status(tmp_config, review_item_id=item_id, status="open")
+
+    conn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        row = conn.execute("SELECT status, snoozed_until FROM review_queue_items WHERE review_item_id = ?", (item_id,)).fetchone()
+    finally:
+        conn.close()
+    assert (row["status"], row["snoozed_until"]) == ("open", None)

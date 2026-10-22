@@ -11,6 +11,31 @@ from .assets import render_dashboard_html, write_dashboard_static_assets
 from .snapshot import DashboardSnapshot, load_dashboard_snapshot
 
 
+METRICS_CSV_FIELDS = (
+    "ticker",
+    "metric_name",
+    "value_normalized",
+    "currency",
+    "fiscal_year",
+    "fiscal_period",
+    "period_end_date",
+    "document_id",
+)
+FINDINGS_CSV_FIELDS = (
+    "document_id",
+    "ticker",
+    "source_name",
+    "finding_type",
+    "name",
+    "claim",
+    "summary",
+    "evidence",
+    "local_path",
+    "original_url",
+    "finished_at",
+)
+
+
 @dataclass(frozen=True)
 class DashboardExportResult:
     html_path: Path
@@ -83,16 +108,7 @@ def _write_metrics_csv(path: Path, metrics: list[dict[str, object]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "ticker",
-                "metric_name",
-                "value_normalized",
-                "currency",
-                "fiscal_year",
-                "fiscal_period",
-                "period_end_date",
-                "document_id",
-            ],
+            fieldnames=METRICS_CSV_FIELDS,
         )
         writer.writeheader()
         writer.writerows(metrics)
@@ -102,19 +118,7 @@ def _write_findings_csv(path: Path, findings: list[dict[str, object]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "document_id",
-                "ticker",
-                "source_name",
-                "finding_type",
-                "name",
-                "claim",
-                "summary",
-                "evidence",
-                "local_path",
-                "original_url",
-                "finished_at",
-            ],
+            fieldnames=FINDINGS_CSV_FIELDS,
         )
         writer.writeheader()
         writer.writerows(findings)

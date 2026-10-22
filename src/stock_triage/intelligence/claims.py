@@ -147,6 +147,7 @@ def extract_claims_for_documents(
     ticker: str,
     documents: list[object],
     latest_document_id: str,
+    newer_document_ids: frozenset[str] = frozenset(),
 ) -> list[ClaimRecord]:
     claims: list[ClaimRecord] = []
     seen: set[str] = set()
@@ -175,7 +176,11 @@ def extract_claims_for_documents(
                         claim_time_horizon=_infer_time_horizon(chunk.text),
                         claim_confidence=confidence,
                         evidence_span_id=chunk.span_id,
-                        status="not_yet_testable" if document.document_id == latest_document_id else "open",
+                        status=(
+                            "not_yet_testable"
+                            if document.document_id == latest_document_id or document.document_id in newer_document_ids
+                            else "open"
+                        ),
                         payload_json=json.dumps(
                             {
                                 "chunk_id": chunk.chunk_id,
@@ -197,6 +202,7 @@ def evaluate_claim_outcomes(
     claims: list[ClaimRecord],
     latest_document_id: str,
     assessment_date: str,
+    newer_document_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[ClaimOutcomeRecord], ClaimCredibilitySummary]:
     outcomes: list[ClaimOutcomeRecord] = []
     counts = {
@@ -227,6 +233,7 @@ def evaluate_claim_outcomes(
                 conn,
                 claim=claim,
                 latest_document_id=latest_document_id,
+                newer_document_ids=newer_document_ids,
             )
         counts[status] = counts.get(status, 0) + 1
         outcomes.append(
@@ -277,8 +284,11 @@ def _evaluate_claim(
     *,
     claim: ClaimRecord,
     latest_document_id: str,
+    newer_document_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, str, str | None, dict[str, Any]]:
-    if claim.source_document_id == latest_document_id:
+    # The latest evidence comes from ``latest_document_id``; a claim made there
+    # or in a later filing has nothing after it to be tested against.
+    if claim.source_document_id == latest_document_id or claim.source_document_id in newer_document_ids:
         return (
             "Not Yet Testable",
             "Claim originates from the latest document and has no later evidence window yet.",
@@ -310,6 +320,19 @@ def _evaluate_claim(
     )
 
 
+# Balance-sheet values are point-in-time, so a quarter-end can be compared with a
+# year-end; flows such as revenue only compare across same-length periods.
+_POINT_IN_TIME_METRICS = {
+    "total_liabilities",
+    "total_assets",
+    "equity",
+    "cash",
+    "short_term_debt",
+    "long_term_debt",
+    "net_debt",
+}
+
+
 def _evaluate_metric_direction_claim(
     conn: sqlite3.Connection,
     *,
@@ -324,6 +347,16 @@ def _evaluate_metric_direction_claim(
         return (
             "Not Yet Testable",
             f"Missing comparable {metric_name} evidence for claim evaluation.",
+            None,
+            {"support_links": [], "contradiction_links": []},
+        )
+    source_period = source_metric["fiscal_period"]
+    latest_period = latest_metric["fiscal_period"]
+    if metric_name not in _POINT_IN_TIME_METRICS and source_period != latest_period:
+        return (
+            "Not Yet Testable",
+            f"Latest {metric_name} covers a {latest_period or 'different'} period, "
+            f"not comparable with the {source_period or 'original'} claim baseline.",
             None,
             {"support_links": [], "contradiction_links": []},
         )
@@ -418,7 +451,7 @@ def _load_claim_source_chunks(conn: sqlite3.Connection, document_id: str) -> lis
 def _load_metric(conn: sqlite3.Connection, document_id: str, metric_name: str):
     return conn.execute(
         """
-        SELECT value_normalized, evidence_span_id
+        SELECT value_normalized, evidence_span_id, fiscal_period
         FROM metric_items
         WHERE document_id = ?
           AND metric_name = ?

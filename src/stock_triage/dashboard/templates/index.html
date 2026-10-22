@@ -28,11 +28,14 @@
       </div>
     </section>
 
-    <nav class="viewNav" id="viewNav">
-      <button class="viewTab active" data-view="home" type="button">Home</button>
-      <button class="viewTab" data-view="company" type="button">Company</button>
-      <button class="viewTab" data-view="review" type="button">Review</button>
-      <button class="viewTab" data-view="ops" type="button">Ops</button>
+    <nav class="viewNav" id="viewNav" aria-label="Workspace views">
+      <div class="viewTabs" role="tablist">
+        <button class="viewTab active" data-view="home" type="button" role="tab" aria-selected="true">Home</button>
+        <button class="viewTab" data-view="company" type="button" role="tab" aria-selected="false">Company</button>
+        <button class="viewTab" data-view="review" type="button" role="tab" aria-selected="false">Review</button>
+        <button class="viewTab" data-view="ops" type="button" role="tab" aria-selected="false">Ops</button>
+      </div>
+      <button id="runPill" class="runPill" type="button" data-view="ops" hidden></button>
     </nav>
 
     <section class="workspaceHeader panel" data-views="home company">
@@ -55,7 +58,7 @@
         <article class="panel searchBox">
           <div class="sectionEyebrow">Navigate</div>
           <h2>Companies</h2>
-          <input id="issuerSearch" placeholder="Search ticker, issuer, sector">
+          <input id="issuerSearch" type="search" placeholder="Search ticker, issuer, sector" aria-label="Search companies by ticker, issuer, or sector" autocomplete="off">
           <div class="meta" id="sidebarHint">Choose a company, then everything in the main column stays scoped to that issuer.</div>
         </article>
         <article class="panel">
@@ -214,9 +217,18 @@
               </div>
               <div class="primaryActions">
                 <button class="actionButton primaryAction" data-action="daily_sweep" type="button">Run Daily Sweep</button>
+                <button id="cancelRunButton" class="ghostButton dangerGhost" type="button" hidden>Cancel run</button>
+                <button id="retryStepsButton" class="ghostButton" type="button" hidden>Retry unfinished steps</button>
                 <button id="refreshButton" class="ghostButton" type="button">Refresh Data</button>
               </div>
             </div>
+            <section class="runTimeline" aria-labelledby="runTimelineTitle">
+              <div class="runTimelineHeader">
+                <h3 id="runTimelineTitle">Sweep route</h3>
+                <span id="runTimelineMeta" class="metaLight">Runs on the server, so you can close this tab mid-sweep and come back.</span>
+              </div>
+              <ol id="runSteps" class="runSteps"></ol>
+            </section>
             <details class="advancedActions">
               <summary>Advanced actions</summary>
               <div class="advancedBody">
@@ -256,7 +268,7 @@
             <div class="sectionHeader">
               <div>
                 <h2>Action Output</h2>
-                <p id="actionStatus" class="lead">Ready. Run the daily sweep or a scoped action from the advanced list.</p>
+                <p id="actionStatus" class="lead" role="status" aria-live="polite">Ready. Run the daily sweep or a scoped action from the advanced list.</p>
               </div>
             </div>
             <div id="actionErrorPanel" class="actionError" hidden>
@@ -335,9 +347,9 @@
     </section>
   </main>
 
-  <script>
-    window.__DASHBOARD_BOOTSTRAP__ = __BOOTSTRAP_JSON__;
-  </script>
+  <div id="toastRegion" class="toastRegion" aria-live="polite" aria-atomic="false"></div>
+
+  <script id="dashboardBootstrap" type="application/json">__BOOTSTRAP_JSON__</script>
   <script src="__STATIC_ROOT__/app.js"></script>
 </body>
 </html>

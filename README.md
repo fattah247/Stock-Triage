@@ -86,7 +86,10 @@ python -m stock_triage discover company_universe
 # Discover disclosures incrementally
 python -m stock_triage discover disclosure
 
-# Discover financial-report attachment candidates incrementally
+# Discover financial-report attachment candidates incrementally. Without
+# --year this scans the current and previous report year (FY Y-1 annual
+# statements are filed during year Y); --year pins a single report year.
+python -m stock_triage discover financial_report
 python -m stock_triage discover financial_report --year 2025
 
 # Download attachment candidates into the file store and documents table
@@ -136,6 +139,7 @@ python -m stock_triage intelligence-run --limit 25
 # Build the daily digest and inspect the review queue / KPI surfaces.
 python -m stock_triage digest-run --scope watchlist --limit 10
 python -m stock_triage review-queue --status open --limit 20
+python -m stock_triage review-update <review_item_id> --status snoozed --snooze-days 30
 python -m stock_triage intelligence-kpis
 
 # Render the local dashboard plus CSV exports
@@ -170,6 +174,66 @@ Defaults live in `config/default.yaml`. Override either by:
 
 - Setting `STOCK_TRIAGE_CONFIG=/path/to/your.yaml`, or
 - Exporting nested env vars like `STOCK_TRIAGE__LOGGING__LEVEL=DEBUG`.
+
+The dashboard output directory, alerts JSONL, `theses.yaml`, and
+`company_overrides.yaml` default to locations under `paths.data_dir`, so
+moving `data_dir` moves them too; set them explicitly only to split them out.
+
+## Running safely
+
+- **One pipeline command at a time.** Commands that fetch from IDX or rewrite
+  pipeline state (`discover`, `download`, `parse`, `extract`, `rules`,
+  `intelligence-*`, `digest-run`, `alerts-run`, `canary-run`, `coverage-run`,
+  `backfill`, ...) take an OS-level lock on `data/pipeline.lock`. A second one
+  exits with status `75` and names the command holding the lock. Read-only
+  status commands and `review-update` are never blocked. The OS releases the
+  lock when a process dies, so it cannot go stale.
+- **Atomic writes.** Every `WriterQueue` job runs in one SQLite transaction, so
+  an interrupted run (Ctrl-C, killed process, cancelled dashboard run) leaves
+  no half-rewritten chunks, coverage ledgers, or snapshots.
+- **Exit codes.** `download` and `parse` exit `1` when they attempted work and
+  nothing succeeded (typically IDX blocking the session); partial failures stay
+  visible in the printed counts. `intelligence-run`/`intelligence-rederive`
+  derive each issuer independently, print `failed_tickers=N`, list failures on
+  stderr, and exit `1` only if no snapshot could be derived.
+- **Dashboard runs live on the server.** `dashboard-serve` runs one action or
+  sequence at a time. The Daily Sweep is executed server-side, so closing or
+  reloading the tab does not stop it, and a reloaded page reattaches to the
+  live output. When an IDX step fails, the remaining IDX steps are skipped but
+  local steps (parse, extract, rules, intelligence, alerts, digest) still run,
+  and the run finishes as `partial` with a "retry unfinished steps" option.
+  Runs can be cancelled (SIGINT, then SIGTERM/SIGKILL if ignored), and finished
+  runs are kept in `data/logs/dashboard_runs.jsonl`, so history survives
+  restarts.
+- **Local server hardening.** The dashboard only answers requests addressed to
+  a loopback host name (blocking DNS rebinding), refuses cross-site
+  state-changing requests, sends a strict Content-Security-Policy, and serves
+  artifacts only from the file store, quarantine, recon, and dashboard
+  directories. The SQLite database and the browser profile are never served.
+
+## Filing periods and the review lifecycle
+
+- **Interim reports are collected.** Financial-report discovery requests the
+  annual (`audit`) and quarterly (`tw1`, `tw2`, `tw3`) periods for financial
+  statements. Extraction labels metrics `Q1`, `H1`, `Q3`, or `Annual` and
+  computes period ends from the issuer's fiscal-year-end month, including
+  `data/company_overrides.yaml`, and records the reporting currency from the
+  statements' "expressed in ..." headers (`EXTRACTOR_VERSION` `phase5-v3`).
+  Documents extracted earlier keep their old labels until re-extracted.
+- **Lateness is only claimed for periods we looked at.** A filing expectation
+  is `unobserved`, not `late`, when its deadline falls before the first filing
+  collected for the issuer or after the last financial-report discovery sync.
+- **Decisions apply to the filing that was reviewed.** Resolving or snoozing a
+  review item holds until a newer filing raises the same issue again, which
+  reopens it. Snoozes expire (14 days by default; `--snooze-days` or the
+  dashboard's snooze), open items whose signal disappears become `superseded`,
+  and every automatic transition is written to `review_audit_log`
+  (`auto_reopen`, `auto_supersede`). Grouped updates are a single transaction.
+- **Comparisons are like for like.** Segment metrics are compared per segment,
+  metric deltas only score against a comparable baseline and within a 10x
+  plausibility bound, flow claims (revenue, profit, capex) are only judged
+  against the same kind of period, peer leverage is always liabilities /
+  assets, and a zero peer median never produces a critical outlier.
 
 ## Design notes
 

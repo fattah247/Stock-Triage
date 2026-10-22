@@ -419,8 +419,10 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
             SELECT ticker, COUNT(*) AS count
             FROM review_queue_items
             WHERE status = 'open'
+              AND derived_version = ?
             GROUP BY ticker
-            """
+            """,
+            (DERIVED_VERSION,),
         ).fetchall()
     }
     snapshot_rows = conn.execute(
@@ -464,6 +466,7 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
              AND cs.snapshot_kind = 'current'
              AND cs.derived_version = ?
             WHERE rqi.status = 'open'
+              AND rqi.derived_version = ?
               AND rqi.updated_at >= ?
             ORDER BY
               CASE rqi.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
@@ -471,7 +474,7 @@ def _load_market_monitor(conn: sqlite3.Connection, cfg: Config) -> dict[str, obj
               rqi.review_item_id ASC
             LIMIT 10
             """,
-            (DERIVED_VERSION, week_start.isoformat()),
+            (DERIVED_VERSION, DERIVED_VERSION, week_start.isoformat()),
         ).fetchall()
     ]
     stock_pick_candidates: list[dict[str, object]] = []
@@ -876,7 +879,7 @@ def _load_late_periodic_rows(
         WHERE fe.derived_version = ?
           AND fe.state = 'late'
           AND COALESCE(c.active_status, 'listed') != 'delisted'
-        ORDER BY fe.deadline_at ASC, fe.ticker ASC
+        ORDER BY fe.deadline_at DESC, fe.ticker ASC
         LIMIT 25
         """,
         (DERIVED_VERSION,),

@@ -1,11 +1,11 @@
 # Phase 6 Rule Audit
 
-Ruleset version: `phase6-v1`
+Ruleset version: `phase6-v2`
 
 Current baseline rules:
 - `profit_drop`: triggers when latest extracted `net_profit < 0`
 - `cash_flow_deterioration`: triggers when latest extracted `operating_cash_flow < 0`
-- `debt_surge`: triggers when `total_liabilities / equity > 0.75`
+- `debt_surge`: triggers when `total_liabilities / equity > 0.75`, or when equity is zero or negative while liabilities are outstanding (`phase6-v2`; under `phase6-v1` a negative-equity issuer produced a negative ratio and never triggered)
 - `auditor_change`: triggers from extracted `auditor_change` events
 - `management_change`: triggers from extracted `governance_appointment` events
 - `funding_event`: triggers from extracted `debt_facility`, `debt_refinancing`, or `bond_issuance` events

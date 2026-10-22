@@ -119,7 +119,8 @@ def cmd_download(args: argparse.Namespace) -> int:
         f"not_modified={result.not_modified} "
         f"failed={result.failed}"
     )
-    return 0
+    # Only a run where nothing could be fetched fails; partial failures show in the counts.
+    return 1 if result.failed and not (result.fetched or result.not_modified) else 0
 
 
 def cmd_parse(args: argparse.Namespace) -> int:
@@ -145,7 +146,7 @@ def cmd_parse(args: argparse.Namespace) -> int:
         f"ocr_full={result.ocr_full} "
         f"chunks={result.chunks}"
     )
-    return 0
+    return 1 if result.failed and not result.parsed else 0
 
 
 def cmd_parse_status(args: argparse.Namespace) -> int:

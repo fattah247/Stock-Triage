@@ -21,6 +21,8 @@ def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
 
 
 def configure_pragmas(conn: sqlite3.Connection, cfg: Config) -> None:
+    # busy_timeout first, so switching journal mode waits out a concurrent
+    # writer instead of failing immediately.
+    conn.execute(f"PRAGMA busy_timeout = {cfg.database.busy_timeout_ms}")
     conn.execute(f"PRAGMA journal_mode = {cfg.database.journal_mode}")
     conn.execute(f"PRAGMA synchronous = {cfg.database.synchronous}")
-    conn.execute(f"PRAGMA busy_timeout = {cfg.database.busy_timeout_ms}")

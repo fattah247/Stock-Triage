@@ -104,7 +104,7 @@ def test_run_alerts_includes_broken_thesis_signals(tmp_config):
 
     lines = [json.loads(line) for line in tmp_config.alerts.jsonl_path.read_text(encoding="utf-8").strip().splitlines()]
     thesis_payload = next(line for line in lines if line["signal_kind"] == "thesis")
-    assert thesis_payload["signal_name"] == "TAMU debt cleanup"
+    assert thesis_payload["signal_name"] == "TAMU debt cleanup (broken)"
     assert thesis_payload["severity"] == "critical"
     assert thesis_payload["suggested_next_action"] == "review now"
     assert thesis_payload["details"]["matched_stop"][0]["kind"] == "rule_present"
@@ -214,7 +214,7 @@ def test_dashboard_and_canary_cli_use_phase8_commands(tmp_config, monkeypatch, c
 
 def _seed_phase8_data(tmp_config) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    local_path = tmp_config.paths.data_dir / "tamu-annual-report.pdf"
+    local_path = tmp_config.paths.files_dir / "tamu-annual-report.pdf"
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(b"%PDF-1.4\n%phase8\n")
 

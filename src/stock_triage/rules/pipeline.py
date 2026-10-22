@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 
-RULESET_VERSION = "phase6-v1"
+RULESET_VERSION = "phase6-v2"
 
 
 @dataclass(frozen=True)
@@ -472,9 +472,16 @@ def _ratio_rule(
 ) -> RuleOutcome:
     ratio = None
     triggered = False
-    if numerator is not None and denominator is not None and denominator.value_normalized not in (None, 0):
-        ratio = (numerator.value_normalized or 0.0) / denominator.value_normalized
-        triggered = ratio > 0.75
+    rationale = None
+    if numerator is not None and denominator is not None and denominator.value_normalized is not None:
+        numerator_value = numerator.value_normalized or 0.0
+        if denominator.value_normalized > 0:
+            ratio = numerator_value / denominator.value_normalized
+            triggered = ratio > 0.75
+        elif numerator_value > 0:
+            # Non-positive equity is the most severe leverage case, where the ratio is meaningless.
+            triggered = True
+            rationale = f"{denominator.metric_name} is not positive while {numerator.metric_name} is outstanding."
     return RuleOutcome(
         rule_name=rule_name,
         severity=severity,
@@ -486,7 +493,7 @@ def _ratio_rule(
             "denominator_value": denominator.value_normalized if denominator is not None else None,
             "ratio": ratio,
         },
-        rationale=rationale_hit if triggered else rationale_miss,
+        rationale=rationale or (rationale_hit if triggered else rationale_miss),
         triggered=triggered,
     )
 

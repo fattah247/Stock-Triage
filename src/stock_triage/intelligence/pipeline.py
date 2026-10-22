@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
@@ -13,7 +14,8 @@ from typing import Any
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
-from ..fiscal_year import resolve_fiscal_year_end_month
+from ..fiscal_year import fiscal_period_end, resolve_fiscal_year_end_month
+from ..logging_setup import get_logger
 from .thesis import (
     LocalThesisCondition,
     LocalThesisDefinition,
@@ -106,18 +108,6 @@ def _canonical_nuance_class(name: str) -> str:
     return NUANCE_CLASS_ALIASES.get(name, name)
 
 
-def _tier_for_source_label(source_label: str) -> str:
-    if source_label in {"event", "rule", "claim_outcome"}:
-        return "direct"
-    if source_label in {"section_cue", "capital_allocation", "segment_summary", "current_claim_vs_event"}:
-        return "derived"
-    if source_label in {"filing_expectation", "analysis", "nuance", "uncertainty", "contradiction"}:
-        return "guidance"
-    if source_label in {"baseline", "review_queue", "peer_view", "event_note_scope"}:
-        return "derived"
-    return "derived"
-
-
 @dataclass(frozen=True)
 class CompanyProfile:
     ticker: str
@@ -182,6 +172,7 @@ class EventSignal:
     evidence_span_id: str | None
     payload_json: str | None
     detected_at: str
+    document_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +184,7 @@ class TriggeredRule:
     threshold: str | None
     input_values: dict[str, Any]
     evaluated_at: str
+    document_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -454,6 +446,7 @@ class ComparableCompanyState:
 @dataclass(frozen=True)
 class CompanyIntelligenceBundle:
     profile: CompanyProfile
+    as_of: date
     latest_document: CompanyDocument
     baseline: BaselineChoice | None
     filing_expectations: list[FilingExpectationRecord]
@@ -494,6 +487,54 @@ class IntelligenceRunResult:
     thesis_evaluations: int = 0
     claims: int = 0
     claim_outcomes: int = 0
+    failed_tickers: tuple[str, ...] = ()
+
+
+_COUNT_FIELDS = (
+    "deltas",
+    "snapshots",
+    "timeseries",
+    "segment_history",
+    "briefs",
+    "review_items",
+    "peer_sets",
+    "sector_rollups",
+    "thesis_evaluations",
+    "claims",
+    "claim_outcomes",
+)
+
+
+def _derive_tickers(
+    wq: WriterQueue,
+    reader: sqlite3.Connection,
+    cfg: Config,
+    tickers: list[str],
+    result: IntelligenceRunResult,
+    *,
+    as_of: date,
+) -> IntelligenceRunResult:
+    """Derive and persist each ticker independently.
+
+    A failing issuer is logged and listed in ``failed_tickers``; its bundle
+    persists in one transaction, so its previous snapshot stays intact.
+    """
+    log = get_logger("stock_triage.intelligence")
+    for ticker_value in tickers:
+        try:
+            bundle = _build_bundle(reader, cfg, ticker_value, as_of=as_of)
+            if bundle is None:
+                continue
+            counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
+        except Exception as exc:  # noqa: BLE001 - isolate one issuer's failure
+            log.exception("intelligence derivation failed", extra={"ticker": ticker_value})
+            result = replace(result, failed_tickers=(*result.failed_tickers, f"{ticker_value}: {type(exc).__name__}: {exc}"))
+            continue
+        result = replace(
+            result,
+            **{name: getattr(result, name) + counts[name] for name in _COUNT_FIELDS},
+        )
+    return result
 
 
 def run_intelligence(
@@ -501,6 +542,7 @@ def run_intelligence(
     *,
     ticker: str | None = None,
     limit: int = 25,
+    as_of: date | None = None,
 ) -> IntelligenceRunResult:
     cfg.ensure_dirs()
 
@@ -514,25 +556,7 @@ def run_intelligence(
             configure_pragmas(reader, cfg)
             tickers = _select_tickers(reader, ticker=ticker, limit=limit)
             result = IntelligenceRunResult(selected_tickers=len(tickers))
-            for ticker_value in tickers:
-                bundle = _build_bundle(reader, cfg, ticker_value)
-                if bundle is None:
-                    continue
-                counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
-                result = IntelligenceRunResult(
-                    selected_tickers=result.selected_tickers,
-                    deltas=result.deltas + counts["deltas"],
-                    snapshots=result.snapshots + counts["snapshots"],
-                    timeseries=result.timeseries + counts["timeseries"],
-                    segment_history=result.segment_history + counts["segment_history"],
-                    briefs=result.briefs + counts["briefs"],
-                    review_items=result.review_items + counts["review_items"],
-                    peer_sets=result.peer_sets + counts["peer_sets"],
-                    sector_rollups=result.sector_rollups + counts["sector_rollups"],
-                    thesis_evaluations=result.thesis_evaluations + counts["thesis_evaluations"],
-                    claims=result.claims + counts["claims"],
-                    claim_outcomes=result.claim_outcomes + counts["claim_outcomes"],
-                )
+            result = _derive_tickers(wq, reader, cfg, tickers, result, as_of=as_of or date.today())
         finally:
             reader.close()
     return result
@@ -543,6 +567,7 @@ def rederive_intelligence(
     *,
     ticker: str | None = None,
     limit: int = 1000,
+    as_of: date | None = None,
 ) -> IntelligenceRunResult:
     cfg.ensure_dirs()
 
@@ -556,25 +581,7 @@ def rederive_intelligence(
             configure_pragmas(reader, cfg)
             tickers = _select_snapshot_tickers(reader, ticker=ticker, limit=limit)
             result = IntelligenceRunResult(selected_tickers=len(tickers))
-            for ticker_value in tickers:
-                bundle = _build_bundle(reader, cfg, ticker_value)
-                if bundle is None:
-                    continue
-                counts = wq.submit(lambda conn, b=bundle: _persist_bundle(conn, b))
-                result = IntelligenceRunResult(
-                    selected_tickers=result.selected_tickers,
-                    deltas=result.deltas + counts["deltas"],
-                    snapshots=result.snapshots + counts["snapshots"],
-                    timeseries=result.timeseries + counts["timeseries"],
-                    segment_history=result.segment_history + counts["segment_history"],
-                    briefs=result.briefs + counts["briefs"],
-                    review_items=result.review_items + counts["review_items"],
-                    peer_sets=result.peer_sets + counts["peer_sets"],
-                    sector_rollups=result.sector_rollups + counts["sector_rollups"],
-                    thesis_evaluations=result.thesis_evaluations + counts["thesis_evaluations"],
-                    claims=result.claims + counts["claims"],
-                    claim_outcomes=result.claim_outcomes + counts["claim_outcomes"],
-                )
+            result = _derive_tickers(wq, reader, cfg, tickers, result, as_of=as_of or date.today())
         finally:
             reader.close()
     return result
@@ -621,28 +628,58 @@ def _select_snapshot_tickers(conn: sqlite3.Connection, *, ticker: str | None, li
     return _select_tickers(conn, ticker=None, limit=limit)
 
 
-def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> CompanyIntelligenceBundle | None:
+def _build_bundle(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    ticker: str,
+    *,
+    as_of: date,
+) -> CompanyIntelligenceBundle | None:
     profile = _load_company_profile(conn, cfg, ticker)
     if profile is None:
         return None
     documents = _load_company_documents(conn, ticker, limit=25)
     if not documents:
         return None
-    latest_document = documents[0]
-    baseline = _select_baseline(latest_document, documents[1:])
+    # Anchor on the newest filing with metrics: sibling attachments and later
+    # disclosures often have none. Their events and rules are folded in below.
+    anchor_index = next(
+        (index for index, document in enumerate(documents) if _load_document_metrics(conn, document.document_id)),
+        None,
+    )
+    if anchor_index is None:
+        return None
+    latest_document = documents[anchor_index]
+    newer_documents = documents[:anchor_index]
+    older_documents = documents[anchor_index + 1 :]
+    documents = [latest_document, *newer_documents, *older_documents]
+    baseline = _select_baseline(latest_document, older_documents)
     all_metrics = _load_ticker_metrics(conn, ticker)
     latest_metrics = _load_document_metrics(conn, latest_document.document_id)
-    if not latest_metrics:
-        return None
     filing_expectations = _build_filing_expectations(
         profile=profile,
         filing_documents=_load_filing_documents(conn, ticker),
-        now=date.today(),
+        now=as_of,
+        last_checked=_load_last_financial_report_sync(conn),
     )
     previous_metrics = _load_document_metrics(conn, baseline.document.document_id) if baseline is not None else []
-    latest_events = _load_document_events(conn, latest_document.document_id)
+    latest_events = _dedupe_keep_order_by(
+        [
+            event
+            for document in (*newer_documents, latest_document)
+            for event in _load_document_events(conn, document.document_id)
+        ],
+        key=lambda event: event.event_id,
+    )
     previous_events = _load_document_events(conn, baseline.document.document_id) if baseline is not None else []
-    latest_rules = _load_triggered_rules(conn, latest_document.document_id)
+    latest_rules = _dedupe_keep_order_by(
+        [
+            rule
+            for document in (*newer_documents, latest_document)
+            for rule in _load_triggered_rules(conn, document.document_id)
+        ],
+        key=lambda rule: rule.rule_name,
+    )
     previous_rules = _load_triggered_rules(conn, baseline.document.document_id) if baseline is not None else []
     latest_analysis = _load_latest_analysis(conn, latest_document.document_id)
     previous_analysis = _load_latest_analysis(conn, baseline.document.document_id) if baseline is not None else None
@@ -670,16 +707,19 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         current_analysis=latest_analysis,
     )
     timeseries = _build_timeseries(ticker=ticker, metrics=all_metrics)
+    newer_document_ids = frozenset(document.document_id for document in newer_documents)
     claims = extract_claims_for_documents(
         conn,
         ticker=ticker,
         documents=documents,
         latest_document_id=latest_document.document_id,
+        newer_document_ids=newer_document_ids,
     )
     claim_outcomes, credibility_summary = evaluate_claim_outcomes(
         conn,
         claims=claims,
         latest_document_id=latest_document.document_id,
+        newer_document_ids=newer_document_ids,
         assessment_date=latest_document.source_modified_at or latest_document.updated_at,
     )
     conflict_items = _build_conflict_review_items(
@@ -706,12 +746,14 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
     claim_items = _build_claim_review_items(
         ticker=ticker,
         document_id=latest_document.document_id,
+        claims=claims,
         claim_outcomes=claim_outcomes,
     )
-    persisted_review_statuses = _load_review_status_map(conn, ticker=ticker)
+    review_states = _load_review_states(conn, ticker=ticker)
     active_review_items = _filter_active_review_items(
         conflict_items + thesis_items + claim_items,
-        review_statuses=persisted_review_statuses,
+        review_states=review_states,
+        as_of=as_of,
     )
     peer_set, peer_view = _build_peer_set(conn, cfg, profile, current_company_state)
     sector_rollup, sector_view = _build_sector_rollup(conn, cfg, profile, current_company_state)
@@ -738,7 +780,13 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         document_ids=[document.document_id for document in documents],
     )
     focus_history = _load_focus_history(conn, documents[:5])
-    persistent_risk_signals = _build_persistent_risk_signals(focus_history)
+    persistence_reference = _persistence_reference_date(
+        [document.source_modified_at or document.updated_at for document in documents[:5]]
+    )
+    persistent_risk_signals = _build_persistent_risk_signals(
+        focus_history,
+        reference_date=persistence_reference,
+    )
     nuance_findings = _build_nuance_findings(
         ticker=ticker,
         latest_document=latest_document,
@@ -776,7 +824,10 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
         documents=documents[:5],
         current_rows=contradiction_rows,
     )
-    persistent_contradiction_signals = _build_persistent_contradiction_signals(contradiction_history)
+    persistent_contradiction_signals = _build_persistent_contradiction_signals(
+        contradiction_history,
+        reference_date=persistence_reference,
+    )
     persistence_items = _build_persistence_review_items(
         ticker=ticker,
         document_id=latest_document.document_id,
@@ -786,7 +837,8 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
     active_review_items.extend(
         _filter_active_review_items(
             persistence_items,
-            review_statuses=persisted_review_statuses,
+            review_states=review_states,
+            as_of=as_of,
         )
     )
     next_read_guidance = _build_next_read_guidance(
@@ -851,6 +903,7 @@ def _build_bundle(conn: sqlite3.Connection, cfg: Config, ticker: str) -> Company
     review_items.extend(claim_items)
     return CompanyIntelligenceBundle(
         profile=profile,
+        as_of=as_of,
         latest_document=latest_document,
         baseline=baseline,
         filing_expectations=filing_expectations,
@@ -954,6 +1007,14 @@ def _load_company_documents(
         )
         for row in rows
     ]
+
+
+def _load_last_financial_report_sync(conn: sqlite3.Connection) -> date | None:
+    row = conn.execute(
+        "SELECT updated_at FROM source_watermarks WHERE source_name = 'idx_financial_reports'"
+    ).fetchone()
+    synced_at = _parse_iso_datetime(row["updated_at"]) if row is not None else None
+    return synced_at.date() if synced_at is not None else None
 
 
 def _load_filing_documents(conn: sqlite3.Connection, ticker: str) -> list[FilingDocument]:
@@ -1229,6 +1290,7 @@ def _load_document_events(conn: sqlite3.Connection, document_id: str) -> list[Ev
             evidence_span_id=row["evidence_span_id"],
             payload_json=row["payload_json"],
             detected_at=row["detected_at"],
+            document_id=document_id,
         )
         for row in rows
     ]
@@ -1336,6 +1398,7 @@ def _load_triggered_rules(conn: sqlite3.Connection, document_id: str) -> list[Tr
             threshold=row["threshold"],
             input_values=json.loads(row["input_values"] or "{}"),
             evaluated_at=row["evaluated_at"],
+            document_id=document_id,
         )
         for row in rows
     ]
@@ -1408,6 +1471,7 @@ def _build_deltas(
             "current_value": current_metric.value_normalized,
             "absolute_change": absolute_change,
             "percent_change": percent_change,
+            "implausible": percent_change is not None and abs(percent_change) > _IMPLAUSIBLE_PERCENT_CHANGE,
             "period": {
                 "fiscal_year": current_metric.fiscal_year,
                 "fiscal_period": current_metric.fiscal_period,
@@ -2636,11 +2700,10 @@ def _build_uncertainty_rows(
             )
         )
 
-    late_unsatisfied = [
-        item for item in filing_expectations if item.state in {"late", "due"} and item.satisfied_document_id is None
-    ]
-    if late_unsatisfied:
-        first = late_unsatisfied[0]
+    late = [item for item in filing_expectations if item.state == "late"]
+    due = [item for item in filing_expectations if item.state == "due"]
+    if late or due:
+        first = late[-1] if late else due[0]
         rows.append(
             UncertaintyRecord(
                 uncertainty_id=_stable_id("uncertainty", ticker, latest_document.document_id, "filing-gap", DERIVED_VERSION),
@@ -3382,8 +3445,18 @@ def _contradiction_label(contradiction_class: str) -> str:
     return labels.get(contradiction_class, contradiction_class.replace("_", " ").title())
 
 
+def _persistence_reference_date(as_of_values: list[str]) -> date | None:
+    """Latest filing date in a history window, used to age persistence signals.
+
+    Ageing against filings rather than the wall clock keeps re-derivation
+    reproducible: "stale" means absent from the company's recent filings, not
+    that the pipeline has been idle.
+    """
+    parsed = [value for value in (_parse_iso_datetime(item) for item in as_of_values) if value is not None]
+    return max(parsed).date() if parsed else None
+
+
 def _persistence_recency_meta(as_of_values: list[str], *, today: date | None = None) -> dict[str, Any]:
-    resolved_today = today or date.today()
     parsed = sorted(
         [value for value in (_parse_iso_datetime(item) for item in as_of_values) if value is not None],
         reverse=True,
@@ -3395,6 +3468,7 @@ def _persistence_recency_meta(as_of_values: list[str], *, today: date | None = N
             "recency_band": "unknown",
             "persistence_state": "active",
         }
+    resolved_today = today or parsed[0].date()
     latest_age_days = max(0, (resolved_today - parsed[0].date()).days)
     gap_days = None
     if len(parsed) >= 2:
@@ -3409,7 +3483,12 @@ def _persistence_recency_meta(as_of_values: list[str], *, today: date | None = N
     }
 
 
-def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[dict[str, Any]]:
+def _build_persistent_risk_signals(
+    history_rows: list[FocusHistoryRow],
+    *,
+    reference_date: date | None = None,
+) -> list[dict[str, Any]]:
+    reference_date = reference_date or _persistence_reference_date([row.as_of for row in history_rows])
     grouped: dict[str, list[FocusHistoryRow]] = {}
     for row in history_rows:
         for focus_key in row.focus_keys:
@@ -3424,12 +3503,12 @@ def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[
         if len(docs) < 2:
             continue
         docs_sorted = sorted(docs, key=lambda item: (item.as_of, item.document_id), reverse=True)
-        recency_meta = _persistence_recency_meta([item.as_of for item in docs_sorted])
+        recency_meta = _persistence_recency_meta([item.as_of for item in docs_sorted], today=reference_date)
         summary = f"{_focus_bucket_label(focus_key)} issues repeated across {len(docs)} of the last {len(history_rows)} analyzed filings."
         if recency_meta["persistence_state"] == "reappeared":
             summary += f" Reappeared after a {recency_meta['gap_days']}-day quiet gap."
         elif recency_meta["persistence_state"] == "stale":
-            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days old."
+            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days older than the latest filing."
         rows.append(
             {
                 "focus_key": focus_key,
@@ -3457,7 +3536,12 @@ def _build_persistent_risk_signals(history_rows: list[FocusHistoryRow]) -> list[
     return rows
 
 
-def _build_persistent_contradiction_signals(history_rows: list[ContradictionHistoryRow]) -> list[dict[str, Any]]:
+def _build_persistent_contradiction_signals(
+    history_rows: list[ContradictionHistoryRow],
+    *,
+    reference_date: date | None = None,
+) -> list[dict[str, Any]]:
+    reference_date = reference_date or _persistence_reference_date([row.as_of for row in history_rows])
     grouped: dict[str, list[ContradictionHistoryRow]] = {}
     for row in history_rows:
         grouped.setdefault(row.contradiction_class, []).append(row)
@@ -3470,14 +3554,14 @@ def _build_persistent_contradiction_signals(history_rows: list[ContradictionHist
         items_sorted = sorted(items, key=lambda item: (item.as_of, item.document_id), reverse=True)
         severity = max(items, key=lambda item: severity_rank.get(item.severity, 0)).severity
         repeated_claim_carry = contradiction_class == "claim_vs_outcome" and any(item.source_claim_id for item in items)
-        recency_meta = _persistence_recency_meta([item.as_of for item in items_sorted])
+        recency_meta = _persistence_recency_meta([item.as_of for item in items_sorted], today=reference_date)
         summary = f"{_contradiction_label(contradiction_class)} contradiction remains unresolved across {len(unique_documents)} recent analyzed filings."
         if repeated_claim_carry:
             summary = f"Claim credibility contradiction persists across {len(unique_documents)} recent analyzed filings."
         if recency_meta["persistence_state"] == "reappeared":
             summary += f" Reappeared after a {recency_meta['gap_days']}-day quiet gap."
         elif recency_meta["persistence_state"] == "stale":
-            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days old."
+            summary += f" Latest occurrence is {recency_meta['latest_age_days']} days older than the latest filing."
         rows.append(
             {
                 "contradiction_class": contradiction_class,
@@ -3912,7 +3996,7 @@ def _build_review_items(
                 review_item_id=_stable_id("review", "rule", source_key, DERIVED_VERSION),
                 item_type="rule_trigger",
                 ticker=ticker,
-                document_id=document_id,
+                document_id=rule.document_id or document_id,
                 source_key=source_key,
                 priority=_priority_for_severity(rule.severity),
                 rationale=rule.rationale,
@@ -3942,7 +4026,7 @@ def _build_review_items(
                 review_item_id=_stable_id("review", "event", source_key, DERIVED_VERSION),
                 item_type="event_signal",
                 ticker=ticker,
-                document_id=document_id,
+                document_id=event.document_id or document_id,
                 source_key=source_key,
                 priority=_priority_for_severity(severity),
                 rationale=event.rationale,
@@ -3980,7 +4064,7 @@ def _build_persistence_review_items(
                 review_item_id=_stable_id("review", "persistence-focus", source_key, DERIVED_VERSION),
                 item_type="persistence_focus",
                 ticker=ticker,
-                document_id=document_id,
+                document_id=(signal.get("document_ids") or [document_id])[0],
                 source_key=source_key,
                 priority=priority,
                 rationale=str(signal.get("summary") or f"{focus_key} persists across recent filings."),
@@ -4011,7 +4095,7 @@ def _build_persistence_review_items(
                 review_item_id=_stable_id("review", "persistence-contradiction", source_key, DERIVED_VERSION),
                 item_type="persistence_contradiction",
                 ticker=ticker,
-                document_id=document_id,
+                document_id=(signal.get("document_ids") or [document_id])[0],
                 source_key=source_key,
                 priority=priority,
                 rationale=str(signal.get("summary") or f"{contradiction_class} persists across recent filings."),
@@ -4067,6 +4151,42 @@ def _build_conflict_review_items(
             ),
         )
     ]
+
+
+# A >10x move between comparable filings almost always means mixed units or a
+# mis-parsed figure; such deltas are kept (flagged ``implausible``) but not scored.
+_IMPLAUSIBLE_PERCENT_CHANGE = 1000.0
+
+
+def _is_scorable_metric_change(delta: DeltaRecord, baseline: BaselineChoice | None) -> bool:
+    return (
+        delta.delta_kind == "metric_change"
+        and delta.absolute_change is not None
+        and baseline is not None
+        and baseline.comparable
+        and (delta.percent_change is None or abs(delta.percent_change) <= _IMPLAUSIBLE_PERCENT_CHANGE)
+    )
+
+
+# +1: higher is healthier, -1: higher is riskier. Metrics whose direction
+# depends on context (receivables, inventory, total assets) stay neutral.
+_METRIC_POLARITY: dict[str, int] = {
+    "revenue": 1,
+    "gross_profit": 1,
+    "operating_profit": 1,
+    "net_profit": 1,
+    "net_income": 1,
+    "ebitda": 1,
+    "cash": 1,
+    "equity": 1,
+    "operating_cash_flow": 1,
+    "interest_coverage": 1,
+    "total_liabilities": -1,
+    "long_term_debt": -1,
+    "short_term_debt": -1,
+    "net_debt": -1,
+    "interest_expense": -1,
+}
 
 
 def _build_health_state(
@@ -4145,11 +4265,15 @@ def _build_health_state(
     positive_factors: list[str] = []
     negative_factors: list[str] = []
     for delta in deltas:
-        if delta.delta_kind == "metric_change" and delta.absolute_change is not None:
-            if delta.absolute_change > 0:
-                positive_factors.append(f"{delta.metric_name} increased")
-            elif delta.absolute_change < 0:
-                negative_factors.append(f"{delta.metric_name} decreased")
+        if delta.delta_kind == "metric_change":
+            polarity = _METRIC_POLARITY.get(delta.metric_name, 0)
+            if not _is_scorable_metric_change(delta, baseline) or polarity == 0 or delta.absolute_change == 0:
+                continue
+            factor = f"{delta.metric_name} {'increased' if delta.absolute_change > 0 else 'decreased'}"
+            if (delta.absolute_change > 0) == (polarity > 0):
+                positive_factors.append(factor)
+            else:
+                negative_factors.append(factor)
         elif delta.delta_kind in {"rule_addition", "event_addition"} and delta.metric_name:
             negative_factors.append(f"{delta.metric_name} appeared")
         elif delta.delta_kind in {"rule_resolution", "event_resolution"} and delta.metric_name:
@@ -4267,7 +4391,9 @@ def _build_decision_panel(
         review_items=review_items,
         events=events,
         triggered_rules=triggered_rules,
-        peer_anomaly_count=len(peer_view.get("anomalies") or []),
+        peer_weakness_count=sum(
+            1 for anomaly in peer_view.get("anomalies") or [] if anomaly.get("anomaly") == "negative_outlier"
+        ),
         decision_constraints=decision_constraints,
         persistent_risk_signals=persistent_risk_signals,
         persistent_contradiction_signals=persistent_contradiction_signals,
@@ -4366,7 +4492,7 @@ def _build_recommendation_summary(
     review_items: list[ReviewQueueItem],
     events: list[EventSignal],
     triggered_rules: list[TriggeredRule],
-    peer_anomaly_count: int,
+    peer_weakness_count: int,
     decision_constraints: list[str],
     persistent_risk_signals: list[dict[str, Any]],
     persistent_contradiction_signals: list[dict[str, Any]],
@@ -4478,7 +4604,7 @@ def _build_recommendation_summary(
         - (negative_factor_count * 6)
         - (quality_flag_count * 8)
         - (warning_signal_count * 4)
-        - (peer_anomaly_count * 5)
+        - (peer_weakness_count * 5)
         - (open_review_count * 20)
         - (critical_signal_count * 40)
         - (persistent_active_count * 25)
@@ -4496,7 +4622,7 @@ def _build_recommendation_summary(
         + (open_review_count * 8)
         + (negative_factor_count * 8)
         + (quality_flag_count * 6)
-        + (peer_anomaly_count * 4)
+        + (peer_weakness_count * 4)
         + (evidence_ref_count * 2)
         + (persistent_active_count * 14)
         + (persistent_reappeared_count * 10)
@@ -4552,7 +4678,7 @@ def _build_recommendation_summary(
             "positive_factor_count": positive_factor_count,
             "negative_factor_count": negative_factor_count,
             "quality_flag_count": quality_flag_count,
-            "peer_anomaly_count": peer_anomaly_count,
+            "peer_weakness_count": peer_weakness_count,
             "persistent_active_count": persistent_active_count,
             "persistent_reappeared_count": persistent_reappeared_count,
             "persistent_stale_count": persistent_stale_count,
@@ -4589,7 +4715,7 @@ def _data_completeness_pct(
         baseline is not None,
         latest_analysis is not None and bool(latest_analysis.summary),
         bool(peer_view.get("peer_key")),
-        credibility_summary.total_claims > 0 or credibility_summary.unresolved >= 0,
+        credibility_summary.total_claims > 0,
     ]
     base_score = sum(1 for item in checks if item) / len(checks) * 60.0
     metric_score = 0.0
@@ -4803,13 +4929,25 @@ def _build_filing_expectations(
     profile: CompanyProfile,
     filing_documents: list[FilingDocument],
     now: date,
+    last_checked: date | None = None,
 ) -> list[FilingExpectationRecord]:
+    # A filing can only be judged late inside the window we actually looked at:
+    # after the first filing collected for the issuer, and before the last
+    # financial-report discovery sync.
+    observed_since = min(
+        (parsed.date() for parsed in (_parse_iso_datetime(document.as_of) for document in filing_documents) if parsed),
+        default=None,
+    )
     expectations: list[FilingExpectationRecord] = []
     for year in range(now.year - 2, now.year + 2):
         for template in _filing_deadline_templates(profile.fiscal_year_end_month, around_year=year):
             satisfied = _match_filing_expectation(template, filing_documents)
+            deadline = template["deadline_at"]
+            passed_since_last_check = last_checked is not None and last_checked < deadline < now
             if satisfied is not None:
                 state = "satisfied"
+            elif observed_since is None or deadline < observed_since or passed_since_last_check:
+                state = "unobserved"
             elif now < template["window_start"]:
                 state = "upcoming"
             elif now <= template["deadline_at"]:
@@ -4851,10 +4989,10 @@ def _build_filing_expectations(
 
 
 def _filing_deadline_templates(fiscal_year_end_month: int, *, around_year: int) -> list[dict[str, Any]]:
-    fiscal_year_end = _month_end(around_year, fiscal_year_end_month)
-    q1_end = _shift_months(fiscal_year_end, -9)
-    h1_end = _shift_months(fiscal_year_end, -6)
-    q3_end = _shift_months(fiscal_year_end, -3)
+    fiscal_year_end = fiscal_period_end(around_year, "Annual", fiscal_year_end_month)
+    q1_end = fiscal_period_end(around_year, "Q1", fiscal_year_end_month)
+    h1_end = fiscal_period_end(around_year, "H1", fiscal_year_end_month)
+    q3_end = fiscal_period_end(around_year, "Q3", fiscal_year_end_month)
     templates = [
         ("quarterly_fs", "Q1 filing", q1_end, q1_end + timedelta(days=30)),
         ("interim_fs", "H1 filing", h1_end, h1_end + timedelta(days=60)),
@@ -4894,88 +5032,6 @@ def _match_filing_expectation(
                 continue
         if expected_period_end in document.period_end_dates:
             return {"document_id": document.document_id, "as_of": document.as_of}
-    return None
-
-
-def _month_end(year: int, month: int) -> date:
-    if month == 12:
-        return date(year, 12, 31)
-    return date(year, month + 1, 1) - timedelta(days=1)
-
-
-def _shift_months(anchor: date, months: int) -> date:
-    month_index = (anchor.year * 12 + (anchor.month - 1)) + months
-    year = month_index // 12
-    month = (month_index % 12) + 1
-    return _month_end(year, month)
-
-
-def _filing_deadlines(fiscal_year_end_month: int, *, around_year: int) -> list[tuple[date, str, str, int, str]]:
-    return [
-        (
-            row["deadline_at"],
-            f"{row['period_label']} due",
-            row["period_end_date"],
-            index,
-            row["obligation_type"],
-        )
-        for index, row in enumerate(_filing_deadline_templates(fiscal_year_end_month, around_year=around_year), start=1)
-    ]
-
-
-def _next_expected_filing_window(
-    *,
-    fiscal_year_end_month: int,
-    now: date,
-    latest_period_end: date | None,
-    latest_document_type: str | None,
-) -> dict[str, str] | None:
-    candidates: list[tuple[date, str, str, int, str]] = []
-    for year in range(now.year - 1, now.year + 3):
-        candidates.extend(_filing_deadlines(fiscal_year_end_month, around_year=year))
-
-    def _candidate_priority(item: tuple[date, str, str, int, str]) -> tuple[date, int, int, str]:
-        due_date, _label, period_end_iso, order, report_type = item
-        period_end = _parse_iso_date(period_end_iso)
-        special_rank = 0
-        if (
-            latest_document_type == "financial_statement"
-            and latest_period_end is not None
-            and period_end == latest_period_end
-            and report_type == "annual_report"
-        ):
-            special_rank = -1
-        return (due_date, special_rank, order, report_type)
-
-    candidates.sort(key=_candidate_priority)
-    for due_date, label, period_end_iso, _order, report_type in candidates:
-        period_end = _parse_iso_date(period_end_iso)
-        if due_date <= now:
-            continue
-        if latest_period_end is not None and period_end is not None and period_end < latest_period_end:
-            continue
-        if (
-            latest_document_type == "financial_statement"
-            and report_type == "annual_fs"
-            and latest_period_end is not None
-            and period_end == latest_period_end
-        ):
-            continue
-        if (
-            latest_document_type == "annual_report"
-            and report_type == "annual_report"
-            and latest_period_end is not None
-            and period_end == latest_period_end
-        ):
-            continue
-        window_days = _EXPECTATION_WINDOW_DAYS[report_type]
-        return {
-            "label": label,
-            "window_start": (due_date - timedelta(days=window_days)).isoformat(),
-            "window_end": due_date.isoformat(),
-            "reason": f"Estimated from fiscal year end month {fiscal_year_end_month:02d} using the v3.3 filing expectation model.",
-            "report_type": report_type,
-        }
     return None
 
 
@@ -5268,9 +5324,11 @@ def _match_condition(
         threshold = float(payload.get("value", 0))
         metric_deltas = [
             delta for delta in deltas
-            if delta.delta_kind == "metric_change" and delta.metric_name == metric_name and delta.percent_change is not None
+            if delta.metric_name == metric_name
+            and delta.percent_change is not None
+            and _is_scorable_metric_change(delta, baseline)
         ]
-        if not metric_deltas or baseline is None:
+        if not metric_deltas:
             return None
         value = metric_deltas[0].percent_change or 0.0
         return _compare_numeric(value, operator, threshold)
@@ -5320,13 +5378,15 @@ def _build_thesis_review_items(
     for evaluation in evaluations:
         if evaluation.status not in {"broken", "weakening"}:
             continue
+        item_type = "thesis_broken" if evaluation.status == "broken" else "thesis_warning"
+        source_key = f"{ticker}:{evaluation.thesis_id}"
         items.append(
             ReviewQueueItem(
-                review_item_id=_stable_id("review", "thesis", evaluation.thesis_id, document_id, DERIVED_VERSION),
-                item_type="thesis_broken" if evaluation.status == "broken" else "thesis_warning",
+                review_item_id=_stable_id("review", item_type, source_key, DERIVED_VERSION),
+                item_type=item_type,
                 ticker=ticker,
                 document_id=document_id,
-                source_key=evaluation.thesis_id,
+                source_key=source_key,
                 priority="high" if evaluation.status == "broken" else "medium",
                 rationale=evaluation.rationale,
                 payload_json=evaluation.payload_json,
@@ -5339,18 +5399,24 @@ def _build_claim_review_items(
     *,
     ticker: str,
     document_id: str,
+    claims: list[ClaimRecord],
     claim_outcomes: list[ClaimOutcomeRecord],
 ) -> list[ReviewQueueItem]:
+    claim_sources = {claim.claim_id: claim.source_document_id for claim in claims}
     items: list[ReviewQueueItem] = []
     for outcome in claim_outcomes:
         if outcome.outcome_status not in {"Contradicted", "Open", "Not Yet Testable"}:
             continue
+        contradicted = outcome.outcome_status == "Contradicted"
+        item_type = "claim_contradicted" if contradicted else "claim_unresolved"
         items.append(
             ReviewQueueItem(
-                review_item_id=_stable_id("review", "claim", outcome.claim_id, document_id, DERIVED_VERSION),
-                item_type="claim_contradicted" if outcome.outcome_status == "Contradicted" else "claim_unresolved",
+                review_item_id=_stable_id("review", item_type, outcome.claim_id, DERIVED_VERSION),
+                item_type=item_type,
                 ticker=ticker,
-                document_id=document_id,
+                # A contradiction is judged against the latest evidence; an
+                # unresolved claim only changes when the claim itself does.
+                document_id=document_id if contradicted else claim_sources.get(outcome.claim_id, document_id),
                 source_key=outcome.claim_id,
                 priority="high" if outcome.outcome_status == "Contradicted" else "medium",
                 rationale=outcome.rationale,
@@ -5521,13 +5587,31 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     return out
 
 
+def _dedupe_keep_order_by(items: list[Any], *, key: Callable[[Any], Any]) -> list[Any]:
+    out: list[Any] = []
+    seen: set[Any] = set()
+    for item in items:
+        marker = key(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(item)
+    return out
+
+
+# IDX stores financial-report timestamps without an offset (Jakarta local time)
+# while disclosures carry +07:00; naive values are read as WIB so the two compare.
+_IDX_LOCAL_TZ = timezone(timedelta(hours=7))
+
+
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=_IDX_LOCAL_TZ)
 
 
 def _parse_iso_date(value: str | None) -> date | None:
@@ -5582,19 +5666,15 @@ def _build_comparable_company_state(
     )
     revenue = metric_by_name.get("revenue")
     operating_profit = metric_by_name.get("operating_profit")
-    net_income = metric_by_name.get("net_income")
+    net_income = metric_by_name["net_profit"] if "net_profit" in metric_by_name else metric_by_name.get("net_income")
     operating_cash_flow = metric_by_name.get("operating_cash_flow")
     total_liabilities = metric_by_name.get("total_liabilities")
     total_assets = metric_by_name.get("total_assets")
-    total_equity = metric_by_name.get("total_equity")
-    total_debt = metric_by_name.get("total_debt")
+    # Liabilities / assets only: peers are ranked against each other, so the
+    # ratio must not switch definition with whichever inputs were extracted.
     leverage_ratio_pct = None
     if total_liabilities is not None and total_assets not in {None, 0}:
         leverage_ratio_pct = (total_liabilities / total_assets) * 100.0
-    elif total_debt is not None and total_equity not in {None, 0}:
-        leverage_ratio_pct = (total_debt / total_equity) * 100.0
-    elif total_liabilities is not None and revenue not in {None, 0}:
-        leverage_ratio_pct = (total_liabilities / revenue) * 100.0
     return ComparableCompanyState(
         ticker=profile.ticker,
         issuer_name=profile.issuer_name,
@@ -5792,28 +5872,112 @@ def _load_sector_profiles(
     return profiles
 
 
-def _load_review_status_map(conn: sqlite3.Connection, *, ticker: str) -> dict[str, str]:
+@dataclass(frozen=True)
+class StoredReviewState:
+    review_item_id: str
+    status: str
+    document_id: str | None
+    snoozed_until: str | None
+
+
+def _load_review_states(conn: sqlite3.Connection, *, ticker: str) -> dict[tuple[str, str], StoredReviewState]:
     rows = conn.execute(
         """
-        SELECT source_key, status
+        SELECT review_item_id, item_type, source_key, status, document_id, snoozed_until
         FROM review_queue_items
         WHERE ticker = ?
+          AND derived_version = ?
         """,
-        (ticker,),
+        (ticker, DERIVED_VERSION),
     ).fetchall()
-    return {str(row["source_key"]): str(row["status"]) for row in rows}
+    return {
+        (str(row["item_type"]), str(row["source_key"])): StoredReviewState(
+            review_item_id=row["review_item_id"],
+            status=row["status"],
+            document_id=row["document_id"],
+            snoozed_until=row["snoozed_until"],
+        )
+        for row in rows
+    }
+
+
+def _effective_review_status(
+    stored: StoredReviewState | None,
+    *,
+    document_id: str,
+    as_of: date,
+) -> tuple[str, str | None]:
+    """Status a regenerated review item should have, and why it changed.
+
+    Resolving or snoozing applies to the filing that was reviewed: a newer
+    filing that still raises the issue reopens it, as do an expired snooze and
+    a superseded signal that comes back.
+    """
+    if stored is None or stored.status == "open":
+        return "open", None
+    if stored.status == "superseded":
+        return "open", "signal raised again"
+    if stored.document_id != document_id:
+        return "open", "raised again by a newer filing"
+    if stored.status == "snoozed" and stored.snoozed_until is not None and stored.snoozed_until <= as_of.isoformat():
+        return "open", "snooze expired"
+    return stored.status, None
 
 
 def _filter_active_review_items(
     items: list[ReviewQueueItem],
     *,
-    review_statuses: dict[str, str],
+    review_states: dict[tuple[str, str], StoredReviewState],
+    as_of: date,
 ) -> list[ReviewQueueItem]:
     return [
         item
         for item in items
-        if review_statuses.get(item.source_key, "open") == "open"
+        if _effective_review_status(
+            review_states.get((item.item_type, item.source_key)),
+            document_id=item.document_id,
+            as_of=as_of,
+        )[0]
+        == "open"
     ]
+
+
+def record_review_transition(
+    conn: sqlite3.Connection,
+    *,
+    review_item_id: str,
+    ticker: str | None,
+    action: str,
+    from_status: str | None,
+    to_status: str,
+    note: str | None,
+    payload_json: str | None,
+    snoozed_until: str | None = None,
+) -> None:
+    """Move a review item to ``to_status`` and append the audit record."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE review_queue_items SET status = ?, snoozed_until = ?, updated_at = ? WHERE review_item_id = ?",
+        (to_status, snoozed_until, now, review_item_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO review_audit_log (
+            audit_id, review_item_id, ticker, action, from_status, to_status, note, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _stable_id("review-audit", review_item_id, now, action, to_status),
+            review_item_id,
+            ticker,
+            action,
+            from_status,
+            to_status,
+            note,
+            payload_json,
+            now,
+        ),
+    )
 
 
 def _metric_map(metrics: list[MetricPoint]) -> dict[str, float | None]:
@@ -5824,7 +5988,7 @@ def _metric_map(metrics: list[MetricPoint]) -> dict[str, float | None]:
 
 
 def _anchor_metric(metrics: list[MetricPoint]) -> MetricPoint | None:
-    for preferred in ("revenue", "operating_profit", "net_income"):
+    for preferred in ("revenue", "operating_profit", "net_profit", "net_income"):
         for metric in metrics:
             if metric.metric_name == preferred:
                 return metric
@@ -5916,24 +6080,19 @@ def _rank_metric_against_group(
     peer_values = [value for ticker, value in values if ticker != subject.ticker]
     peer_median = float(median(peer_values)) if peer_values else subject_value
     directional_gap = (subject_value - peer_median) if higher_is_better else (peer_median - subject_value)
-    if peer_median == 0:
-        if directional_gap > 0:
-            relative_gap_pct = 100.0
-        elif directional_gap < 0:
-            relative_gap_pct = -100.0
-        else:
-            relative_gap_pct = 0.0
-    else:
-        relative_gap_pct = (directional_gap / abs(peer_median)) * 100.0
+    # A zero median (common for event counts) gives the gap no relative size:
+    # the extreme rank is still flagged, but never as critical.
+    relative_gap_pct = (directional_gap / abs(peer_median)) * 100.0 if peer_median != 0 else None
+    gap_is_material = directional_gap != 0 if relative_gap_pct is None else abs(relative_gap_pct) >= 25
     anomaly = None
     severity = None
-    if len(values) >= 4:
-        if rank == 1 and relative_gap_pct >= 25:
+    if len(values) >= 4 and gap_is_material:
+        if rank == 1 and directional_gap > 0:
             anomaly = "positive_outlier"
-        elif rank == len(values) and relative_gap_pct <= -25:
+        elif rank == len(values) and directional_gap < 0:
             anomaly = "negative_outlier"
         if anomaly is not None:
-            severity = "critical" if abs(relative_gap_pct) >= 50 else "warning"
+            severity = "critical" if relative_gap_pct is not None and abs(relative_gap_pct) >= 50 else "warning"
     return {
         "label": COMPARISON_FIELD_LABELS[field_name],
         "direction": "higher_better" if higher_is_better else "lower_better",
@@ -6009,11 +6168,15 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         (bundle.profile.ticker, DERIVED_VERSION),
     )
     conn.execute(
-        "DELETE FROM contradiction_rows WHERE ticker = ? AND derived_version = ?",
-        (bundle.profile.ticker, DERIVED_VERSION),
+        "DELETE FROM contradiction_rows WHERE ticker = ? AND document_id = ? AND derived_version = ?",
+        (bundle.profile.ticker, bundle.latest_document.document_id, DERIVED_VERSION),
     )
     conn.execute(
         "DELETE FROM segment_history WHERE ticker = ? AND derived_version = ?",
+        (bundle.profile.ticker, DERIVED_VERSION),
+    )
+    conn.execute(
+        "DELETE FROM filing_expectations WHERE ticker = ? AND derived_version = ?",
         (bundle.profile.ticker, DERIVED_VERSION),
     )
     for delta in bundle.deltas:
@@ -6109,6 +6272,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 summary, evidence_span_id, requires_human_review, tier, source_label, payload_json,
                 derived_version, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING  -- templated summaries can repeat verbatim
             """,
             (
                 finding.nuance_id,
@@ -6139,6 +6303,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 section_label, evidence_span_id, requires_human_review, tier, source_label, payload_json,
                 derived_version, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING  -- templated summaries can repeat verbatim
             """,
             (
                 row.uncertainty_id,
@@ -6401,6 +6566,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 source_claim_id, section_label, evidence_span_id, tier, source_label, payload_json,
                 derived_version, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING  -- templated summaries can repeat verbatim
             """,
             (
                 row.contradiction_id,
@@ -6448,6 +6614,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
         ),
     )
 
+    review_states = _load_review_states(conn, ticker=bundle.profile.ticker)
     for item in bundle.review_items:
         conn.execute(
             """
@@ -6457,7 +6624,7 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(item_type, source_key, derived_version)
             DO UPDATE SET
-                review_item_id = excluded.review_item_id,
+                -- review_item_id is kept: review_audit_log references it.
                 ticker = excluded.ticker,
                 document_id = excluded.document_id,
                 priority = excluded.priority,
@@ -6480,6 +6647,34 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
                 now,
             ),
         )
+        stored = review_states.get((item.item_type, item.source_key))
+        _, reopen_reason = _effective_review_status(stored, document_id=item.document_id, as_of=bundle.as_of)
+        if stored is not None and reopen_reason is not None:
+            record_review_transition(
+                conn,
+                review_item_id=stored.review_item_id,
+                ticker=item.ticker,
+                action="auto_reopen",
+                from_status=stored.status,
+                to_status="open",
+                note=reopen_reason,
+                payload_json=item.payload_json,
+            )
+    # Revision items record a one-time event; every other kind is a condition
+    # that stops being relevant once the latest filings no longer raise it.
+    raised = {(item.item_type, item.source_key) for item in bundle.review_items}
+    for (item_type, source_key), stored in review_states.items():
+        if stored.status == "open" and item_type != "revision_change" and (item_type, source_key) not in raised:
+            record_review_transition(
+                conn,
+                review_item_id=stored.review_item_id,
+                ticker=bundle.profile.ticker,
+                action="auto_supersede",
+                from_status="open",
+                to_status="superseded",
+                note="no longer raised by the latest filings",
+                payload_json=None,
+            )
 
     conn.execute(
         """
@@ -6547,12 +6742,14 @@ def _persist_bundle(conn: sqlite3.Connection, bundle: CompanyIntelligenceBundle)
     }
 
 
-def _metric_key(metric: MetricPoint) -> tuple[str, int | None, str | None, str | None]:
+def _metric_key(metric: MetricPoint) -> tuple[str, int | None, str | None, str | None, str | None]:
+    # The scope tells segment rows ("segment:<name>") apart from each other.
     return (
         metric.metric_name,
         metric.fiscal_year,
         metric.fiscal_period,
         metric.period_end_date,
+        metric.consolidation_scope,
     )
 
 

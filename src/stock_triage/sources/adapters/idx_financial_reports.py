@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import hashlib
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timezone
+from itertools import product
 from math import ceil
 from urllib.parse import urlencode
 
@@ -21,13 +23,21 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
     artifact_source_id = "idx_financial_statements_annual_report"
     default_page_size = 100
     report_types = ("rdf", "rda")
+    # Financial statements (rdf) are also filed per quarter; annual reports (rda) are not.
+    report_periods = {"rdf": ("audit", "tw1", "tw2", "tw3"), "rda": ("audit",)}
     public_url = (
         "https://www.idx.co.id/en/listed-companies/financial-statements-and-annual-report"
     )
 
+    def resume_window(self, watermark: DiscoveryWindow) -> DiscoveryWindow:
+        # Persisted start/end are upload dates, not report years (an FY2025
+        # annual report is uploaded in 2026). Resume as a rolling window and
+        # keep only the per-year cursors.
+        return DiscoveryWindow(cursor=watermark.cursor)
+
     def discover(self, window: DiscoveryWindow):
         cfg = load_config()
-        year = self._resolve_year(window)
+        years = self._resolve_years(window)
         session = PlaywrightSession(
             profile_dir=cfg.browser.profile_dir,
             artifacts_dir=cfg.browser.artifacts_dir,
@@ -41,8 +51,11 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
         seen_record_ids: set[str] = set()
 
         with session.open_page(page_url=self.public_url) as page:
-            for report_type in self.report_types:
-                resume_cursor = resume_cursors.get(report_type)
+            for year, report_type, period in self.report_streams(years):
+                resume_cursor = resume_cursors.get(self._cursor_key(year, report_type, period))
+                if resume_cursor is None and len(years) == 1 and period == "audit":
+                    # Cursors written before they were keyed by report year.
+                    resume_cursor = resume_cursors.get(report_type)
                 page_no = 1
                 total_pages: int | None = None
 
@@ -55,6 +68,7 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
                             page_size=self.default_page_size,
                             index_from=page_no,
                             report_type=report_type,
+                            period=period,
                         ),
                     )
                     if total_pages is None:
@@ -71,7 +85,9 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
                         if candidate.source_record_id in seen_record_ids:
                             continue
                         seen_record_ids.add(candidate.source_record_id)
-                        candidates.append(candidate)
+                        candidates.append(
+                            replace(candidate, raw_metadata={**candidate.raw_metadata, "requested_period": period})
+                        )
 
                     if stop_report:
                         break
@@ -89,13 +105,16 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
             return requested_window
 
         merged_cursors = self._resume_cursors(requested_window)
-        updated_types: set[str] = set()
+        updated_keys: set[str] = set()
         newest_date = requested_window.end
         for candidate in candidates:
             report_type = candidate.raw_metadata.get("report_type")
-            if report_type and report_type not in updated_types:
-                merged_cursors[report_type] = candidate.source_record_id
-                updated_types.add(report_type)
+            report_year = candidate.raw_metadata.get("report_year")
+            period = candidate.raw_metadata.get("requested_period", "audit")
+            cursor_key = self._cursor_key(report_year, report_type, period) if report_year else report_type
+            if report_type and cursor_key not in updated_keys:
+                merged_cursors[cursor_key] = candidate.source_record_id
+                updated_keys.add(cursor_key)
             if candidate.upstream_published_at is not None:
                 candidate_date = candidate.upstream_published_at.date()
                 if newest_date is None or candidate_date > newest_date:
@@ -123,6 +142,36 @@ class IDXFinancialReportAdapter(_IDXStubAdapter):
             for report_type, record_id in raw.items()
             if record_id
         }
+
+    def report_streams(self, years: list[int]) -> list[tuple[int, str, str]]:
+        """Every (report year, report type, period) query a scan of ``years`` makes."""
+        return [
+            (year, report_type, period)
+            for year, report_type in product(years, self.report_types)
+            for period in self.report_periods[report_type]
+        ]
+
+    @staticmethod
+    def _cursor_key(year: int | str, report_type: str, period: str) -> str:
+        # Annual cursors keep the key used before interim periods were scanned.
+        return f"{year}:{report_type}" if period == "audit" else f"{year}:{report_type}:{period}"
+
+    @staticmethod
+    def _resolve_years(window: DiscoveryWindow, *, today: date | None = None) -> list[int]:
+        """Report years to query, newest first.
+
+        An explicit window covers every report year it spans. A rolling window
+        covers the current and previous report year, because annual statements
+        for year Y-1 are filed during year Y alongside Y's interim reports.
+        """
+        if window.start is not None and window.end is not None:
+            return list(range(window.end.year, window.start.year - 1, -1))
+        if window.end is not None:
+            return [window.end.year]
+        if window.start is not None:
+            return [window.start.year]
+        current = (today or datetime.now(timezone.utc).date()).year
+        return [current, current - 1]
 
     @staticmethod
     def _resolve_year(window: DiscoveryWindow) -> int:

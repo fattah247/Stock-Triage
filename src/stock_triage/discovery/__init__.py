@@ -4,6 +4,7 @@ from .persist import (
     persist_companies,
     persist_document_candidates,
     persist_watermark,
+    record_historical_discovery,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "persist_companies",
     "persist_document_candidates",
     "persist_watermark",
+    "record_historical_discovery",
 ]

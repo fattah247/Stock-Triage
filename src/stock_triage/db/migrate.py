@@ -1,8 +1,9 @@
 """Migration runner. Applies numbered .sql files from src/stock_triage/migrations.
 
-Migrations run inside an explicit transaction for atomicity. We avoid
-sqlite3.Connection.executescript() because it issues an implicit COMMIT
-before running, which would defeat our BEGIN/ROLLBACK handling.
+Each migration runs inside a savepoint for atomicity, so it nests inside the
+WriterQueue's per-job transaction and still works on a bare autocommit
+connection. We avoid sqlite3.Connection.executescript() because it issues an
+implicit COMMIT before running, which would defeat the rollback handling.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
             continue
         sql = path.read_text(encoding="utf-8")
         statements = _split_statements(sql)
-        conn.execute("BEGIN")
+        conn.execute("SAVEPOINT apply_migration")
         try:
             for stmt in statements:
                 try:
@@ -77,10 +78,11 @@ def run_migrations(conn: sqlite3.Connection) -> list[int]:
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(timezone.utc).isoformat()),
             )
-            conn.execute("COMMIT")
+            conn.execute("RELEASE apply_migration")
         except Exception:
             try:
-                conn.execute("ROLLBACK")
+                conn.execute("ROLLBACK TO apply_migration")
+                conn.execute("RELEASE apply_migration")
             except sqlite3.OperationalError:
                 pass
             raise

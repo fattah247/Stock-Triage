@@ -28,13 +28,18 @@ _SHUTDOWN = object()
 
 
 class WriterQueue:
-    """A single background writer thread that owns the write connection."""
+    """A single background writer thread that owns the write connection.
+
+    Each submitted job runs in its own transaction, so a multi-statement job
+    either lands completely or not at all.
+    """
 
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._started = threading.Event()
+        self._startup_error: BaseException | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -42,6 +47,10 @@ class WriterQueue:
         self._thread = threading.Thread(target=self._run, name="sqlite-writer", daemon=True)
         self._thread.start()
         self._started.wait()
+        if self._startup_error is not None:
+            self._thread.join()
+            self._thread = None
+            raise self._startup_error
 
     def stop(self) -> None:
         if self._thread is None:
@@ -61,8 +70,13 @@ class WriterQueue:
         return payload
 
     def _run(self) -> None:
-        conn = connect(self._cfg.paths.db_path)
-        configure_pragmas(conn, self._cfg)
+        try:
+            conn = connect(self._cfg.paths.db_path)
+            configure_pragmas(conn, self._cfg)
+        except BaseException as exc:  # noqa: BLE001 - re-raised by start()
+            self._startup_error = exc
+            self._started.set()
+            return
         self._started.set()
         try:
             while True:
@@ -71,9 +85,16 @@ class WriterQueue:
                     return
                 job: _Job = item
                 try:
+                    conn.execute("BEGIN IMMEDIATE")
                     payload = job.fn(conn)
+                    conn.execute("COMMIT")
                     job.result.put((True, payload))
                 except Exception as exc:  # noqa: BLE001 - propagated to caller
+                    try:
+                        if conn.in_transaction:
+                            conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                     job.result.put((False, exc))
         finally:
             conn.close()

@@ -52,7 +52,7 @@ llm:
   timeout_s: 600
 
 dashboard:
-  output_dir: "data/dashboard"
+  # output_dir defaults to <paths.data_dir>/dashboard
   title: "Stock Triage Dashboard"
   host: "127.0.0.1"
   port: 8765
@@ -62,14 +62,14 @@ alerts:
   min_severity: "warning"
   lookback_days: 7
   channels: ["jsonl"]
-  jsonl_path: "data/alerts/alerts.jsonl"
+  # jsonl_path defaults to <paths.data_dir>/alerts/alerts.jsonl
 
 canary:
   sources: []
   tickers: []
 
-theses:
-  definition_path: "data/theses.yaml"
+# Both definition files default to <paths.data_dir>/theses.yaml and
+# <paths.data_dir>/company_overrides.yaml; set definition_path to move them.
+theses: {}
 
-company_overrides:
-  definition_path: "data/company_overrides.yaml"
+company_overrides: {}

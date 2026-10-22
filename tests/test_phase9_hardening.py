@@ -29,7 +29,7 @@ def test_run_backfill_orchestrates_bounded_pipeline(tmp_config, monkeypatch):
         "stock_triage.hardening.pipeline.persist_document_candidates",
         lambda conn, c: SimpleNamespace(inserted=len(c), updated=0),
     )
-    monkeypatch.setattr("stock_triage.hardening.pipeline.persist_watermark", lambda conn, **kwargs: None)
+    monkeypatch.setattr("stock_triage.hardening.pipeline.record_historical_discovery", lambda conn, **kwargs: None)
     monkeypatch.setattr(
         "stock_triage.hardening.pipeline.run_downloads",
         lambda cfg, source_name, limit: SimpleNamespace(inserted=2),

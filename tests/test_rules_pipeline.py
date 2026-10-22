@@ -36,7 +36,7 @@ def test_run_rules_persists_financial_flags(tmp_config):
             (document_id,),
         ).fetchone()
         assert doc["process_state"] == "analyzed"
-        assert doc["ruleset_version"] == "phase6-v1"
+        assert doc["ruleset_version"] == "phase6-v2"
 
         rules = rconn.execute(
             """
@@ -362,3 +362,26 @@ def _insert_extracted_document(
 
         wq.submit(_insert)
     return document_id
+
+
+def test_debt_surge_triggers_for_negative_equity() -> None:
+    from stock_triage.rules.pipeline import MetricValue, _ratio_rule
+
+    def metric(name: str, value: float) -> MetricValue:
+        fields = {field: None for field in MetricValue.__dataclass_fields__}
+        fields.update(metric_name=name, value_normalized=value)
+        return MetricValue(**fields)
+
+    outcome = _ratio_rule(
+        "debt_surge",
+        severity="warning",
+        threshold="total_liabilities / equity > 0.75",
+        numerator=metric("total_liabilities", 350_000_000_000.0),
+        denominator=metric("equity", -113_700_000_000.0),
+        rationale_hit="hit",
+        rationale_miss="miss",
+    )
+
+    assert outcome.triggered
+    assert outcome.input_values["ratio"] is None
+    assert "equity is not positive" in outcome.rationale

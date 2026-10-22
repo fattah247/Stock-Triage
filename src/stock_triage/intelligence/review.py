@@ -12,7 +12,7 @@ from ..config import Config
 from ..coverage import COVERAGE_VERSION, default_coverage_range
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
 from ..fiscal_year import load_fiscal_year_overrides
-from .pipeline import DERIVED_VERSION
+from .pipeline import DERIVED_VERSION, record_review_transition
 
 
 @dataclass(frozen=True)
@@ -90,9 +90,11 @@ def load_review_queue(
             """
             SELECT status, COUNT(*) AS count
             FROM review_queue_items
+            WHERE derived_version = ?
             GROUP BY status
             ORDER BY status ASC
-            """
+            """,
+            (DERIVED_VERSION,),
         ).fetchall()
         return ReviewQueueReport(
             rows=rows,
@@ -102,20 +104,60 @@ def load_review_queue(
         conn.close()
 
 
+DEFAULT_SNOOZE_DAYS = 14
+
+
 def update_review_status(
     cfg: Config,
     *,
     review_item_id: str,
     status: str,
     note: str | None = None,
+    snooze_days: int | None = None,
 ) -> ReviewUpdateResult:
+    return update_review_statuses(
+        cfg,
+        review_item_ids=[review_item_id],
+        status=status,
+        note=note,
+        snooze_days=snooze_days,
+    )[0]
+
+
+def update_review_statuses(
+    cfg: Config,
+    *,
+    review_item_ids: list[str],
+    status: str,
+    note: str | None = None,
+    snooze_days: int | None = None,
+) -> list[ReviewUpdateResult]:
+    """Apply one operator decision to a group of items in a single transaction."""
     cfg.ensure_dirs()
     normalized_status = status.strip().lower()
     if normalized_status not in {"open", "resolved", "snoozed"}:
         raise ValueError("status must be one of: open, resolved, snoozed")
+    snoozed_until = None
+    if normalized_status == "snoozed":
+        days = DEFAULT_SNOOZE_DAYS if snooze_days is None else snooze_days
+        if days < 1:
+            raise ValueError("snooze_days must be at least 1")
+        # Local date, the same clock intelligence runs use to expire snoozes.
+        snoozed_until = (date.today() + timedelta(days=days)).isoformat()
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
-        return wq.submit(lambda conn: _update_review_status(conn, review_item_id=review_item_id, status=normalized_status, note=note))
+        return wq.submit(
+            lambda conn: [
+                _update_review_status(
+                    conn,
+                    review_item_id=review_item_id,
+                    status=normalized_status,
+                    note=note,
+                    snoozed_until=snoozed_until,
+                )
+                for review_item_id in review_item_ids
+            ]
+        )
 
 
 def load_intelligence_kpis(cfg: Config) -> dict[str, object]:
@@ -375,8 +417,10 @@ def _load_review_rows(conn, *, status: str, limit: int, ticker: str | None) -> l
 
 
 def _load_review_rows_raw(conn, *, status: str, limit: int, ticker: str | None) -> list[dict[str, object]]:
-    where = []
-    params: list[object] = [DERIVED_VERSION]
+    # Older-version rows are superseded copies; every rederive regenerates the
+    # live items under DERIVED_VERSION.
+    where = ["rqi.derived_version = ?"]
+    params: list[object] = [DERIVED_VERSION, DERIVED_VERSION]
     if status != "all":
         where.append("rqi.status = ?")
         params.append(status)
@@ -706,7 +750,14 @@ def _summarize_persistence_group(*, labels: list[str], states: list[str]) -> str
     return f"{label_text} · {state_text}"
 
 
-def _update_review_status(conn, *, review_item_id: str, status: str, note: str | None) -> ReviewUpdateResult:
+def _update_review_status(
+    conn,
+    *,
+    review_item_id: str,
+    status: str,
+    note: str | None,
+    snoozed_until: str | None,
+) -> ReviewUpdateResult:
     row = conn.execute(
         """
         SELECT review_item_id, ticker, status, payload_json
@@ -719,32 +770,16 @@ def _update_review_status(conn, *, review_item_id: str, status: str, note: str |
     if row is None:
         raise ValueError(f"review item not found: {review_item_id}")
     previous_status = row["status"]
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """
-        UPDATE review_queue_items
-        SET status = ?, updated_at = ?
-        WHERE review_item_id = ?
-        """,
-        (status, now, review_item_id),
-    )
-    conn.execute(
-        """
-        INSERT INTO review_audit_log (
-            audit_id, review_item_id, ticker, action, from_status, to_status, note, payload_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            _stable_id("review-audit", review_item_id, now, status),
-            review_item_id,
-            row["ticker"],
-            "status_update",
-            previous_status,
-            status,
-            note,
-            row["payload_json"],
-            now,
-        ),
+    record_review_transition(
+        conn,
+        review_item_id=review_item_id,
+        ticker=row["ticker"],
+        action="status_update",
+        from_status=previous_status,
+        to_status=status,
+        note=note,
+        payload_json=row["payload_json"],
+        snoozed_until=snoozed_until,
     )
     return ReviewUpdateResult(
         review_item_id=review_item_id,
@@ -809,8 +844,10 @@ def _load_kpis(conn) -> dict[str, object]:
         """
         SELECT status, COUNT(*) AS count
         FROM review_queue_items
+        WHERE derived_version = ?
         GROUP BY status
-        """
+        """,
+        (DERIVED_VERSION,),
     ).fetchall()
 
     snapshot_count = len(snapshot_rows)

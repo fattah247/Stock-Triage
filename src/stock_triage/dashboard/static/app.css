@@ -72,6 +72,8 @@ input {
 }
 
 .viewNav {
+  width: 100%;
+  min-width: 0;
   max-width: 1520px;
   margin: 0 auto;
   padding: 0 20px;
@@ -82,6 +84,14 @@ input {
   top: 0;
   z-index: 5;
   backdrop-filter: blur(12px);
+}
+
+.viewTabs {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .viewTab {
@@ -1007,8 +1017,15 @@ body[data-active-view="ops"] .workspaceHeader {
   max-height: 140px;
 }
 
-.historyItem.failed {
+.historyItem.failed,
+.historyItem.status-failed,
+.historyItem.status-blocked {
   border-left: 3px solid rgba(160, 53, 45, 0.7);
+  padding-left: 10px;
+}
+
+.historyItem.status-partial {
+  border-left: 3px solid rgba(193, 119, 42, 0.75);
   padding-left: 10px;
 }
 
@@ -1082,9 +1099,20 @@ body[data-active-view="ops"] .workspaceHeader {
   word-break: break-word;
 }
 
-.statusPill.failed {
+.statusPill.failed,
+.statusPill.blocked {
   color: var(--critical);
   background: var(--critical-soft);
+}
+
+.statusPill.partial {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.statusPill.cancelled {
+  color: var(--muted);
+  background: rgba(104, 113, 106, 0.12);
 }
 
 .statusPill.ok {
@@ -1166,5 +1194,384 @@ body[data-active-view="ops"] .workspaceHeader {
 
   .issuerStack {
     max-height: none;
+  }
+}
+
+.runPill {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(460px, 100%);
+  padding: 7px 14px 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(221, 210, 191, 0.95);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 8px 18px rgba(26, 35, 31, 0.08);
+  font-size: 13px;
+  text-align: left;
+}
+
+.runPill[hidden] {
+  display: none;
+}
+
+.runPill:hover {
+  transform: none;
+  border-color: rgba(15, 118, 96, 0.35);
+}
+
+.runPillText {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.runPillText span {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.runPillDot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(15, 118, 96, 0.45);
+  animation: runBreath 1.8s ease-out infinite;
+}
+
+.runPillGlyph {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--paper);
+  background: var(--muted);
+}
+
+.runPillDone.sev-ok .runPillGlyph { background: var(--ok); }
+.runPillDone.sev-warning .runPillGlyph { background: var(--warning); }
+.runPillDone.sev-critical .runPillGlyph { background: var(--critical); }
+
+.runPillDone .runPillText strong,
+.runPillExternal .runPillText strong {
+  color: var(--ink);
+}
+
+.runPillExternal {
+  border-style: dashed;
+}
+
+@keyframes runBreath {
+  0% { box-shadow: 0 0 0 0 rgba(15, 118, 96, 0.45); }
+  70% { box-shadow: 0 0 0 9px rgba(15, 118, 96, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(15, 118, 96, 0); }
+}
+
+.dangerGhost {
+  color: #ffd2cb;
+  border-color: rgba(255, 210, 203, 0.35);
+}
+
+.runTimeline {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.runTimelineHeader {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.runTimelineHeader h3 {
+  font-size: 17px;
+}
+
+.runSteps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  counter-reset: route;
+}
+
+.runStep {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 11px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(10, 14, 12, 0.28);
+  --step-tone: rgba(248, 243, 232, 0.55);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.runStepGlyph {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--step-tone);
+  color: var(--step-tone);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.runStepBody {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runStepLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f8f3e8;
+  overflow-wrap: anywhere;
+}
+
+.runStepMeta {
+  font-size: 12px;
+  color: rgba(248, 243, 232, 0.62);
+  overflow-wrap: anywhere;
+}
+
+.runStepTag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(221, 255, 242, 0.25);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(221, 255, 242, 0.75);
+  vertical-align: 1px;
+}
+
+.runStep.step-running {
+  --step-tone: #9be8cf;
+  border-color: rgba(155, 232, 207, 0.45);
+  background: rgba(155, 232, 207, 0.08);
+}
+
+.runStep.step-running .runStepGlyph {
+  border-color: rgba(155, 232, 207, 0.25);
+  border-top-color: #9be8cf;
+  color: transparent;
+  animation: runSpin 0.9s linear infinite;
+}
+
+.runStep.step-ok {
+  --step-tone: #7fe0c0;
+}
+
+.runStep.step-ok .runStepGlyph {
+  background: #7fe0c0;
+  color: #12201b;
+  animation: runPop 0.32s ease-out;
+}
+
+.runStep.step-failed,
+.runStep.step-busy {
+  --step-tone: #ffa596;
+  border-color: rgba(255, 165, 150, 0.35);
+  background: rgba(255, 165, 150, 0.07);
+}
+
+.runStep.step-skipped .runStepGlyph,
+.runStep.step-cancelled .runStepGlyph {
+  border-style: dashed;
+}
+
+.runStep.step-skipped .runStepLabel,
+.runStep.step-cancelled .runStepLabel {
+  color: rgba(248, 243, 232, 0.6);
+}
+
+@keyframes runSpin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes runPop {
+  0% { transform: scale(0.6); }
+  70% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+
+.historySteps {
+  display: flex;
+  gap: 3px;
+}
+
+.historyStep {
+  flex: 1;
+  max-width: 34px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(104, 113, 106, 0.22);
+}
+
+.historyStep.step-ok { background: var(--ok); }
+.historyStep.step-failed,
+.historyStep.step-busy { background: var(--critical); }
+.historyStep.step-skipped,
+.historyStep.step-cancelled {
+  background: repeating-linear-gradient(90deg, rgba(104, 113, 106, 0.4) 0 3px, transparent 3px 6px);
+}
+
+.toastRegion {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 12px 12px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(221, 210, 191, 0.95);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 16px 34px rgba(26, 35, 31, 0.16);
+  font-size: 14px;
+  animation: toastIn 0.22s ease-out;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.toast > span {
+  flex: 1;
+}
+
+.toastLeaving {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.toastAction {
+  flex: none;
+}
+
+.toastClose {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  font-size: 18px;
+  line-height: 1;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Declared after `.viewTab { all: unset }` so the tabs get the ring back. */
+:focus-visible {
+  outline: 3px solid rgba(15, 118, 96, 0.75);
+  outline-offset: 2px;
+}
+
+.panelDark :focus-visible {
+  outline-color: #9be8cf;
+}
+
+@media (max-width: 1220px) {
+  .runSteps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .viewNav {
+    flex-wrap: wrap;
+    padding: 0;
+  }
+
+  .viewTab {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .runPill {
+    margin-left: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .runSteps {
+    grid-template-columns: 1fr;
+  }
+
+  .toastRegion {
+    right: 16px;
+    left: 16px;
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  button:hover {
+    transform: none;
+  }
+
+  .runStep.step-running .runStepGlyph {
+    color: #9be8cf;
   }
 }

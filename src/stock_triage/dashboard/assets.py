@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import shutil
 from pathlib import Path
@@ -35,6 +36,7 @@ def render_dashboard_html(
     snapshot_endpoint: str | None = None,
     artifact_endpoint: str | None = None,
     action_history: list[dict[str, object]] | None = None,
+    run_sequences: dict[str, list[dict[str, object]]] | None = None,
     static_root: str = "static",
 ) -> str:
     template = (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
@@ -63,12 +65,16 @@ def render_dashboard_html(
             "actionEndpoint": action_endpoint,
             "snapshotEndpoint": snapshot_endpoint,
             "artifactEndpoint": artifact_endpoint,
+            "runSequences": run_sequences or {},
         },
         ensure_ascii=True,
     )
+    # The payload carries filing-derived text; escape markup-significant
+    # characters so a "</script>" inside a claim cannot end the JSON block.
+    bootstrap = bootstrap.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return (
         template
-        .replace("__TITLE__", title)
+        .replace("__TITLE__", html.escape(title))
         .replace("__METRICS_HREF__", metrics_href)
         .replace("__FINDINGS_HREF__", findings_href)
         .replace("__ISSUER_COUNT__", str(len(issuers)))

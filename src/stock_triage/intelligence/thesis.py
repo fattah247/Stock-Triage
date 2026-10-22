@@ -50,10 +50,17 @@ def load_local_theses(path: Path) -> list[LocalThesisDefinition]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     theses_raw = raw.get("theses") or []
     definitions: list[LocalThesisDefinition] = []
-    for idx, item in enumerate(theses_raw):
+    generated_ids: dict[str, int] = {}
+    for item in theses_raw:
         thesis_name = item["thesis_name"]
         ticker = item.get("ticker")
-        thesis_id = item.get("thesis_id") or _slugify(f"{ticker or 'global'}-{thesis_name}-{idx}")
+        thesis_id = item.get("thesis_id")
+        if not thesis_id:
+            # Derived from content rather than file position, so reordering the
+            # YAML keeps evaluations and review history attached.
+            base_id = _slugify(f"{ticker or 'global'}-{thesis_name}")
+            generated_ids[base_id] = generated_ids.get(base_id, 0) + 1
+            thesis_id = base_id if generated_ids[base_id] == 1 else f"{base_id}-{generated_ids[base_id]}"
         conditions = [
             LocalThesisCondition(
                 severity=(condition.get("severity") or "warning"),
@@ -79,7 +86,14 @@ def load_local_theses(path: Path) -> list[LocalThesisDefinition]:
 
 
 def sync_local_theses(conn: sqlite3.Connection, *, theses: list[LocalThesisDefinition]) -> None:
+    """Mirror the local thesis file; theses removed from it are retired."""
     now = datetime.now(timezone.utc).isoformat()
+    placeholders = ",".join("?" for _ in theses)
+    conn.execute(
+        f"UPDATE thesis_definitions SET status = 'retired', updated_at = ? "
+        f"WHERE status = 'active' AND thesis_id NOT IN ({placeholders})",
+        (now, *(thesis.thesis_id for thesis in theses)),
+    )
     for thesis in theses:
         conn.execute(
             """

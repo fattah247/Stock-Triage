@@ -9,7 +9,7 @@ from datetime import date
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
-from ..discovery import persist_companies, persist_document_candidates, persist_watermark
+from ..discovery import persist_companies, persist_document_candidates, record_historical_discovery
 from ..download import run_downloads
 from ..extract import run_extract
 from ..parse import run_parse
@@ -99,7 +99,7 @@ def run_backfill(
                 discover_inserted += persist.inserted
                 discover_updated += persist.updated
                 wq.submit(
-                    lambda conn, a=adapter, w=window, cnt=len(persisted_candidates): persist_watermark(
+                    lambda conn, a=adapter, w=window, cnt=len(persisted_candidates): record_historical_discovery(
                         conn,
                         source_name=a.name,
                         source_class=a.source_class,

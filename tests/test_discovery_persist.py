@@ -125,3 +125,37 @@ def test_persist_companies_upgrades_default_fiscal_year_end_when_discovered(tmp_
         assert row["fiscal_year_end_month"] == 6
     finally:
         rconn.close()
+
+
+def test_historical_discovery_keeps_the_incremental_watermark(tmp_config):
+    from datetime import date
+
+    from stock_triage.db import WriterQueue, run_migrations
+    from stock_triage.discovery import load_watermark, persist_watermark, record_historical_discovery
+    from stock_triage.sources import DiscoveryWindow, SourceClass
+    from stock_triage.sources.adapters import IDXDisclosureAdapter
+
+    incremental = DiscoveryWindow(start=None, end=date(2026, 4, 9), cursor="disclosure-123")
+    historical = DiscoveryWindow(start=date(2024, 1, 1), end=date(2026, 12, 31))
+    with WriterQueue(tmp_config) as wq:
+        wq.submit(run_migrations)
+        wq.submit(
+            lambda conn: persist_watermark(
+                conn, source_name="idx_disclosures", source_class=SourceClass.DISCLOSURE, window=incremental
+            )
+        )
+        wq.submit(
+            lambda conn: record_historical_discovery(
+                conn,
+                source_name="idx_disclosures",
+                source_class=SourceClass.DISCLOSURE,
+                window=historical,
+                raw_state={"coverage_scope": "ticker-set"},
+            )
+        )
+        kept = wq.submit(lambda conn: load_watermark(conn, "idx_disclosures"))
+    assert kept == incremental
+
+    # A historical window written before any incremental run never floors in the future.
+    resumed = IDXDisclosureAdapter().resume_window(historical)
+    assert resumed.start <= date.today()

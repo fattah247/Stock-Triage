@@ -19,15 +19,38 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from ..config import Config
+from ..config.loader import REPO_ROOT
 from ..fiscal_year import load_fiscal_year_overrides, save_fiscal_year_override
 from ..intelligence import rederive_intelligence
-from ..intelligence.review import load_review_queue, update_review_status
+from ..intelligence.review import DEFAULT_SNOOZE_DAYS, load_review_queue, update_review_statuses
 from ..logging_setup import get_logger
 from .assets import read_static_asset
-from .pipeline import load_dashboard_snapshot, render_dashboard_html
+from .pipeline import FINDINGS_CSV_FIELDS, METRICS_CSV_FIELDS, load_dashboard_snapshot, render_dashboard_html
+from ..runlock import PIPELINE_COMMANDS, lock_path_for, read_lock_holder
+from .runs import (
+    RUN_CANCELLED,
+    RUN_FAILED,
+    RUN_OK,
+    RUN_RUNNING,
+    SEQUENCE_LABELS,
+    STEP_BUSY,
+    STEP_CANCELLED,
+    STEP_FAILED,
+    STEP_QUEUED,
+    STEP_RUNNING,
+    STEP_SKIPPED,
+    RunLedger,
+    SequenceStep,
+    classify_step,
+    describe_sequences,
+    describe_step,
+    sequence_steps,
+    stop_process,
+    summarize_run,
+)
 from .snapshot import load_company_detail, load_section_detail, load_snapshot_lite
 
 
@@ -61,8 +84,6 @@ def _save_watchlist(cfg: Config, tickers: list[str]) -> list[str]:
     # Also update the live config so subsequent snapshot loads pick it up.
     cfg.alerts.watchlist = list(normalised)
     return normalised
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)
@@ -98,6 +119,13 @@ class DashboardJobState:
     ok: bool | None = None
     duration_ms: int | None = None
     finished: bool = False
+    label: str = ""
+    status: str = RUN_RUNNING
+    steps: list[dict[str, object]] = field(default_factory=list)
+    finished_at: str | None = None
+    plan: list[SequenceStep] = field(default_factory=list, repr=False)
+    _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    _process: subprocess.Popen | None = field(default=None, repr=False)
     _started_at: float = field(default_factory=time.monotonic, repr=False)
     _event_seq: int = field(default=0, repr=False)
     _condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
@@ -118,21 +146,53 @@ class DashboardJobState:
             self._push_event(stream, {"text": text})
             self._condition.notify_all()
 
-    def finish(self, *, returncode: int, ok: bool) -> None:
+    def update_step(self, index: int, **fields: object) -> None:
+        with self._condition:
+            self.steps[index].update(fields)
+            self._push_event("step", {"index": index, **self.steps[index]})
+            self._condition.notify_all()
+
+    def finish(self, *, returncode: int, ok: bool, status: str | None = None) -> None:
         with self._condition:
             self.returncode = returncode
             self.ok = ok
+            self.status = status or (RUN_OK if ok else RUN_FAILED)
             self.finished = True
+            self.finished_at = datetime.now(timezone.utc).isoformat()
             self.duration_ms = int((time.monotonic() - self._started_at) * 1000)
             self._push_event(
                 "complete",
                 {
                     "returncode": returncode,
                     "ok": ok,
+                    "status": self.status,
                     "duration_ms": self.duration_ms,
+                    "steps": [dict(step) for step in self.steps],
                 },
             )
             self._condition.notify_all()
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def attach_process(self, process: subprocess.Popen | None) -> None:
+        with self._condition:
+            self._process = process
+        if process is not None and self.cancel_requested:
+            threading.Thread(target=stop_process, args=(process,), daemon=True).start()
+
+    def request_cancel(self) -> bool:
+        # A second SIGINT would interrupt the step's own cleanup.
+        if self.finished or self._cancel.is_set():
+            return False
+        self._cancel.set()
+        with self._condition:
+            process = self._process
+        if process is not None:
+            threading.Thread(target=stop_process, args=(process,), daemon=True).start()
+        self.append_output("stderr", "Cancellation requested; stopping the current step.\n")
+        return True
 
     def wait_for_events(self, offset: int, *, timeout_s: float = 1.0) -> tuple[list[dict[str, object]], bool]:
         with self._condition:
@@ -140,8 +200,24 @@ class DashboardJobState:
                 self._condition.wait(timeout=timeout_s)
             return self.events[offset:], self.finished
 
+    def summary(self) -> dict[str, object]:
+        with self._condition:
+            return {
+                "job_id": self.job_id,
+                "action": self.action,
+                "params": dict(self.params),
+                "label": self.label,
+                "status": self.status,
+                "timestamp": self.timestamp,
+                "finished": self.finished,
+                "cancel_requested": self.cancel_requested,
+                "steps": [dict(step) for step in self.steps],
+                "event_count": len(self.events),
+                "stream_url": f"/api/action/stream?job_id={self.job_id}",
+            }
+
     def to_history_entry(self) -> dict[str, object]:
-        return DashboardActionResult(
+        entry = DashboardActionResult(
             action=self.action,
             params=dict(self.params),
             command=list(self.command),
@@ -152,6 +228,14 @@ class DashboardJobState:
             ok=bool(self.ok),
             duration_ms=self.duration_ms or 0,
         ).__dict__
+        entry.update(
+            run_id=self.job_id,
+            label=self.label,
+            status=self.status,
+            finished_at=self.finished_at,
+            steps=[dict(step) for step in self.steps],
+        )
+        return entry
 
     def _push_event(self, event_type: str, payload: dict[str, object]) -> None:
         self._event_seq += 1
@@ -164,7 +248,53 @@ class DashboardJobState:
         )
 
 
-ActionRunner = Callable[[Config, str, dict[str, str], DashboardJobState], None]
+class _StepContext:
+    """What an action runner sees while executing one step of a run.
+
+    Output streams into the parent run; ``finish`` records the step's exit
+    code instead of finishing the whole run.
+    """
+
+    def __init__(self, job: DashboardJobState) -> None:
+        self._job = job
+        self.returncode: int | None = None
+
+    def set_command(self, command: list[str]) -> None:
+        self._job.set_command(command)
+
+    def append_output(self, stream: str, text: str) -> None:
+        self._job.append_output(stream, text)
+
+    def attach_process(self, process: subprocess.Popen | None) -> None:
+        self._job.attach_process(process)
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._job.cancel_requested
+
+    def finish(self, *, returncode: int, ok: bool) -> None:
+        del ok
+        self.returncode = returncode
+
+
+class JobConflictError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        active: DashboardJobState | None = None,
+        external_lock: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__("a dashboard run is active" if active is not None else "a pipeline command holds the lock")
+        self.active = active
+        self.external_lock = external_lock
+
+    def payload(self) -> dict[str, object]:
+        if self.active is not None:
+            return {"error": "job_already_running", "active_job": self.active.summary(), "external_lock": None}
+        return {"error": "pipeline_busy", "active_job": None, "external_lock": self.external_lock}
+
+
+ActionRunner = Callable[[Config, str, dict[str, str], _StepContext], None]
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -172,8 +302,14 @@ class DashboardHTTPServer(ThreadingHTTPServer):
     title: str
     action_history: list[dict[str, object]]
     jobs: dict[str, DashboardJobState]
+    active_job_id: str | None
     action_runner: ActionRunner
     history_lock: threading.Lock
+    ledger: RunLedger
+
+
+def _run_ledger_path(cfg: Config) -> Path:
+    return cfg.paths.logs_dir / "dashboard_runs.jsonl"
 
 
 def create_dashboard_server(
@@ -188,8 +324,10 @@ def create_dashboard_server(
     server = DashboardHTTPServer((bind_host, bind_port), _handler_factory())
     server.cfg = cfg
     server.title = cfg.dashboard.title
-    server.action_history = []
+    server.ledger = RunLedger(_run_ledger_path(cfg))
+    server.action_history = server.ledger.recent(10)
     server.jobs = {}
+    server.active_job_id = None
     server.action_runner = action_runner or _run_cli_action
     server.history_lock = threading.Lock()
     bound_host, bound_port = server.server_address[:2]
@@ -232,6 +370,8 @@ def _handler_factory():
             self._handle_read(emit_body=False)
 
         def _handle_read(self, *, emit_body: bool) -> None:
+            if not self._request_is_trusted(state_changing=False, emit_body=emit_body):
+                return
             parsed = urlparse(self.path)
             if parsed.path in {"/", "/index.html"}:
                 snapshot = _snapshot_payload(self.server.cfg, self.server.action_history)
@@ -257,6 +397,7 @@ def _handler_factory():
                     snapshot_endpoint="/api/snapshot",
                     artifact_endpoint="/artifact",
                     action_history=snapshot["action_history"],
+                    run_sequences=describe_sequences(),
                     static_root="/static",
                 )
                 self._write_bytes(HTTPStatus.OK, "text/html; charset=utf-8", html.encode("utf-8"), emit_body=emit_body)
@@ -301,43 +442,23 @@ def _handler_factory():
             if parsed.path == "/api/action/stream":
                 params = parse_qs(parsed.query)
                 job_id = params.get("job_id", [""])[0]
-                self._serve_action_stream(job_id)
+                try:
+                    offset = max(0, int(params.get("offset", ["0"])[0] or 0))
+                except ValueError:
+                    offset = 0
+                self._serve_action_stream(job_id, offset=offset)
+                return
+            if parsed.path == "/api/jobs/active":
+                self._write_json(HTTPStatus.OK, self._active_job_payload(), emit_body=emit_body)
                 return
             if parsed.path == "/metrics.csv":
                 snapshot = load_dashboard_snapshot(self.server.cfg)
-                payload = _csv_bytes(
-                    fieldnames=[
-                        "ticker",
-                        "metric_name",
-                        "value_normalized",
-                        "currency",
-                        "fiscal_year",
-                        "fiscal_period",
-                        "period_end_date",
-                        "document_id",
-                    ],
-                    rows=snapshot.metrics,
-                )
+                payload = _csv_bytes(fieldnames=METRICS_CSV_FIELDS, rows=snapshot.metrics)
                 self._write_bytes(HTTPStatus.OK, "text/csv; charset=utf-8", payload, emit_body=emit_body)
                 return
             if parsed.path == "/findings.csv":
                 snapshot = load_dashboard_snapshot(self.server.cfg)
-                payload = _csv_bytes(
-                    fieldnames=[
-                        "document_id",
-                        "ticker",
-                        "source_name",
-                        "finding_type",
-                        "name",
-                        "claim",
-                        "summary",
-                        "evidence",
-                        "local_path",
-                        "original_url",
-                        "finished_at",
-                    ],
-                    rows=snapshot.findings,
-                )
+                payload = _csv_bytes(fieldnames=FINDINGS_CSV_FIELDS, rows=snapshot.findings)
                 self._write_bytes(HTTPStatus.OK, "text/csv; charset=utf-8", payload, emit_body=emit_body)
                 return
             if parsed.path == "/artifact":
@@ -362,6 +483,8 @@ def _handler_factory():
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"}, emit_body=emit_body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib interface
+            if not self._request_is_trusted(state_changing=True):
+                return
             parsed = urlparse(self.path)
             if parsed.path == "/api/review":
                 self._handle_review_update()
@@ -372,37 +495,69 @@ def _handler_factory():
             if parsed.path == "/api/company-override":
                 self._handle_company_override_update()
                 return
+            if parsed.path == "/api/jobs/cancel":
+                self._handle_job_cancel()
+                return
             if parsed.path != "/api/action":
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            params = {
-                key: values[-1]
-                for key, values in parse_qs(body.decode("utf-8")).items()
-            }
+            params = self._read_form()
             action = params.get("action", "").strip()
             if not action:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_action"})
                 return
             try:
-                job = self._start_action_job(action, params)
+                plan = sequence_steps(action, params)
+                commands = [_build_cli_command(step.action, {**params, **dict(step.params)}) for step in plan]
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
+            try:
+                job = self._start_action_job(
+                    action,
+                    params,
+                    plan,
+                    needs_pipeline_lock=any(command[0] in PIPELINE_COMMANDS for command in commands),
+                )
+            except JobConflictError as exc:
+                self._write_json(HTTPStatus.CONFLICT, exc.payload())
+                return
             response = {
-                "job_id": job.job_id,
+                **job.summary(),
                 "stream_url": f"/api/action/stream?job_id={job.job_id}",
-                "action": job.action,
-                "timestamp": job.timestamp,
             }
             self._write_json(HTTPStatus.ACCEPTED, response)
 
-        def _handle_review_update(self) -> None:
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            params = {
-                key: values[-1]
-                for key, values in parse_qs(body.decode("utf-8")).items()
+        def _handle_job_cancel(self) -> None:
+            params = self._read_form()
+            requested = params.get("job_id", "").strip()
+            with self.server.history_lock:
+                job = self.server.jobs.get(self.server.active_job_id or "")
+            if job is None or job.finished or (requested and requested != job.job_id):
+                self._write_json(HTTPStatus.CONFLICT, {"error": "no_active_job"})
+                return
+            job.request_cancel()
+            self._write_json(HTTPStatus.ACCEPTED, {**job.summary(), "status": "cancelling"})
+
+        def _active_job_payload(self) -> dict[str, object]:
+            # A finished run stays "active" until it is in the history, so a page
+            # reconnecting in between can still read its outcome from the stream.
+            with self.server.history_lock:
+                job = self.server.jobs.get(self.server.active_job_id or "")
+            active = job.summary() if job is not None else None
+            return {
+                "active_job": active,
+                "external_lock": None
+                if active is not None
+                else read_lock_holder(lock_path_for(self.server.cfg.paths.data_dir)),
             }
+
+        def _read_form(self) -> dict[str, str]:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            return {key: values[-1] for key, values in parse_qs(body.decode("utf-8")).items()}
+
+        def _handle_review_update(self) -> None:
+            params = self._read_form()
             review_item_id = params.get("review_item_id", "").strip()
             review_item_ids = [item.strip() for item in params.get("review_item_ids", "").split(",") if item.strip()]
             status = params.get("status", "").strip()
@@ -412,15 +567,14 @@ def _handler_factory():
                 return
             try:
                 targets = review_item_ids or [review_item_id]
-                results = [
-                    update_review_status(
-                        self.server.cfg,
-                        review_item_id=target,
-                        status=status,
-                        note=note,
-                    )
-                    for target in targets
-                ]
+                snooze_days = _int_arg(params.get("snooze_days", ""), default=DEFAULT_SNOOZE_DAYS, minimum=1)
+                results = update_review_statuses(
+                    self.server.cfg,
+                    review_item_ids=targets,
+                    status=status,
+                    note=note,
+                    snooze_days=snooze_days,
+                )
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -438,11 +592,7 @@ def _handler_factory():
             )
 
         def _handle_watchlist_update(self) -> None:
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            params = {
-                key: values[-1]
-                for key, values in parse_qs(body.decode("utf-8")).items()
-            }
+            params = self._read_form()
             action = params.get("action", "").strip()
             ticker = params.get("ticker", "").strip().upper()
             if not ticker:
@@ -458,8 +608,7 @@ def _handler_factory():
             self._write_json(HTTPStatus.OK, {"tickers": updated, "ticker": ticker, "action": action or "add"})
 
         def _handle_company_override_update(self) -> None:
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            params = {key: values[-1] for key, values in parse_qs(body.decode("utf-8")).items()}
+            params = self._read_form()
             ticker = params.get("ticker", "").strip().upper()
             if not ticker:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_ticker"})
@@ -490,6 +639,36 @@ def _handler_factory():
                 },
             )
 
+        def _request_is_trusted(self, *, state_changing: bool, emit_body: bool = True) -> bool:
+            """Refuse DNS-rebinding and cross-site requests.
+
+            Any page open in the operator's browser can reach this server, which
+            launches pipeline runs and streams local files. A foreign ``Host`` is
+            refused, and state-changing requests must come from this origin;
+            non-browser clients such as curl send neither header and pass.
+            """
+            host_header = self.headers.get("Host", "")
+            if not _host_header_allowed(host_header, self.server.server_address[0]):
+                self._write_json(HTTPStatus.FORBIDDEN, {"error": "host_not_allowed"}, emit_body=emit_body)
+                return False
+            if not state_changing:
+                return True
+            origin = self.headers.get("Origin")
+            if origin is not None and urlsplit(origin).netloc.lower() != host_header.lower():
+                self._write_json(HTTPStatus.FORBIDDEN, {"error": "cross_origin_request_blocked"})
+                return False
+            fetch_site = self.headers.get("Sec-Fetch-Site")
+            if fetch_site is not None and fetch_site not in {"same-origin", "none"}:
+                self._write_json(HTTPStatus.FORBIDDEN, {"error": "cross_origin_request_blocked"})
+                return False
+            return True
+
+        def end_headers(self) -> None:
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
+            super().end_headers()
+
         def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
             get_logger("stock_triage.dashboard").info(
                 "dashboard request",
@@ -507,8 +686,7 @@ def _handler_factory():
             if not path.exists() or not path.is_file():
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "file_not_found"}, emit_body=emit_body)
                 return
-            mime, _ = mimetypes.guess_type(str(path))
-            content_type = mime or "application/octet-stream"
+            content_type, extension = _sniff_artifact_type(path)
             total_size = path.stat().st_size
             range_header = self.headers.get("Range")
             try:
@@ -525,6 +703,10 @@ def _handler_factory():
             self.send_header("Content-Type", content_type)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(length))
+            # Content-addressed files have no extension; name them so PDFs open inline.
+            disposition = "inline" if content_type == "application/pdf" else "attachment"
+            filename = path.name if path.suffix else f"{path.name[:16]}{extension}"
+            self.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
             if range_header:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{total_size}")
             self.end_headers()
@@ -532,7 +714,7 @@ def _handler_factory():
                 return
             _stream_file_range(self.wfile, path, start=start, length=length)
 
-        def _serve_action_stream(self, job_id: str) -> None:
+        def _serve_action_stream(self, job_id: str, *, offset: int = 0) -> None:
             if not job_id:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing_job_id"})
                 return
@@ -548,54 +730,81 @@ def _handler_factory():
             self.send_header("Connection", "close")
             self.end_headers()
 
-            offset = 0
             while True:
                 events, finished = job.wait_for_events(offset)
-                for event in events:
-                    payload = json.dumps(event, ensure_ascii=True)
-                    self.wfile.write(f"event: {event['type']}\n".encode("utf-8"))
-                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-                    offset += 1
+                try:
+                    for event in events:
+                        payload = json.dumps(event, ensure_ascii=True)
+                        self.wfile.write(f"id: {event['id']}\nevent: {event['type']}\n".encode("utf-8"))
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        offset += 1
+                except (BrokenPipeError, ConnectionResetError):
+                    # The viewer went away; the run itself keeps going.
+                    self.close_connection = True
+                    return
                 if finished and offset >= len(job.events):
                     self.close_connection = True
                     break
 
-        def _start_action_job(self, action: str, params: dict[str, str]) -> DashboardJobState:
+        def _start_action_job(
+            self,
+            action: str,
+            params: dict[str, str],
+            plan: list[SequenceStep],
+            *,
+            needs_pipeline_lock: bool,
+        ) -> DashboardJobState:
             job = DashboardJobState(
                 job_id=uuid.uuid4().hex[:12],
                 action=action,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 params=dict(params),
+                label=SEQUENCE_LABELS.get(action, ""),
+                steps=[{**describe_step(step), "status": STEP_QUEUED} for step in plan],
+                plan=list(plan),
             )
             with self.server.history_lock:
+                # The dashboard's own run holds the pipeline lock through its
+                # child process, so check for it before the external lock.
+                active = self.server.jobs.get(self.server.active_job_id or "")
+                if active is not None and not active.finished:
+                    raise JobConflictError(active=active)
+                if needs_pipeline_lock:
+                    holder = read_lock_holder(lock_path_for(self.server.cfg.paths.data_dir))
+                    if holder is not None:
+                        raise JobConflictError(external_lock=holder)
                 self.server.jobs[job.job_id] = job
+                self.server.active_job_id = job.job_id
                 self._prune_jobs_locked()
 
             thread = threading.Thread(
                 target=self._run_action_job,
-                args=(job, action, params),
+                args=(job,),
                 daemon=True,
             )
             thread.start()
             return job
 
-        def _run_action_job(self, job: DashboardJobState, action: str, params: dict[str, str]) -> None:
+        def _run_action_job(self, job: DashboardJobState) -> None:
             try:
-                self.server.action_runner(self.server.cfg, action, params, job)
+                _execute_plan(self.server.cfg, job, self.server.action_runner)
+            finally:
                 if not job.finished:
-                    job.finish(returncode=0, ok=True)
-            except ValueError as exc:
-                job.append_output("stderr", f"{exc}\n")
-                job.finish(returncode=2, ok=False)
-            except Exception as exc:  # noqa: BLE001 - keep UI responsive on failures
-                job.append_output("stderr", f"{type(exc).__name__}: {exc}\n")
-                job.finish(returncode=1, ok=False)
-
-            with self.server.history_lock:
-                self.server.action_history.insert(0, job.to_history_entry())
-                del self.server.action_history[10:]
-                self._prune_jobs_locked()
+                    job.finish(returncode=1, ok=False)
+                entry = RunLedger.trimmed(job.to_history_entry())
+                try:
+                    self.server.ledger.append(entry)
+                except OSError as exc:
+                    get_logger("stock_triage.dashboard").warning(
+                        "could not persist dashboard run", extra={"error": str(exc)}
+                    )
+                with self.server.history_lock:
+                    if self.server.active_job_id == job.job_id:
+                        self.server.active_job_id = None
+                    self.server.action_history.insert(0, entry)
+                    del self.server.action_history[10:]
+                    self._prune_jobs_locked()
 
         def _prune_jobs_locked(self) -> None:
             stale = [
@@ -632,6 +841,9 @@ def _handler_factory():
         def _write_bytes(self, status: HTTPStatus, content_type: str, payload: bytes, *, emit_body: bool = True) -> None:
             self.send_response(status.value)
             self.send_header("Content-Type", content_type)
+            if content_type.startswith("text/html"):
+                # HTML only: a CSP on PDF responses can disable the browser's viewer.
+                self.send_header("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             if emit_body:
@@ -663,7 +875,7 @@ def _snapshot_payload(cfg: Config, action_history: list[dict[str, object]]) -> d
     }
 
 
-def _csv_bytes(*, fieldnames: list[str], rows: list[dict[str, object]]) -> bytes:
+def _csv_bytes(*, fieldnames: tuple[str, ...], rows: list[dict[str, object]]) -> bytes:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
@@ -671,7 +883,61 @@ def _csv_bytes(*, fieldnames: list[str], rows: list[dict[str, object]]) -> bytes
     return buffer.getvalue().encode("utf-8")
 
 
-def _run_cli_action(cfg: Config, action: str, params: dict[str, str], job: DashboardJobState) -> None:
+def _execute_plan(cfg: Config, job: DashboardJobState, runner: ActionRunner) -> None:
+    """Run every step of ``job``'s plan and finish it with an overall status."""
+    step_states: list[str] = []
+    returncodes: list[int] = []
+    network_failure: str | None = None
+    blocked = False
+    for index, step in enumerate(job.plan):
+        if job.cancel_requested:
+            job.update_step(index, status=STEP_CANCELLED, note="did not start")
+            step_states.append(STEP_CANCELLED)
+            continue
+        if blocked:
+            job.update_step(index, status=STEP_SKIPPED, note="another pipeline command held the lock")
+            step_states.append(STEP_SKIPPED)
+            continue
+        if step.network and network_failure is not None:
+            job.update_step(index, status=STEP_SKIPPED, note=f"{network_failure} could not reach IDX")
+            step_states.append(STEP_SKIPPED)
+            continue
+
+        started = time.monotonic()
+        job.update_step(index, status=STEP_RUNNING, started_at=datetime.now(timezone.utc).isoformat())
+        context = _StepContext(job)
+        try:
+            runner(cfg, step.action, {**job.params, **dict(step.params)}, context)
+        except ValueError as exc:
+            context.append_output("stderr", f"{exc}\n")
+            context.returncode = 2
+        except Exception as exc:  # noqa: BLE001 - keep the run and UI alive
+            context.append_output("stderr", f"{type(exc).__name__}: {exc}\n")
+            context.returncode = 1
+        returncode = 0 if context.returncode is None else context.returncode
+        state = classify_step(returncode=returncode, cancelled=job.cancel_requested and returncode != 0)
+        job.update_step(
+            index,
+            status=state,
+            returncode=returncode,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        step_states.append(state)
+        returncodes.append(returncode)
+        if state == STEP_FAILED and step.network:
+            network_failure = step.label or step.action
+        if state == STEP_BUSY:
+            blocked = True
+
+    status = summarize_run(step_states)
+    if status == RUN_CANCELLED:
+        returncode = 130
+    else:
+        returncode = next((code for code in returncodes if code != 0), 0)
+    job.finish(returncode=returncode, ok=status == RUN_OK, status=status)
+
+
+def _run_cli_action(cfg: Config, action: str, params: dict[str, str], job: _StepContext) -> None:
     command = _build_cli_command(action, params)
     env = os.environ.copy()
     full_command = [sys.executable, "-m", "stock_triage", *command]
@@ -686,6 +952,7 @@ def _run_cli_action(cfg: Config, action: str, params: dict[str, str], job: Dashb
         stderr=subprocess.PIPE,
         bufsize=1,
     )
+    job.attach_process(process)
     readers = [
         threading.Thread(target=_pipe_stream, args=(process.stdout, job, "stdout"), daemon=True),
         threading.Thread(target=_pipe_stream, args=(process.stderr, job, "stderr"), daemon=True),
@@ -695,23 +962,27 @@ def _run_cli_action(cfg: Config, action: str, params: dict[str, str], job: Dashb
     returncode = process.wait()
     for reader in readers:
         reader.join(timeout=1)
+    job.attach_process(None)
     job.finish(returncode=returncode, ok=returncode == 0)
 
 
 def _build_cli_command(action: str, params: dict[str, str]) -> list[str]:
     limit = _int_arg(params.get("limit", ""), default=5, minimum=1)
-    year = _int_arg(params.get("year", ""), default=datetime.now().year, minimum=2000)
+    year = params.get("year", "").strip()
+    # No --year lets the adapter scan its rolling current + previous report year.
+    financial_year = ["--year", str(_int_arg(year, default=0, minimum=2000))] if year else []
     document_id = params.get("document_id", "").strip()
     ticker = params.get("ticker", "").strip().upper()
     mapping = {
         "discover_company": ["discover", "company_universe"],
         "discover_disclosure": ["discover", "disclosure"],
-        "discover_financial": ["discover", "financial_report", "--year", str(year)],
+        "discover_financial": ["discover", "financial_report", *financial_year],
         "download_financial": ["download", "--source", "idx_financial_reports", "--limit", str(limit)],
         "download_disclosure": ["download", "--source", "idx_disclosures", "--limit", str(limit)],
         "parse": ["parse", "--source", "all", "--limit", str(limit)],
         "extract": ["extract", "--source", "all", "--limit", str(limit)],
         "rules": ["rules", "--source", "all", "--limit", str(limit)],
+        "intelligence": ["intelligence-run", "--limit", str(max(limit, 25))],
         "alerts": ["alerts-run"],
         "canary": ["canary-run", "--source", "all"],
         "export": ["dashboard-export"],
@@ -784,7 +1055,7 @@ def _int_arg(raw: str, *, default: int, minimum: int) -> int:
     return value
 
 
-def _pipe_stream(stream, job: DashboardJobState, stream_name: str) -> None:
+def _pipe_stream(stream, job: _StepContext, stream_name: str) -> None:
     if stream is None:
         return
     try:
@@ -852,13 +1123,67 @@ def _stream_file_range(wfile, path: Path, *, start: int, length: int) -> None:
 
 
 def _is_allowed_artifact_path(path: Path, cfg: Config) -> bool:
+    # Only the stores the UI links to; never the database or the browser
+    # profile (cookies, saved logins), even when they sit under an allowed root.
     allowed_roots = [
-        cfg.paths.data_dir.resolve(),
+        cfg.paths.files_dir.resolve(),
         cfg.dashboard.output_dir.resolve(),
+        cfg.browser.artifacts_dir.resolve(),
     ]
     if cfg.paths.quarantine_dir is not None:
         allowed_roots.append(cfg.paths.quarantine_dir.resolve())
+    denied_roots = [
+        cfg.browser.profile_dir.resolve(),
+        cfg.paths.db_path.parent.resolve(),
+    ]
+    if any(_is_relative_to(path, root) for root in denied_roots):
+        return False
     return any(_is_relative_to(path, root) for root in allowed_roots)
+
+
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+_LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+_WILDCARD_BIND_HOSTS = {"", "0.0.0.0", "::"}
+
+
+def _host_header_allowed(host_header: str, bind_host: str) -> bool:
+    if not host_header:
+        return False
+    try:
+        hostname = (urlsplit(f"//{host_header}").hostname or "").lower()
+    except ValueError:
+        return False
+    if bind_host in _WILDCARD_BIND_HOSTS:
+        # Binding every interface is an explicit opt-out: any Host is accepted,
+        # and DNS rebinding can then also satisfy the Origin check.
+        return True
+    return hostname in _LOOPBACK_HOSTNAMES or hostname == bind_host.lower()
+
+
+_ARTIFACT_SIGNATURES = (
+    (b"%PDF-", "application/pdf", ".pdf"),
+    (b"PK\x03\x04", "application/zip", ".zip"),
+)
+
+
+def _sniff_artifact_type(path: Path) -> tuple[str, str]:
+    mime, _ = mimetypes.guess_type(str(path))
+    if mime:
+        return mime, path.suffix
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(8)
+    except OSError:
+        head = b""
+    for signature, content_type, extension in _ARTIFACT_SIGNATURES:
+        if head.startswith(signature):
+            return content_type, extension
+    return "application/octet-stream", ""
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

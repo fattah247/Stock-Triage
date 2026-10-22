@@ -463,21 +463,30 @@ def test_persist_coverage_rows_promotes_403_to_persistent_then_access_constraint
             "coverage_version": "v3_4-v1",
             "updated_at": now,
         }
+        def access_state():
+            return conn.execute(
+                "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
+                ("cand-403",),
+            ).fetchone()
+
+        def record_failed_fetches(count: int) -> None:
+            conn.execute("UPDATE download_resources SET failure_count = ?, attempt_count = ? WHERE resource_id = 'res-403'", (count, count))
+
         _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
-        first = conn.execute(
-            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
-            ("cand-403",),
-        ).fetchone()
+        first = access_state()
+        # Re-materializing (coverage-status / coverage-preview) without a new
+        # fetch attempt must not escalate the block.
         _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
-        second = conn.execute(
-            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
-            ("cand-403",),
-        ).fetchone()
         _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
-        third = conn.execute(
-            "SELECT block_class, retry_count, needs_alternative_source_check, retry_eligible_until FROM artifact_access_state WHERE artifact_id = ?",
-            ("cand-403",),
-        ).fetchone()
+        viewed_again = access_state()
+        record_failed_fetches(2)
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        second = access_state()
+        record_failed_fetches(3)
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        third = access_state()
+        assert viewed_again["block_class"] == BLOCK_CLASS_UPSTREAM_403_TRANSIENT
+        assert viewed_again["retry_count"] == 1
         assert first["block_class"] == BLOCK_CLASS_UPSTREAM_403_TRANSIENT
         assert first["retry_count"] == 1
         assert first["needs_alternative_source_check"] == 0
@@ -490,6 +499,11 @@ def test_persist_coverage_rows_promotes_403_to_persistent_then_access_constraint
         assert third["retry_count"] == 3
         assert third["needs_alternative_source_check"] == 1
         assert third["retry_eligible_until"] is None
+
+        # A later successful download clears the block instead of leaving it sticky.
+        conn.execute("UPDATE download_resources SET status = 'downloaded' WHERE resource_id = 'res-403'")
+        _persist_coverage_rows(conn, rows=[row], tickers=["TAMU"])
+        assert access_state() is None
     finally:
         conn.close()
 

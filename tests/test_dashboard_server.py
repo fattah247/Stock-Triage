@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -82,7 +81,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "Ops Modes" in html
         assert "Copy command" in html
         app_js = urlopen(f"{handle.url}/static/app.js").read().decode("utf-8")
-        assert "window.__DASHBOARD_BOOTSTRAP__" in html
+        assert 'id="dashboardBootstrap" type="application/json"' in html
         assert "function render()" in app_js
         assert "daily_sweep" in app_js
         assert "updateReviewStatus" in app_js
@@ -111,7 +110,7 @@ def test_dashboard_server_serves_snapshot_actions_and_artifacts(tmp_config) -> N
         assert "company_snapshots" in snapshot
         assert "sector_rollups" in snapshot
 
-        local_path = quote(str(tmp_config.paths.data_dir / "tamu-annual-report.pdf"), safe="")
+        local_path = quote(str(tmp_config.paths.files_dir / "tamu-annual-report.pdf"), safe="")
         artifact = urlopen(f"{handle.url}/artifact?path={local_path}").read()
         assert artifact.startswith(b"%PDF-1.4")
 
@@ -229,7 +228,7 @@ def test_parse_range_header_handles_common_range_forms() -> None:
 
 def test_dashboard_server_streams_artifact_range(tmp_config) -> None:
     payload = (b"".join(bytes([i % 256]) for i in range(4096))) + b"TAIL"
-    artifact_path = tmp_config.paths.data_dir / "range-sample.bin"
+    artifact_path = tmp_config.paths.files_dir / "range-sample.bin"
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_bytes(payload)
 
@@ -837,3 +836,354 @@ def test_dashboard_serve_cli_uses_server(tmp_config, monkeypatch, capsys) -> Non
     assert seen["host"] == "127.0.0.1"
     assert seen["port"] == 9001
     assert seen["open_browser"] is False
+
+
+def _serve(cfg, **kwargs):
+    handle = create_dashboard_server(cfg, host="127.0.0.1", port=0, **kwargs)
+    thread = threading.Thread(target=handle.server.serve_forever, daemon=True)
+    thread.start()
+    return handle, thread
+
+
+def _stop(handle, thread) -> None:
+    handle.server.shutdown()
+    handle.server.server_close()
+    thread.join(timeout=5)
+
+
+def _status(request: Request | str) -> int:
+    try:
+        with urlopen(request) as response:
+            return response.status
+    except HTTPError as exc:
+        return exc.code
+
+
+def test_dashboard_server_refuses_foreign_host_headers(tmp_config) -> None:
+    """A DNS-rebinding page reaches 127.0.0.1 but carries its own Host header."""
+    handle, thread = _serve(tmp_config)
+    try:
+        assert _status(f"{handle.url}/api/watchlist") == 200
+        rebound = Request(f"{handle.url}/api/watchlist", headers={"Host": "attacker.example:8765"})
+        assert _status(rebound) == 403
+        localhost = Request(f"{handle.url}/api/watchlist", headers={"Host": "localhost:8765"})
+        assert _status(localhost) == 200
+    finally:
+        _stop(handle, thread)
+
+
+def test_dashboard_server_blocks_cross_site_state_changes(tmp_config) -> None:
+    calls: list[str] = []
+
+    def fake_runner(cfg, action, params, job) -> None:
+        calls.append(action)
+        job.finish(returncode=0, ok=True)
+
+    handle, thread = _serve(tmp_config, action_runner=fake_runner)
+    body = urlencode({"action": "parse"}).encode("utf-8")
+    try:
+        for headers in (
+            {"Origin": "https://attacker.example"},
+            {"Sec-Fetch-Site": "cross-site"},
+            {"Sec-Fetch-Site": "same-site"},
+        ):
+            request = Request(f"{handle.url}/api/action", data=body, headers=headers, method="POST")
+            assert _status(request) == 403
+        watch = Request(
+            f"{handle.url}/api/watchlist",
+            data=urlencode({"ticker": "TAMU"}).encode("utf-8"),
+            headers={"Origin": "https://attacker.example"},
+            method="POST",
+        )
+        assert _status(watch) == 403
+        assert calls == []
+
+        same_origin = Request(
+            f"{handle.url}/api/action",
+            data=body,
+            headers={"Origin": handle.url, "Sec-Fetch-Site": "same-origin"},
+            method="POST",
+        )
+        assert _status(same_origin) == 202
+    finally:
+        _stop(handle, thread)
+
+
+def test_dashboard_server_rejects_unknown_action_before_accepting(tmp_config) -> None:
+    handle, thread = _serve(tmp_config, action_runner=lambda *args: None)
+    try:
+        request = Request(
+            f"{handle.url}/api/action",
+            data=urlencode({"action": "rm_rf"}).encode("utf-8"),
+            method="POST",
+        )
+        assert _status(request) == 400
+    finally:
+        _stop(handle, thread)
+
+
+def test_dashboard_server_artifacts_exclude_database_and_browser_profile(tmp_config) -> None:
+    tmp_config.paths.db_path.write_bytes(b"SQLite format 3\x00")
+    cookies = tmp_config.browser.profile_dir / "Default" / "Cookies"
+    cookies.parent.mkdir(parents=True, exist_ok=True)
+    cookies.write_bytes(b"secret-session")
+    stored = tmp_config.paths.files_dir / "ab" / "cd" / "abcdef0123456789"
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(b"%PDF-1.7\nbody")
+
+    handle, thread = _serve(tmp_config)
+    try:
+        for secret in (tmp_config.paths.db_path, cookies):
+            assert _status(f"{handle.url}/artifact?path={quote(str(secret), safe='')}") == 403
+        with urlopen(f"{handle.url}/artifact?path={quote(str(stored), safe='')}") as response:
+            assert response.headers.get("Content-Type") == "application/pdf"
+            assert response.headers.get("Content-Disposition", "").startswith("inline;")
+            assert response.headers.get("X-Content-Type-Options") == "nosniff"
+    finally:
+        _stop(handle, thread)
+
+
+def test_dashboard_html_is_script_safe_and_sends_csp(tmp_config) -> None:
+    from stock_triage.dashboard.assets import render_dashboard_html
+
+    html = render_dashboard_html(
+        title="Desk <One>",
+        issuers=[{"ticker": "EVIL", "issuer_name": "</script><script>alert(1)</script>"}],
+        market_monitor={},
+        documents=[],
+        metrics=[],
+        findings=[],
+        revisions=[],
+        company_snapshots=[],
+        sector_rollups=[],
+        inbox_rows=[],
+        digest_rows=[],
+        review_rows=[],
+        intelligence_kpis={},
+        backlog_rows=[],
+        canary_rows=[],
+        metrics_href="metrics.csv",
+        findings_href="findings.csv",
+    )
+    assert "</script><script>alert(1)" not in html
+    assert "<title>Desk &lt;One&gt;</title>" in html
+    payload = html.split('type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert json.loads(payload)["payload"]["issuers"][0]["issuer_name"].startswith("</script>")
+
+    handle, thread = _serve(tmp_config)
+    try:
+        with urlopen(handle.url) as response:
+            csp = response.headers.get("Content-Security-Policy", "")
+            assert "script-src 'self'" in csp
+            assert "frame-ancestors 'none'" in csp
+    finally:
+        _stop(handle, thread)
+
+
+def _post(handle, path: str, fields: dict[str, str]) -> tuple[int, dict]:
+    request = Request(f"{handle.url}{path}", data=urlencode(fields).encode("utf-8"), method="POST")
+    try:
+        with urlopen(request) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _wait_for_completion(handle, job_id: str, *, offset: int = 0) -> str:
+    return urlopen(f"{handle.url}/api/action/stream?job_id={job_id}&offset={offset}", timeout=10).read().decode("utf-8")
+
+
+def _complete_payload(stream: str) -> dict:
+    block = stream.split("event: complete\n", 1)[1]
+    return json.loads(block.split("data: ", 1)[1].split("\n", 1)[0])
+
+
+def test_build_cli_command_sweep_steps_use_rolling_financial_years() -> None:
+    assert _build_cli_command("discover_financial", {}) == ["discover", "financial_report"]
+    assert _build_cli_command("discover_financial", {"year": ""}) == ["discover", "financial_report"]
+    assert _build_cli_command("intelligence", {"limit": "5"}) == ["intelligence-run", "--limit", "25"]
+    assert _build_cli_command("intelligence", {"limit": "80"}) == ["intelligence-run", "--limit", "80"]
+
+
+def test_daily_sweep_runs_server_side_and_keeps_local_steps_after_network_failure(tmp_config) -> None:
+    calls: list[str] = []
+
+    def runner(cfg, action, params, job) -> None:
+        calls.append(action)
+        job.set_command(["stock_triage", action])
+        job.finish(returncode=1 if action == "discover_disclosure" else 0, ok=action != "discover_disclosure")
+
+    handle, thread = _serve(tmp_config, action_runner=runner)
+    try:
+        status, started = _post(handle, "/api/action", {"action": "daily_sweep"})
+        assert status == 202
+        assert [step["action"] for step in started["steps"]][:2] == ["discover_disclosure", "discover_financial"]
+        complete = _complete_payload(_wait_for_completion(handle, started["job_id"]))
+    finally:
+        _stop(handle, thread)
+
+    # Network steps after the IDX failure are skipped; local processing still runs.
+    assert calls == ["discover_disclosure", "parse", "extract", "rules", "intelligence", "alerts", "digest"]
+    states = {step["action"]: step["status"] for step in complete["steps"]}
+    assert states["discover_disclosure"] == "failed"
+    assert states["download_financial"] == "skipped"
+    assert states["intelligence"] == "ok"
+    assert complete["status"] == "partial"
+
+
+def test_dashboard_runs_one_job_at_a_time_and_supports_cancel(tmp_config) -> None:
+    release = threading.Event()
+
+    def slow_runner(cfg, action, params, job) -> None:
+        job.set_command(["stock_triage", action])
+        while not job.cancel_requested and not release.is_set():
+            release.wait(0.02)
+        job.finish(returncode=130 if job.cancel_requested else 0, ok=not job.cancel_requested)
+
+    handle, thread = _serve(tmp_config, action_runner=slow_runner)
+    try:
+        status, first = _post(handle, "/api/action", {"action": "daily_sweep"})
+        assert status == 202
+
+        status, conflict = _post(handle, "/api/action", {"action": "parse"})
+        assert status == 409
+        assert conflict["error"] == "job_already_running"
+        assert conflict["active_job"]["job_id"] == first["job_id"]
+
+        active = json.loads(urlopen(f"{handle.url}/api/jobs/active").read().decode("utf-8"))
+        assert active["active_job"]["job_id"] == first["job_id"]
+
+        status, _ = _post(handle, "/api/jobs/cancel", {"job_id": first["job_id"]})
+        assert status == 202
+        complete = _complete_payload(_wait_for_completion(handle, first["job_id"]))
+        assert complete["status"] == "cancelled"
+        assert {step["status"] for step in complete["steps"][1:]} == {"cancelled"}
+
+        # A finished run stays visible until it is recorded in the history.
+        idle = json.loads(urlopen(f"{handle.url}/api/jobs/active").read().decode("utf-8"))
+        assert idle["active_job"] is None or idle["active_job"]["finished"]
+        history = json.loads(urlopen(f"{handle.url}/api/snapshot/lite").read().decode("utf-8"))["action_history"]
+        for _ in range(50):
+            if any(entry.get("run_id") == first["job_id"] for entry in history):
+                break
+            threading.Event().wait(0.05)
+            history = json.loads(urlopen(f"{handle.url}/api/snapshot/lite").read().decode("utf-8"))["action_history"]
+        assert any(entry.get("run_id") == first["job_id"] and entry["status"] == "cancelled" for entry in history)
+        status, _ = _post(handle, "/api/action", {"action": "parse"})
+        assert status == 202
+        release.set()
+    finally:
+        release.set()
+        _stop(handle, thread)
+
+
+def test_dashboard_run_history_survives_server_restart(tmp_config) -> None:
+    def runner(cfg, action, params, job) -> None:
+        job.set_command(["stock_triage", action])
+        job.append_output("stdout", "parse: selected=1 parsed=1\n")
+        job.finish(returncode=0, ok=True)
+
+    handle, thread = _serve(tmp_config, action_runner=runner)
+    try:
+        _, started = _post(handle, "/api/action", {"action": "parse", "limit": "3"})
+        stream = _wait_for_completion(handle, started["job_id"])
+        # Reattaching mid-run replays only events after the offset.
+        replay = _wait_for_completion(handle, started["job_id"], offset=2)
+        assert stream.count("event: ") > replay.count("event: ")
+    finally:
+        _stop(handle, thread)
+
+    restarted, thread = _serve(tmp_config, action_runner=runner)
+    try:
+        snapshot = json.loads(urlopen(f"{restarted.url}/api/snapshot/lite").read().decode("utf-8"))
+        latest = snapshot["action_history"][0]
+        assert latest["action"] == "parse"
+        assert latest["status"] == "ok"
+        assert latest["params"]["limit"] == "3"
+        assert "parsed=1" in latest["stdout"]
+    finally:
+        _stop(restarted, thread)
+
+
+def test_dashboard_reports_blocked_when_pipeline_lock_is_held(tmp_config) -> None:
+    from stock_triage.runlock import EXIT_PIPELINE_BUSY, lock_path_for, pipeline_lock
+
+    handle, thread = _serve(tmp_config)  # real CLI runner: checks the lock before spawning
+    try:
+        with pipeline_lock(lock_path_for(tmp_config.paths.data_dir), command="download --source all"):
+            status, payload = _post(handle, "/api/action", {"action": "parse"})
+            active = json.loads(urlopen(f"{handle.url}/api/jobs/active").read().decode("utf-8"))
+        assert status == 409
+        assert payload["error"] == "pipeline_busy"
+        assert payload["external_lock"]["command"] == "download --source all"
+        assert active["external_lock"]["command"] == "download --source all"
+    finally:
+        _stop(handle, thread)
+
+    def busy_runner(cfg, action, params, job) -> None:
+        job.finish(returncode=EXIT_PIPELINE_BUSY, ok=False)
+
+    handle, thread = _serve(tmp_config, action_runner=busy_runner)
+    try:
+        _, started = _post(handle, "/api/action", {"action": "daily_sweep"})
+        complete = _complete_payload(_wait_for_completion(handle, started["job_id"]))
+        assert complete["status"] == "blocked"
+        assert complete["steps"][0]["status"] == "busy"
+        assert {step["status"] for step in complete["steps"][1:]} == {"skipped"}
+    finally:
+        _stop(handle, thread)
+
+
+def test_second_tab_attaches_while_the_dashboard_run_holds_the_pipeline_lock(tmp_config) -> None:
+    from stock_triage.runlock import lock_path_for, pipeline_lock
+
+    release = threading.Event()
+
+    def lock_holding_runner(cfg, action, params, job) -> None:
+        # The real CLI child takes the pipeline lock for the step's duration.
+        with pipeline_lock(lock_path_for(cfg.paths.data_dir), command=action):
+            job.set_command(["stock_triage", action])
+            release.wait(5)
+        job.finish(returncode=0, ok=True)
+
+    handle, thread = _serve(tmp_config, action_runner=lock_holding_runner)
+    try:
+        _, first = _post(handle, "/api/action", {"action": "parse"})
+        threading.Event().wait(0.2)
+        status, conflict = _post(handle, "/api/action", {"action": "parse"})
+        assert status == 409
+        assert conflict["error"] == "job_already_running"
+        assert conflict["active_job"]["job_id"] == first["job_id"]
+    finally:
+        release.set()
+        _stop(handle, thread)
+
+
+def test_cancel_is_requested_once_and_lock_probe_never_blocks_a_starting_command(tmp_config) -> None:
+    from stock_triage.dashboard.server import DashboardJobState
+    from stock_triage.runlock import lock_path_for, pipeline_lock, read_lock_holder
+
+    job = DashboardJobState(job_id="j", action="parse", timestamp="t")
+    assert job.request_cancel() is True
+    assert job.request_cancel() is False
+
+    lock_path = lock_path_for(tmp_config.paths.data_dir)
+    assert read_lock_holder(lock_path) is None
+    with pipeline_lock(lock_path, command="download"):
+        assert read_lock_holder(lock_path)["command"] == "download"
+    # Probing the holder must not take the lock itself.
+    assert read_lock_holder(lock_path) is None
+    with pipeline_lock(lock_path, command="parse"):
+        assert read_lock_holder(lock_path)["command"] == "parse"
+
+
+def test_artifact_download_names_keep_their_own_extension(tmp_config) -> None:
+    named = tmp_config.paths.files_dir / "report.pdf"
+    named.parent.mkdir(parents=True, exist_ok=True)
+    named.write_bytes(b"%PDF-1.4\nbody")
+    handle, thread = _serve(tmp_config)
+    try:
+        with urlopen(f"{handle.url}/artifact?path={quote(str(named), safe='')}") as response:
+            assert response.headers.get("Content-Disposition") == 'inline; filename="report.pdf"'
+    finally:
+        _stop(handle, thread)

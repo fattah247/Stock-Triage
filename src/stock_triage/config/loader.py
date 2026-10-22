@@ -156,6 +156,24 @@ class Config(BaseModel):
     theses: ThesesConfig = Field(default_factory=ThesesConfig)
     company_overrides: CompanyOverridesConfig = Field(default_factory=CompanyOverridesConfig)
 
+    @model_validator(mode="after")
+    def _derive_data_paths(self) -> "Config":
+        """Keep data-dir-relative files with ``paths.data_dir`` unless set explicitly.
+
+        Their defaults are fixed to the repo's ``data/`` directory, so a config
+        that moves ``data_dir`` would otherwise still write there.
+        """
+        data_dir = self.paths.data_dir
+        if "output_dir" not in self.dashboard.model_fields_set:
+            self.dashboard.output_dir = data_dir / "dashboard"
+        if "jsonl_path" not in self.alerts.model_fields_set:
+            self.alerts.jsonl_path = data_dir / "alerts" / "alerts.jsonl"
+        if "definition_path" not in self.theses.model_fields_set:
+            self.theses.definition_path = data_dir / "theses.yaml"
+        if "definition_path" not in self.company_overrides.model_fields_set:
+            self.company_overrides.definition_path = data_dir / "company_overrides.yaml"
+        return self
+
     def ensure_dirs(self) -> None:
         for p in (
             self.paths.data_dir,

@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from ..config import Config
 from ..db import WriterQueue, connect, configure_pragmas, run_migrations
-from ..discovery import persist_document_candidates, persist_watermark
+from ..discovery import persist_document_candidates, record_historical_discovery
 from ..download.pipeline import (
     AttachmentDownloader,
     DownloadAttemptPersist,
@@ -1051,6 +1051,8 @@ def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str,
                 dc.source_name,
                 dc.ticker,
                 dr.resource_id,
+                dr.status AS resource_status,
+                dr.failure_count,
                 dr.last_http_status,
                 dr.last_error_code
             FROM document_candidates dc
@@ -1067,29 +1069,30 @@ def _persist_access_state_rows(conn: sqlite3.Connection, *, rows: list[dict[str,
                 continue
             seen_candidates.add(candidate_id)
             artifact_id = candidate_id
+            if candidate["resource_status"] == "downloaded":
+                conn.execute("DELETE FROM artifact_access_state WHERE artifact_id = ?", (artifact_id,))
+                continue
             endpoint_family = _endpoint_family_for(
                 source_name=str(candidate["source_name"] or row.get("source_name") or ""),
                 block_class=blocked_reason,
             )
-            retry_eligible_until = None
-            if blocked_reason == BLOCK_CLASS_UPSTREAM_403_TRANSIENT:
-                retry_eligible_until = (now + timedelta(hours=24)).isoformat()
             existing = conn.execute(
                 """
-                SELECT first_blocked_at, retry_count, needs_alternative_source_check, block_class
+                SELECT first_blocked_at
                 FROM artifact_access_state
                 WHERE artifact_id = ?
                 """,
                 (artifact_id,),
             ).fetchone()
             first_blocked_at = str(existing["first_blocked_at"]) if existing and existing["first_blocked_at"] else now.isoformat()
-            retry_count = int(existing["retry_count"] or 0) + 1 if existing else 1
+            # Count real failed fetches: materialization also runs from the
+            # read-only coverage-status and coverage-preview commands.
+            retry_count = max(1, int(candidate["failure_count"] or 0))
             block_class = _resolved_access_block_class(
                 blocked_reason=blocked_reason,
                 retry_count=retry_count,
                 expected_state=str(row.get("expected_state") or ""),
                 deadline_at=str(row.get("deadline_at") or ""),
-                previous_block_class=str(existing["block_class"] or "") if existing and existing["block_class"] else None,
             )
             retry_eligible_until = _retry_eligible_until_for_block_class(now=now, block_class=block_class)
             needs_alternative_source_check = 1 if block_class in {BLOCK_CLASS_UPSTREAM_403_PERSISTENT, BLOCK_CLASS_ACCESS_CONSTRAINT} else 0
@@ -1275,12 +1278,9 @@ def _resolved_access_block_class(
     retry_count: int,
     expected_state: str,
     deadline_at: str,
-    previous_block_class: str | None,
 ) -> str:
     if blocked_reason != BLOCK_CLASS_UPSTREAM_403_TRANSIENT:
         return blocked_reason
-    if previous_block_class == BLOCK_CLASS_ACCESS_CONSTRAINT:
-        return BLOCK_CLASS_ACCESS_CONSTRAINT
     if retry_count >= 3 and _is_past_deadline_window(expected_state=expected_state, deadline_at=deadline_at):
         return BLOCK_CLASS_ACCESS_CONSTRAINT
     if retry_count >= 2:
@@ -2016,7 +2016,7 @@ def _run_discover_for_scope(
             if events:
                 wq.submit(lambda conn, e=events: _persist_coverage_request_telemetry(conn, events=e))
             wq.submit(
-                lambda conn, a=adapter, w=window, cnt=len(candidates): persist_watermark(
+                lambda conn, a=adapter, w=window, cnt=len(candidates): record_historical_discovery(
                     conn,
                     source_name=a.name,
                     source_class=a.source_class,
@@ -2046,19 +2046,20 @@ def _discover_financial_reports_for_tickers(
         page_settle_ms=cfg.browser.page_settle_ms,
         channel=cfg.browser.channel,
     )
-    year = adapter._resolve_year(window)
+    streams = adapter.report_streams(adapter._resolve_years(window))
     candidates = []
     events: list[CoverageTelemetryEvent] = []
     seen_record_ids: set[str] = set()
     with session.open_page(page_url=adapter.public_url) as page:
         for ticker in target_tickers:
-            for report_type in adapter.report_types:
+            for year, report_type, period in streams:
                 _sleep_for_controller(delay_ms)
                 first_url = adapter._build_api_url(
                     year=year,
                     page_size=adapter.default_page_size,
                     index_from=1,
                     report_type=report_type,
+                    period=period,
                     kode_emiten=ticker,
                 )
                 first = _fetch_financial_payload_with_telemetry(
@@ -2087,6 +2088,7 @@ def _discover_financial_reports_for_tickers(
                         page_size=adapter.default_page_size,
                         index_from=page_no,
                         report_type=report_type,
+                        period=period,
                         kode_emiten=ticker,
                     )
                     next_payload = _fetch_financial_payload_with_telemetry(
@@ -2111,7 +2113,9 @@ def _discover_financial_reports_for_tickers(
                         if candidate.source_record_id in seen_record_ids:
                             continue
                         seen_record_ids.add(candidate.source_record_id)
-                        candidates.append(candidate)
+                        candidates.append(
+                            replace(candidate, raw_metadata={**candidate.raw_metadata, "requested_period": period})
+                        )
     return candidates, events
 
 

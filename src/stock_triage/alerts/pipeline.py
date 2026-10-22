@@ -130,7 +130,8 @@ def _load_signals(
             d.source_name,
             te.ticker,
             'thesis' AS signal_kind,
-            td.thesis_name AS signal_name,
+            -- improving and weakening share a severity; the status keeps their dedupe keys apart.
+            td.thesis_name || ' (' || te.status || ')' AS signal_name,
             CASE te.status
                 WHEN 'broken' THEN 'critical'
                 WHEN 'improving' THEN 'warning'

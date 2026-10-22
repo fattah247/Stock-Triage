@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 
+from ...config.loader import REPO_ROOT
 from ..types import DiscoveryWindow, DocumentCandidate, SourceClass
 
 PHASE_1_RECON_DOC = "docs/phase1_recon.md"
-REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_BROWSER_ARTIFACTS_ROOT = REPO_ROOT / "data" / "recon" / "browser"
 
 

@@ -26,7 +26,13 @@ class IDXDisclosureAdapter(_IDXStubAdapter):
     def resume_window(self, watermark: DiscoveryWindow) -> DiscoveryWindow:
         if watermark.start is None and watermark.end is None and not watermark.cursor:
             return self.default_window()
-        return watermark
+        # The saved ``end`` is the newest date already seen: a floor for the next
+        # scan, not an upper bound (that would exclude everything published since).
+        # A historical window may end in the future; never floor past today.
+        floor = watermark.end or watermark.start
+        if floor is not None:
+            floor = min(floor, date.today())
+        return DiscoveryWindow(start=floor, end=None, cursor=watermark.cursor)
 
     def watermark_window(
         self,

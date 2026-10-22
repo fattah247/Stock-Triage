@@ -1,5 +1,12 @@
 (function () {
-  const bootstrap = window.__DASHBOARD_BOOTSTRAP__ || {};
+  const bootstrap = (() => {
+    const node = document.getElementById("dashboardBootstrap");
+    try {
+      return node ? JSON.parse(node.textContent || "{}") : {};
+    } catch (_) {
+      return {};
+    }
+  })();
   let data = bootstrap.payload || {
     issuers: [],
     market_monitor: {},
@@ -28,13 +35,13 @@
   const state = {
     selectedTicker: null,
     activeJobId: null,
-    activeJobStartedAt: null,
     pollingHandle: null,
     eventSource: null,
-    queuedActions: [],
-    queueName: null,
-    queueIndex: 0,
-    queueTotal: 0,
+    // The run the server is executing (or last finished in this tab).
+    run: null,
+    externalLock: null,
+    runTicker: null,
+    reconnectHandle: null,
     highlightedKeys: { inbox: new Map(), documents: new Map(), findings: new Map() },
     lastFailedHistory: null,
     _companyCache: {},        // ticker -> {data, fetchedAt}
@@ -104,9 +111,35 @@
   const canaryStatus = document.getElementById("canaryStatus");
   const lastActivity = document.getElementById("lastActivity");
   const actionButtons = Array.from(document.querySelectorAll(".actionButton"));
+  const runPill = document.getElementById("runPill");
+  const runSteps = document.getElementById("runSteps");
+  const runTimelineTitle = document.getElementById("runTimelineTitle");
+  const runTimelineMeta = document.getElementById("runTimelineMeta");
+  const cancelRunButton = document.getElementById("cancelRunButton");
+  const retryStepsButton = document.getElementById("retryStepsButton");
+  const toastRegion = document.getElementById("toastRegion");
+
+  const SWEEP_ROUTE = (bootstrap.runSequences || {}).daily_sweep || [];
+  const STEP_GLYPHS = {
+    queued: "○",
+    running: "◐",
+    ok: "✓",
+    failed: "✕",
+    skipped: "–",
+    cancelled: "⊘",
+    busy: "⏸",
+  };
+  const RUN_COPY = {
+    ok: "finished cleanly",
+    partial: "finished with gaps",
+    failed: "failed",
+    cancelled: "was cancelled",
+    blocked: "was blocked by another run",
+  };
 
   const actionLabels = {
     daily_sweep: "Daily sweep",
+    intelligence: "Derive company intelligence",
     discover_company: "Discover companies",
     discover_disclosure: "Discover disclosures",
     discover_financial: "Discover financials",
@@ -131,10 +164,21 @@
   // Ops shell visibility is now managed by the view system (data-views="ops").
 
   function esc(value) {
+    // Also used inside attribute values, so quotes must be escaped too.
     return String(value ?? "")
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function postForm(url, fields) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: new URLSearchParams(fields).toString(),
+    });
   }
 
   function localHref(path) {
@@ -247,7 +291,9 @@
     document.querySelectorAll("[data-subview-scope]").forEach((tab) => {
       const scope = tab.dataset.subviewScope;
       const target = tab.dataset.subviewTarget;
-      tab.classList.toggle("active", state.subviews[scope] === target);
+      const active = state.subviews[scope] === target;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-pressed", active ? "true" : "false");
     });
     document.querySelectorAll("[data-subpanels]").forEach((el) => {
       const [scope, panel] = String(el.dataset.subpanels || "").split(":");
@@ -417,23 +463,34 @@
   function renderHistory() {
     if (!actionHistory) return;
     const rows = (data.action_history || []).slice(0, 10);
-    state.lastFailedHistory = rows.length && rows[0].ok === false ? rows[0] : null;
+    state.lastFailedHistory = rows.length && rows[0].ok === false && rows[0].status !== "cancelled" ? rows[0] : null;
     actionHistory.innerHTML = rows.length
       ? `<div class="historyList">${rows
-          .map(
-            (item) =>
-              `<div class="historyItem ${item.ok === false ? "failed" : ""}">
+          .map((item) => {
+            const status = item.status || (item.ok === false ? "failed" : "ok");
+            const steps = item.steps || [];
+            const strip =
+              steps.length > 1
+                ? `<div class="historySteps" aria-label="${esc(steps.filter((step) => step.status === "ok").length)} of ${esc(steps.length)} steps finished">${steps
+                    .map(
+                      (step) =>
+                        `<span class="historyStep step-${esc(step.status || "queued")}" title="${esc(`${step.label || step.action}: ${step.status || "queued"}`)}"></span>`
+                    )
+                    .join("")}</div>`
+                : "";
+            return `<div class="historyItem status-${esc(status)}">
                 <div class="historyMetaLine">
-                  <strong>${esc(actionLabel(item.action))}</strong>
-                  <span class="statusPill ${item.ok === false ? "failed" : "ok"}">${item.ok === false ? "failed" : "ok"}</span>
+                  <strong>${esc(item.label || actionLabel(item.action))}</strong>
+                  <span class="statusPill ${esc(status)}">${esc(status)}</span>
                   <span class="meta">${renderTimestamp(item.timestamp)}</span>
                 </div>
+                ${strip}
                 <div class="historyCommand">${esc((item.command || []).join(" "))}</div>
-                <div class="meta">exit=${esc(item.returncode)}${item.duration_ms ? ` · ${esc(Math.max(1, Math.round(item.duration_ms / 1000)))}s` : ""}</div>
-              </div>`
-          )
+                <div class="meta">exit=${esc(item.returncode)}${item.duration_ms ? ` · ${esc(formatDuration(item.duration_ms))}` : ""}</div>
+              </div>`;
+          })
           .join("")}</div>`
-      : `<div class="meta">No action has been run from this dashboard yet.</div>`;
+      : `<div class="emptyState"><strong>No runs yet.</strong> The first daily sweep you start here will be kept in this history, even across server restarts.</div>`;
     renderActionError();
   }
 
@@ -452,7 +509,7 @@
     const stderrLines = String(item.stderr || "").trim().split("\n").filter(Boolean);
     const stdoutLines = String(item.stdout || "").trim().split("\n").filter(Boolean);
     const detailLines = (stderrLines.length ? stderrLines : stdoutLines).slice(-20);
-    actionErrorTitle.textContent = `${actionLabel(item.action)} failed`;
+    actionErrorTitle.textContent = `${item.label || actionLabel(item.action)} ${RUN_COPY[item.status] || "failed"}`;
     actionErrorSummary.innerHTML = `${renderTimestamp(item.timestamp)} · exit ${esc(item.returncode)} · ${esc(
       (item.command || []).join(" ")
     )}`;
@@ -482,15 +539,49 @@
       if (document.visibilityState !== "visible") return;
       if (state.activeJobId) return;
       refreshSnapshot().catch(() => {});
+      checkActiveRun();
     }, 15000);
+  }
+
+  const VIEW_PREFS_KEY = "stockTriage.viewPrefs.v1";
+
+  function loadViewPrefs() {
+    try {
+      const prefs = JSON.parse(window.localStorage.getItem(VIEW_PREFS_KEY) || "null");
+      if (!prefs || typeof prefs !== "object") return;
+      if (["home", "company", "review", "ops"].includes(prefs.activeView)) state.activeView = prefs.activeView;
+      if (prefs.subviews && typeof prefs.subviews === "object") {
+        Object.keys(state.subviews).forEach((scope) => {
+          if (typeof prefs.subviews[scope] === "string") state.subviews[scope] = prefs.subviews[scope];
+        });
+      }
+      if (typeof prefs.selectedTicker === "string") state.selectedTicker = prefs.selectedTicker;
+    } catch (_) {
+      // Private windows or blocked storage: start from the defaults.
+    }
+  }
+
+  function saveViewPrefs() {
+    try {
+      window.localStorage.setItem(
+        VIEW_PREFS_KEY,
+        JSON.stringify({ activeView: state.activeView, subviews: state.subviews, selectedTicker: state.selectedTicker })
+      );
+    } catch (_) {
+      // Storage unavailable: preferences are not remembered.
+    }
   }
 
   function switchView(view) {
     state.activeView = view;
+    saveViewPrefs();
     document.body.dataset.activeView = view;
     // Update tab highlight.
     document.querySelectorAll(".viewTab").forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.view === view);
+      const selected = tab.dataset.view === view;
+      tab.classList.toggle("active", selected);
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
     });
     // Show/hide panels based on data-views attribute.
     document.querySelectorAll("[data-views]").forEach((el) => {
@@ -551,6 +642,12 @@
       fetchSectionDetail("ops");
       fetchRerunPreview();
     }
+  }
+
+  function makeCardsFocusable() {
+    document.querySelectorAll(".clickableCard:not([tabindex])").forEach((card) => {
+      card.tabIndex = 0;
+    });
   }
 
   function render() {
@@ -911,7 +1008,7 @@
                 <div class="issuerName">${esc(item.issuer_name)}</div>
                 <div class="issuerMeta">
                   <span class="${!item.sector || item.sector === "unknown" ? "sectorMissing" : ""}">${esc(item.sector || "unknown")}</span>
-                  <span>${esc(item.latest_document_at || item.last_seen_at || "")}</span>
+                  <span>${item.latest_document_at ? `filed ${renderTimestamp(item.latest_document_at)}` : item.document_count ? renderTimestamp(item.last_seen_at) : "no filings yet"}</span>
                 </div>
                 <div class="issuerCta">${item.ticker === state.selectedTicker ? "Open in company workspace" : "Select issuer"}</div>
               </article>
@@ -1082,13 +1179,18 @@
                   <div class="meta">${(item.reasons || [item.rationale || ""]).map(esc).join(" · ")}</div>
                   <div class="heroBar">
                     ${item.local_path ? `<a class="chip" href="${localHref(item.local_path)}">artifact</a>` : ""}
-                    <button class="miniButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="resolved">resolve group</button>
-                    <button class="miniButton ghostButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="snoozed">snooze group</button>
-                    ${
-                      item.status !== "open"
-                        ? `<button class="miniButton ghostButton" type="button" data-review-ids="${esc((item.review_item_ids || [item.review_item_id]).join(","))}" data-review-status="open">reopen group</button>`
-                        : ""
-                    }
+                    ${(() => {
+                      const ids = esc((item.review_item_ids || [item.review_item_id]).join(","));
+                      const label = esc(`${item.ticker || "-"} ${item.issue_family || item.item_type || ""}`.trim());
+                      const from = esc(item.status || "open");
+                      const button = (status, text, ghost) =>
+                        `<button class="miniButton ${ghost ? "ghostButton" : ""}" type="button" data-review-ids="${ids}" data-review-status="${status}" data-review-label="${label}" data-review-from="${from}">${text}</button>`;
+                      return [
+                        item.status !== "resolved" ? button("resolved", "resolve group", false) : "",
+                        item.status !== "snoozed" ? button("snoozed", "snooze group", true) : "",
+                        item.status !== "open" ? button("open", "reopen group", true) : "",
+                      ].join("");
+                    })()}
                   </div>
                 </article>
               `
@@ -1891,6 +1993,7 @@
       );
     }
     renderHistory();
+    makeCardsFocusable();
   }
 
   async function refreshSnapshot() {
@@ -1998,200 +2101,290 @@
     }
   }
 
-  function isSequenceActive() {
-    return Boolean(state.queueName);
+  function isRunActive() {
+    return Boolean(state.run && !state.run.finished);
   }
 
-  function startDailySweep() {
-    if (state.activeJobId || isSequenceActive()) return;
-    state.queueName = "Daily sweep";
-    state.queuedActions = [
-      "discover_disclosure",
-      "discover_financial",
-      "download_financial",
-      "download_disclosure",
-      "parse",
-      "extract",
-      "rules",
-      "alerts",
-      "digest",
-    ];
-    state.queueIndex = 0;
-    state.queueTotal = state.queuedActions.length;
-    if (actionOutput) {
-      actionOutput.textContent = "Starting daily sweep.\n";
+  function formatDuration(ms) {
+    const seconds = Math.max(0, Math.round((ms || 0) / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  }
+
+  function runElapsedMs() {
+    if (!state.run) return 0;
+    if (state.run.finished && state.run.duration_ms != null) return state.run.duration_ms;
+    const started = Date.parse(state.run.timestamp || "");
+    return Number.isNaN(started) ? 0 : Date.now() - started;
+  }
+
+  function currentStep() {
+    const steps = state.run?.steps || [];
+    const index = steps.findIndex((step) => step.status === "running");
+    return index >= 0 ? { index, step: steps[index] } : null;
+  }
+
+  function unfinishedStepActions(run) {
+    return (run?.steps || [])
+      .filter((step) => step.status && step.status !== "ok")
+      .map((step) => step.action);
+  }
+
+  function setRunPill(signature, className, markup, ariaLabel) {
+    runPill.hidden = false;
+    if (runPill.dataset.signature !== signature) {
+      runPill.dataset.signature = signature;
+      runPill.className = className;
+      runPill.innerHTML = markup;
     }
-    updateActionOutputState(false);
-    if (actionErrorPanel) {
-      actionErrorPanel.hidden = true;
+    runPill.setAttribute("aria-label", ariaLabel);
+  }
+
+  function renderRunPill() {
+    if (!runPill) return;
+    const run = state.run;
+    if (run && !run.finished) {
+      const now = currentStep();
+      const label = run.label || actionLabel(run.action);
+      const position = now ? `${now.index + 1}/${run.steps.length}` : `${run.steps.length} steps`;
+      const where = now ? now.step.label || actionLabel(now.step.action) : run.cancel_requested ? "Stopping" : "Starting";
+      setRunPill(
+        `live|${run.job_id}|${position}|${where}`,
+        "runPill runPillLive",
+        `<span class="runPillDot" aria-hidden="true"></span>
+        <span class="runPillText"><strong>${esc(label)}</strong>
+        <span>${esc(position)} · ${esc(where)} · <span class="runPillElapsed"></span></span></span>`,
+        `${label} running: ${where}. Open Ops.`
+      );
+      const elapsed = runPill.querySelector(".runPillElapsed");
+      if (elapsed) elapsed.textContent = formatDuration(runElapsedMs());
+      return;
     }
+    if (run && run.finished && run.showResultUntil && Date.now() < run.showResultUntil) {
+      const label = run.label || actionLabel(run.action);
+      const tone = run.status === "ok" ? "ok" : run.status === "partial" || run.status === "blocked" ? "warning" : "critical";
+      setRunPill(
+        `done|${run.job_id}|${run.status}`,
+        `runPill runPillDone sev-${tone}`,
+        `<span class="runPillGlyph" aria-hidden="true">${run.status === "ok" ? "✓" : "!"}</span>
+        <span class="runPillText"><strong>${esc(label)}</strong>
+        <span>${esc(RUN_COPY[run.status] || run.status)} · ${esc(formatDuration(run.duration_ms))}</span></span>`,
+        `${label} ${RUN_COPY[run.status] || run.status}. Open Ops.`
+      );
+      return;
+    }
+    if (state.externalLock) {
+      const command = state.externalLock.command || "pipeline command";
+      setRunPill(
+        `external|${command}`,
+        "runPill runPillExternal",
+        `<span class="runPillGlyph" aria-hidden="true">⏸</span>
+        <span class="runPillText"><strong>Terminal run in progress</strong>
+        <span>${esc(command)}</span></span>`,
+        "A pipeline command started outside the dashboard is running. Open Ops."
+      );
+      return;
+    }
+    runPill.hidden = true;
+    delete runPill.dataset.signature;
+  }
+
+  function renderRunTimeline() {
+    if (!runSteps) return;
+    const run = state.run;
+    const steps = run?.steps?.length ? run.steps : SWEEP_ROUTE.map((step) => ({ ...step, status: "queued" }));
+    const signature = JSON.stringify([run?.job_id, steps.map((step) => [step.status, step.duration_ms, step.note])]);
+    if (runSteps.dataset.signature !== signature) {
+      runSteps.dataset.signature = signature;
+      runSteps.innerHTML = steps
+      .map((step, index) => {
+        const status = step.status || "queued";
+        const detail = [
+          step.duration_ms != null ? formatDuration(step.duration_ms) : "",
+          step.returncode ? `exit ${step.returncode}` : "",
+          step.note || "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return `
+          <li class="runStep step-${esc(status)}" aria-current="${status === "running" ? "step" : "false"}">
+            <span class="runStepGlyph" aria-hidden="true">${STEP_GLYPHS[status] || "○"}</span>
+            <span class="runStepBody">
+              <span class="runStepLabel">${esc(step.label || actionLabel(step.action))}${step.network ? ` <span class="runStepTag">IDX</span>` : ""}</span>
+              <span class="runStepMeta">${esc(status)}${detail ? ` · ${esc(detail)}` : ""}</span>
+            </span>
+            <span class="srOnly">Step ${index + 1} of ${steps.length}</span>
+          </li>`;
+        })
+        .join("");
+    }
+    if (runTimelineTitle) {
+      runTimelineTitle.textContent = run ? `${run.label || actionLabel(run.action)}` : "Sweep route";
+    }
+    if (runTimelineMeta) {
+      if (run && !run.finished) {
+        runTimelineMeta.textContent = run.cancel_requested
+          ? "Stopping after the current step lets go of its work..."
+          : `Running for ${formatDuration(runElapsedMs())}. Safe to close this tab; the server keeps going.`;
+      } else if (run) {
+        const unfinished = unfinishedStepActions(run).length;
+        runTimelineMeta.textContent = `${RUN_COPY[run.status] || run.status} in ${formatDuration(run.duration_ms)}${
+          unfinished ? ` · ${unfinished} step${unfinished === 1 ? "" : "s"} did not finish` : ""
+        }.`;
+      } else {
+        runTimelineMeta.textContent = "Runs on the server, so you can close this tab mid-sweep and come back.";
+      }
+    }
+    if (cancelRunButton) {
+      cancelRunButton.hidden = !isRunActive();
+      cancelRunButton.disabled = Boolean(run?.cancel_requested);
+    }
+    if (retryStepsButton) {
+      const canRetry = Boolean(run && run.finished && run.status !== "ok" && unfinishedStepActions(run).length);
+      retryStepsButton.hidden = !canRetry;
+    }
+  }
+
+  function renderRunState() {
+    renderRunPill();
+    renderRunTimeline();
+  }
+
+  function startRunTicker() {
+    stopRunTicker();
+    state.runTicker = window.setInterval(() => {
+      renderRunState();
+      if (!isRunActive() && !(state.run?.showResultUntil > Date.now())) stopRunTicker();
+    }, 1000);
+  }
+
+  function stopRunTicker() {
+    if (state.runTicker) {
+      window.clearInterval(state.runTicker);
+      state.runTicker = null;
+    }
+  }
+
+  function appendOutput(text) {
+    if (!actionOutput) return;
+    actionOutput.textContent += text;
+    actionOutput.scrollTop = actionOutput.scrollHeight;
+  }
+
+  function attachToRun(summary, { offset = 0, resumed = false } = {}) {
+    if (!summary?.job_id) return;
+    const sameRun = state.run && state.run.job_id === summary.job_id;
+    state.run = { ...(sameRun ? state.run : {}), ...summary, finished: false, eventsSeen: offset };
+    state.activeJobId = summary.job_id;
+    state.externalLock = null;
     stopPolling();
     setActionButtonsDisabled(true);
-    runNextQueuedAction();
-  }
-
-  function runNextQueuedAction() {
-    const nextAction = state.queuedActions.shift();
-    if (!nextAction) return;
-    state.queueIndex += 1;
-    runAction(nextAction, {}, { preserveOutput: true, disableControls: false }).catch((error) => {
-      if (actionStatus) actionStatus.textContent = error.message;
-      state.queueName = null;
-      state.queueIndex = 0;
-      state.queueTotal = 0;
-      state.queuedActions = [];
-      setActionButtonsDisabled(false);
-      startPolling();
-    });
-  }
-
-  async function runAction(action, overrides = {}, options = {}) {
-    if (!actionEndpoint) return;
-    if (state.activeJobId) return;
-    if (action === "daily_sweep") {
-      startDailySweep();
-      return;
-    }
-    const params = new URLSearchParams();
-    params.set("action", action);
-    params.set("year", yearInput?.value || "");
-    params.set("limit", limitInput?.value || "");
-    params.set("document_id", "");
-    Object.entries(overrides).forEach(([key, value]) => params.set(key, String(value ?? "")));
-
-    if (actionStatus) {
-      if (isSequenceActive()) {
-        actionStatus.textContent = `${state.queueName} ${state.queueIndex}/${state.queueTotal}: ${actionLabel(action)}...`;
-      } else {
-        actionStatus.textContent = `Running ${actionLabel(action)}...`;
-      }
-    }
-    if (actionOutput && !options.preserveOutput) {
-      actionOutput.textContent = "";
-    }
+    if (actionErrorPanel) actionErrorPanel.hidden = true;
+    if (actionOutput && offset === 0) actionOutput.textContent = "";
     updateActionOutputState(false);
-    if (actionErrorPanel) {
-      actionErrorPanel.hidden = true;
-    }
-    if (actionOutput && options.preserveOutput) {
-      actionOutput.textContent += `\n== ${actionLabel(action)} ==\n`;
-    }
-    if (options.disableControls !== false) {
-      stopPolling();
-      setActionButtonsDisabled(true);
-    }
-    const response = await fetch(actionEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: params.toString(),
-    });
-    const result = await response.json();
-    if (!response.ok && response.status !== 202) {
-      if (options.disableControls !== false) {
-        setActionButtonsDisabled(false);
-        startPolling();
-      }
-      throw new Error(result.error || `Action start failed: ${response.status}`);
-    }
-    state.activeJobId = result.job_id;
-    state.activeJobStartedAt = Date.now();
-    connectJobStream(action, result.stream_url, options);
-  }
-
-  async function updateReviewStatus(reviewItemIds, status) {
-    const ids = Array.isArray(reviewItemIds) ? reviewItemIds.filter(Boolean) : [reviewItemIds].filter(Boolean);
-    const response = await fetch(reviewEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: new URLSearchParams({
-        review_item_id: ids[0] || "",
-        review_item_ids: ids.join(","),
-        status,
-      }).toString(),
-    });
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || `Review update failed: ${response.status}`);
-    }
-    await refreshSnapshot();
-    await fetchSectionDetail("review");
     if (actionStatus) {
-      actionStatus.textContent = `Updated ${result.updated_count || ids.length} review item(s) to ${status}.`;
+      actionStatus.textContent = resumed
+        ? `Reattached to ${summary.label || actionLabel(summary.action)} already running on the server.`
+        : `Running ${summary.label || actionLabel(summary.action)}...`;
     }
+    renderRunState();
+    startRunTicker();
+    openRunStream();
   }
 
-  function connectJobStream(action, streamUrl, options = {}) {
-    if (!streamUrl) {
-      finishActiveJob(action, false, 1, 0, "Missing stream URL.");
-      return;
-    }
-
-    if (state.eventSource) {
-      state.eventSource.close();
-    }
-    const source = new EventSource(streamUrl);
+  function openRunStream() {
+    const run = state.run;
+    if (!run) return;
+    if (state.eventSource) state.eventSource.close();
+    const source = new EventSource(`/api/action/stream?job_id=${encodeURIComponent(run.job_id)}&offset=${run.eventsSeen || 0}`);
     state.eventSource = source;
-    let elapsedHandle = window.setInterval(() => {
-      if (!actionStatus || !state.activeJobStartedAt) return;
-      const elapsed = Math.max(0, Math.floor((Date.now() - state.activeJobStartedAt) / 1000));
-      if (isSequenceActive()) {
-        actionStatus.textContent = `${state.queueName} ${state.queueIndex}/${state.queueTotal}: ${actionLabel(action)}... ${elapsed}s`;
-      } else {
-        actionStatus.textContent = `Running ${actionLabel(action)}... ${elapsed}s`;
-      }
-    }, 1000);
-
-    source.addEventListener("started", (event) => {
+    const track = (handler) => (event) => {
       const payload = JSON.parse(event.data);
-      if (actionOutput) {
-        if (options.preserveOutput) {
-          actionOutput.textContent += `${(payload.command || []).join(" ")}\n\n`;
-        } else {
-          actionOutput.textContent = `${(payload.command || []).join(" ")}\n\n`;
+      if (payload.id && payload.id <= (state.run?.eventsSeen || 0)) return;
+      if (state.run && payload.id) state.run.eventsSeen = payload.id;
+      handler(payload);
+    };
+    source.addEventListener("started", track((payload) => appendOutput(`$ ${(payload.command || []).join(" ")}\n`)));
+    source.addEventListener("stdout", track((payload) => appendOutput(payload.text || "")));
+    source.addEventListener("stderr", track((payload) => appendOutput(payload.text || "")));
+    source.addEventListener(
+      "step",
+      track((payload) => {
+        if (!state.run) return;
+        const steps = state.run.steps || [];
+        steps[payload.index] = { ...(steps[payload.index] || {}), ...payload };
+        state.run.steps = steps;
+        if (payload.status === "running") {
+          const label = payload.label || actionLabel(payload.action);
+          appendOutput(`\n== ${label} ==\n`);
+          if (actionStatus && steps.length > 1) {
+            actionStatus.textContent = `${state.run.label || actionLabel(state.run.action)}: step ${payload.index + 1} of ${steps.length}, ${label}.`;
+          }
         }
-      }
-      updateActionOutputState(false);
-    });
-
-    source.addEventListener("stdout", (event) => {
-      const payload = JSON.parse(event.data);
-      if (actionOutput) {
-        actionOutput.textContent += payload.text || "";
-        actionOutput.scrollTop = actionOutput.scrollHeight;
-      }
-    });
-
-    source.addEventListener("stderr", (event) => {
-      const payload = JSON.parse(event.data);
-      if (actionOutput) {
-        actionOutput.textContent += payload.text || "";
-        actionOutput.scrollTop = actionOutput.scrollHeight;
-      }
-    });
-
-    source.addEventListener("complete", (event) => {
-      const payload = JSON.parse(event.data);
-      window.clearInterval(elapsedHandle);
-      source.close();
-      state.eventSource = null;
-      finishActiveJob(action, payload.ok, payload.returncode, payload.duration_ms);
-    });
-
+        renderRunState();
+      })
+    );
+    source.addEventListener(
+      "complete",
+      track((payload) => {
+        source.close();
+        state.eventSource = null;
+        finishRun(payload);
+      })
+    );
     source.onerror = () => {
-      window.clearInterval(elapsedHandle);
+      // The run lives on the server; a dropped stream says nothing about it.
       source.close();
       state.eventSource = null;
-      finishActiveJob(action, false, 1, 0, "Stream disconnected.");
+      if (isRunActive()) scheduleReconnect();
     };
   }
 
-  function finishActiveJob(action, ok, returncode, durationMs, fallbackMessage) {
+  function scheduleReconnect() {
+    if (state.reconnectHandle) return;
+    if (actionStatus) actionStatus.textContent = "Lost the live stream; checking on the run...";
+    state.reconnectHandle = window.setTimeout(async () => {
+      state.reconnectHandle = null;
+      try {
+        const response = await fetch("/api/jobs/active");
+        const payload = await response.json();
+        if (payload.active_job && payload.active_job.job_id === state.run?.job_id) {
+          state.run = { ...state.run, ...payload.active_job, finished: false, eventsSeen: state.run.eventsSeen };
+          openRunStream();
+          if (actionStatus) actionStatus.textContent = `Reconnected to ${state.run.label || actionLabel(state.run.action)}.`;
+          return;
+        }
+        // Finished while we were disconnected: recover the outcome from history.
+        await refreshSnapshot();
+        const entry = (data.action_history || []).find((item) => item.run_id === state.run?.job_id);
+        finishRun(entry ? { ...entry, steps: entry.steps || state.run?.steps || [] } : { status: "failed", ok: false, returncode: 1 });
+      } catch (_) {
+        scheduleReconnect();
+      }
+    }, 1500);
+  }
+
+  function finishRun(payload) {
+    const run = state.run || {};
+    state.run = {
+      ...run,
+      ...payload,
+      steps: payload.steps?.length ? payload.steps : run.steps || [],
+      finished: true,
+      showResultUntil: Date.now() + 12000,
+    };
     state.activeJobId = null;
-    state.activeJobStartedAt = null;
-    // Invalidate lazy caches so sections re-fetch after pipeline actions.
     state._companyCache = {};
     state._sectionLoaded = {};
-    const sequenceActive = isSequenceActive();
+    updateActionOutputState(true);
+    setActionButtonsDisabled(false);
+    if (actionStatus) {
+      const label = state.run.label || actionLabel(state.run.action);
+      actionStatus.textContent = `${label} ${RUN_COPY[state.run.status] || state.run.status} in ${formatDuration(state.run.duration_ms)}.`;
+    }
+    renderRunState();
+    startRunTicker();
     refreshSnapshot()
       .then(() => {
         fetchSectionDetail("inbox");
@@ -2203,52 +2396,142 @@
       .catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       })
-      .finally(() => {
-        if (sequenceActive) {
-          if (ok && state.queuedActions.length) {
-            runNextQueuedAction();
-            return;
-          }
-          if (actionStatus) {
-            if (fallbackMessage) {
-              actionStatus.textContent = fallbackMessage;
-            } else if (ok) {
-              actionStatus.textContent = `${state.queueName} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s for the final step.`;
-            } else {
-              actionStatus.textContent = `${state.queueName} stopped during ${actionLabel(action)} (exit ${returncode}).`;
-            }
-          }
-          state.queueName = null;
-          state.queueIndex = 0;
-          state.queueTotal = 0;
-          state.queuedActions = [];
-          updateActionOutputState(true);
-          setActionButtonsDisabled(false);
-          startPolling();
-          return;
-        }
+      .finally(() => startPolling());
+  }
 
-        updateActionOutputState(true);
-        setActionButtonsDisabled(false);
-        if (actionStatus) {
-          if (fallbackMessage) {
-            actionStatus.textContent = fallbackMessage;
-          } else {
-            actionStatus.textContent = ok
-              ? `${actionLabel(action)} finished in ${Math.max(1, Math.round((durationMs || 0) / 1000))}s.`
-              : `${actionLabel(action)} failed (exit ${returncode}).`;
-          }
-        }
-        startPolling();
+  async function checkActiveRun() {
+    try {
+      const response = await fetch("/api/jobs/active");
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (payload.active_job && payload.active_job.job_id !== state.run?.job_id) {
+        attachToRun(payload.active_job, { offset: 0, resumed: true });
+        return;
+      }
+      state.externalLock = payload.external_lock || null;
+      renderRunState();
+    } catch (_) {
+      // Server unreachable; polling will surface it.
+    }
+  }
+
+  async function runAction(action, overrides = {}) {
+    if (!actionEndpoint) return;
+    if (isRunActive()) {
+      showToast(`${state.run.label || actionLabel(state.run.action)} is still running. Cancel it first or wait.`);
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set("action", action);
+    params.set("year", action === "daily_sweep" ? "" : yearInput?.value || "");
+    params.set("limit", limitInput?.value || "");
+    params.set("document_id", "");
+    Object.entries(overrides).forEach(([key, value]) => params.set(key, String(value ?? "")));
+    if (actionStatus) actionStatus.textContent = `Starting ${actionLabel(action)}...`;
+    const response = await postForm(actionEndpoint, params);
+    const result = await response.json();
+    if (response.status === 409 && result.active_job) {
+      attachToRun(result.active_job, { offset: 0, resumed: true });
+      showToast(`${result.active_job.label || actionLabel(result.active_job.action)} was already running, so you are following it now.`);
+      return;
+    }
+    if (response.status === 409 && result.external_lock) {
+      state.externalLock = result.external_lock;
+      renderRunState();
+      throw new Error(
+        `A pipeline command started outside the dashboard is running (${result.external_lock.command || "unknown"}). Try again when it finishes.`
+      );
+    }
+    if (!response.ok) {
+      throw new Error(result.error || `Action start failed: ${response.status}`);
+    }
+    state.run = null;
+    attachToRun(result);
+  }
+
+  async function cancelRun() {
+    if (!isRunActive()) return;
+    const response = await postForm("/api/jobs/cancel", { job_id: state.run.job_id });
+    if (response.ok) {
+      state.run.cancel_requested = true;
+      if (actionStatus) actionStatus.textContent = "Cancelling: the current step is being asked to stop cleanly.";
+      renderRunState();
+    }
+  }
+
+  function showToast(message, action) {
+    if (!toastRegion) return;
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.setAttribute("role", "status");
+    const text = document.createElement("span");
+    text.textContent = message;
+    toast.appendChild(text);
+    if (action) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghostButton miniButton toastAction";
+      button.textContent = action.label;
+      button.addEventListener("click", () => {
+        toast.remove();
+        action.run();
       });
+      toast.appendChild(button);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toastClose";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", () => toast.remove());
+    toast.appendChild(close);
+    toastRegion.appendChild(toast);
+    window.setTimeout(() => toast.classList.add("toastLeaving"), action ? 9000 : 5000);
+    window.setTimeout(() => toast.remove(), action ? 9400 : 5400);
+  }
+
+  async function updateReviewStatus(reviewItemIds, status, { label = "", previousStatus = "open", isUndo = false } = {}) {
+    const ids = Array.isArray(reviewItemIds) ? reviewItemIds.filter(Boolean) : [reviewItemIds].filter(Boolean);
+    const response = await postForm(reviewEndpoint, {
+      review_item_id: ids[0] || "",
+      review_item_ids: ids.join(","),
+      status,
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || `Review update failed: ${response.status}`);
+    }
+    state._sectionLoaded.review = false;
+    await refreshSnapshot();
+    await fetchSectionDetail("review");
+    const count = result.updated_count || ids.length;
+    const noun = `${count} item${count === 1 ? "" : "s"}`;
+    if (isUndo) {
+      showToast(`Restored ${noun}${label ? ` for ${label}` : ""} to ${status}.`);
+      return;
+    }
+    const verb = { resolved: "Resolved", snoozed: "Snoozed", open: "Reopened" }[status] || `Set to ${status}:`;
+    const until = status === "snoozed" ? " for 14 days" : "";
+    showToast(`${verb} ${noun}${label ? ` · ${label}` : ""}${until}.`, {
+      label: "Undo",
+      run: () =>
+        updateReviewStatus(ids, previousStatus, { label, isUndo: true }).catch((error) => {
+          if (actionStatus) actionStatus.textContent = error.message;
+        }),
+    });
   }
 
   if (search) {
-    search.addEventListener("input", render);
+    let searchHandle = null;
+    search.addEventListener("input", () => {
+      window.clearTimeout(searchHandle);
+      searchHandle = window.setTimeout(render, 120);
+    });
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && !state.activeJobId) {
       refreshSnapshot().catch(() => {});
+      checkActiveRun();
       startPolling();
     } else {
       stopPolling();
@@ -2279,11 +2562,53 @@
     retryActionButton.addEventListener("click", () => {
       const item = state.lastFailedHistory;
       if (!item) return;
-      runAction(item.action, item.params || {}).catch((error) => {
+      const { action: _ignored, ...params } = item.params || {};
+      runAction(item.action, params).catch((error) => {
         if (actionStatus) actionStatus.textContent = error.message;
       });
     });
   }
+
+  if (cancelRunButton) {
+    cancelRunButton.addEventListener("click", () => {
+      cancelRun().catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+    });
+  }
+
+  if (retryStepsButton) {
+    retryStepsButton.addEventListener("click", () => {
+      const run = state.run;
+      if (!run) return;
+      const isSequence = Boolean((bootstrap.runSequences || {})[run.action]);
+      const overrides = isSequence ? { steps: unfinishedStepActions(run).join(",") } : { ...(run.params || {}) };
+      delete overrides.action;
+      runAction(run.action, overrides).catch((error) => {
+        if (actionStatus) actionStatus.textContent = error.message;
+      });
+    });
+  }
+
+  document.querySelector(".viewTabs")?.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = Array.from(document.querySelectorAll(".viewTab"));
+    const current = tabs.indexOf(document.activeElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const next =
+      event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    tabs[next].focus();
+    switchView(tabs[next].dataset.view);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const card = event.target.closest?.("[data-ticker][tabindex], .clickableCard[tabindex]");
+    if (!card || card !== event.target) return;
+    event.preventDefault();
+    card.click();
+  });
 
   document.querySelectorAll(".actionButton").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2296,6 +2621,9 @@
   document.addEventListener("click", (event) => {
     const viewTarget = event.target.closest("[data-view]");
     if (viewTarget) {
+      if (viewTarget === runPill) {
+        state.subviews.ops = "run";
+      }
       switchView(viewTarget.dataset.view);
       return;
     }
@@ -2306,6 +2634,7 @@
       const target = subviewTarget.dataset.subviewTarget;
       if (scope && target) {
         state.subviews[scope] = target;
+        saveViewPrefs();
         applySubviewVisibility();
         render();
       }
@@ -2318,11 +2647,7 @@
       const ticker = starTarget.dataset.starTicker || "";
       const isStarred = starTarget.classList.contains("starred");
       const action = isStarred ? "remove" : "add";
-      fetch("/api/watchlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body: `ticker=${encodeURIComponent(ticker)}&action=${encodeURIComponent(action)}`,
-      })
+      postForm("/api/watchlist", { ticker, action })
         .then((r) => r.json())
         .then((result) => {
           data.watchlist = result.tickers || [];
@@ -2353,7 +2678,8 @@
         fetchCompanyDetail(state.selectedTicker);
       }
       switchView("company");
-      companyOverview?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      companyOverview?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
       return;
     }
 
@@ -2379,11 +2705,7 @@
     if (saveOverrideTarget && state.selectedTicker) {
       const select = document.getElementById("fyeOverrideMonth");
       const month = select ? select.value : "";
-      fetch(companyOverrideEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body: `ticker=${encodeURIComponent(state.selectedTicker)}&month=${encodeURIComponent(month)}`,
-      })
+      postForm(companyOverrideEndpoint, { ticker: state.selectedTicker, month })
         .then((r) => r.json())
         .then(() => Promise.all([refreshSnapshot(), fetchCompanyDetail(state.selectedTicker)]))
         .then(() => render())
@@ -2395,11 +2717,7 @@
 
     const clearOverrideTarget = event.target.closest("[data-fye-clear]");
     if (clearOverrideTarget && state.selectedTicker) {
-      fetch(companyOverrideEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body: `ticker=${encodeURIComponent(state.selectedTicker)}&clear=1`,
-      })
+      postForm(companyOverrideEndpoint, { ticker: state.selectedTicker, clear: "1" })
         .then((r) => r.json())
         .then(() => Promise.all([refreshSnapshot(), fetchCompanyDetail(state.selectedTicker)]))
         .then(() => render())
@@ -2411,15 +2729,24 @@
 
     const reviewTarget = event.target.closest("[data-review-ids]");
     if (reviewTarget) {
-      updateReviewStatus((reviewTarget.dataset.reviewIds || "").split(",").filter(Boolean), reviewTarget.dataset.reviewStatus || "").catch((error) => {
+      reviewTarget.disabled = true;
+      updateReviewStatus((reviewTarget.dataset.reviewIds || "").split(",").filter(Boolean), reviewTarget.dataset.reviewStatus || "", {
+        label: reviewTarget.dataset.reviewLabel || "",
+        previousStatus: reviewTarget.dataset.reviewFrom || "open",
+      }).catch((error) => {
+        reviewTarget.disabled = false;
         if (actionStatus) actionStatus.textContent = error.message;
+        showToast(`Could not update the review group: ${error.message}`);
       });
     }
   });
 
   startPolling();
-  switchView("home");
+  loadViewPrefs();
+  switchView(state.activeView || "home");
   render();
+  renderRunState();
+  checkActiveRun();
 
   // Lazy-load detail sections after initial render so the page is interactive
   // before heavy queries complete. The initial HTML render bootstraps issuers

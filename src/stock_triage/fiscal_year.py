@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
 
 from .config import Config
+
+# Months between the end of each reporting period and the fiscal year end.
+FISCAL_PERIOD_MONTHS_BEFORE_YEAR_END = {"Q1": 9, "H1": 6, "Q3": 3, "Annual": 0}
+# IDX financial-report ``periode`` codes (TW = triwulan, quarter).
+IDX_REPORT_PERIODS = {"tw1": "Q1", "tw2": "H1", "tw3": "Q3", "audit": "Annual"}
+
+
+def month_end(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def fiscal_period_end(fiscal_year: int, fiscal_period: str, fiscal_year_end_month: int) -> date:
+    """Period end for ``fiscal_period`` of the fiscal year ending in ``fiscal_year``."""
+    year_end_index = fiscal_year * 12 + (fiscal_year_end_month - 1)
+    month_index = year_end_index - FISCAL_PERIOD_MONTHS_BEFORE_YEAR_END[fiscal_period]
+    return month_end(month_index // 12, month_index % 12 + 1)
 
 
 def load_fiscal_year_overrides(path: Path) -> dict[str, int]:

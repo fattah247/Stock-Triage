@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from stock_triage.__main__ import main
 from stock_triage.db import WriterQueue, connect, configure_pragmas, run_migrations
 from stock_triage.extract import load_extract_status, run_extract
-from stock_triage.extract.pipeline import _derive_financial_metrics
+from stock_triage.extract.pipeline import EXTRACTOR_VERSION, _derive_financial_metrics
 from stock_triage.parse import load_parse_status
 
 
@@ -66,7 +66,7 @@ def test_run_extract_persists_financial_metrics_and_evidence(tmp_config):
         ).fetchone()
         assert doc["process_state"] == "extracted"
         assert doc["process_error_code"] is None
-        assert doc["pipeline_version"] == "phase5-v2"
+        assert doc["pipeline_version"] == EXTRACTOR_VERSION
 
         metrics = rconn.execute(
             """
@@ -802,3 +802,152 @@ def test_derive_financial_metrics_handles_missing_debt_leg():
 
     net_debt = next(metric for metric in derived if metric.metric_name == "net_debt")
     assert net_debt.value_normalized == 150.0
+
+
+_HIGHLIGHTS_CHUNK = (
+    0,
+    3,
+    None,
+    "Ikhtisar Data Keuangan Financial Highlights\n"
+    "Pendapatan 1,250,000 Revenue\n"
+    "JUMLAH ASET 9,500,000 TOTAL ASSETS\n"
+    "JUMLAH LIABILITAS 4,100,000 TOTAL LIABILITIES\n"
+    "Ekuitas 5,400,000 Equity\n"
+    "Comparative balance sheet as of December 31, 2025\n",
+)
+
+
+def _metric_periods(tmp_config, document_id: str) -> dict[str, tuple[int | None, str, str | None]]:
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        rows = rconn.execute(
+            "SELECT metric_name, fiscal_year, fiscal_period, period_end_date FROM metric_items WHERE document_id = ?",
+            (document_id,),
+        ).fetchall()
+    finally:
+        rconn.close()
+    return {row["metric_name"]: (row["fiscal_year"], row["fiscal_period"], row["period_end_date"]) for row in rows}
+
+
+def test_run_extract_labels_interim_statements_with_their_quarter(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-q1",
+        document_type="financial_statement",
+        ticker="ABCD",
+        raw_metadata={"report_year": "2026", "requested_period": "tw1", "report_period": "TW1"},
+        title="FinancialStatement-2026-I-ABCD.pdf",
+        chunks=[_HIGHLIGHTS_CHUNK],
+    )
+
+    run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    # The quoted prior year-end must not override the reporting year.
+    assert _metric_periods(tmp_config, document_id)["revenue"] == (2026, "Q1", "2026-03-31")
+
+
+def test_run_extract_uses_the_issuers_fiscal_year_end(tmp_config):
+    from stock_triage.fiscal_year import save_fiscal_year_override
+
+    save_fiscal_year_override(tmp_config.company_overrides.definition_path, ticker="TAMU", month=6)
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-fy-june",
+        document_type="financial_statement",
+        ticker="TAMU",
+        raw_metadata={"report_year": "2025", "report_period": "Audit"},
+        title="FinancialStatement-2025-Tahunan-TAMU.pdf",
+        chunks=[(0, 3, None, _HIGHLIGHTS_CHUNK[3].replace("as of December 31, 2025", ""))],
+    )
+
+    run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    assert _metric_periods(tmp_config, document_id)["revenue"] == (2025, "Annual", "2025-06-30")
+
+
+def test_run_extract_falls_back_to_the_idx_file_name_for_the_period(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-h1",
+        document_type="financial_statement",
+        ticker="ABCD",
+        raw_metadata={
+            "report_year": "2026",
+            "file_path": "/Laporan Keuangan Tahun 2026/TW2/ABCD/FinancialStatement-2026-II-ABCD.pdf",
+        },
+        title=None,
+        chunks=[_HIGHLIGHTS_CHUNK],
+    )
+
+    run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    assert _metric_periods(tmp_config, document_id)["revenue"] == (2026, "H1", "2026-06-30")
+
+
+def test_run_extract_records_the_reporting_currency_from_statement_headers(tmp_config):
+    statements = {
+        "fin-idr": ("(Expressed in millions of Rupiah, unless otherwise stated)", "IDR"),
+        "fin-usd": ("(Expressed in United States Dollar, unless otherwise stated)", "USD"),
+        "fin-unknown": ("", None),
+        # The explicit IDX field wins over a passing mention of USD transactions.
+        "fin-field": ("Mata uang pelaporan Rupiah / IDR\nTransaksi dalam dolar AS dicatat", "IDR"),
+    }
+    document_ids = {
+        record_id: _insert_parsed_document(
+            tmp_config,
+            source_name="idx_financial_reports",
+            source_record_id=record_id,
+            document_type="financial_statement",
+            ticker="ABCD",
+            raw_metadata={"report_year": "2025", "report_period": "Audit"},
+            title=f"FinancialStatement-2025-Tahunan-{record_id}.pdf",
+            chunks=[(0, 3, None, header + "\n" + _HIGHLIGHTS_CHUNK[3])],
+        )
+        for record_id, (header, _) in statements.items()
+    }
+
+    run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        for record_id, (_, expected) in statements.items():
+            currencies = {
+                row["currency"]
+                for row in rconn.execute(
+                    "SELECT currency FROM metric_items WHERE document_id = ?", (document_ids[record_id],)
+                )
+            }
+            assert currencies == {expected}, record_id
+    finally:
+        rconn.close()
+
+
+def test_run_extract_keeps_the_explicit_usd_of_operating_profit_guidance(tmp_config):
+    document_id = _insert_parsed_document(
+        tmp_config,
+        source_name="idx_financial_reports",
+        source_record_id="fin-guidance",
+        document_type="annual_report",
+        ticker="ABCD",
+        raw_metadata={"report_year": "2025"},
+        title="Annual & Sustainability Report 2025",
+        chunks=[
+            (0, 3, None, "(Dalam jutaan Rupiah)\n" + _HIGHLIGHTS_CHUNK[3]),
+            (1, 9, None, "Laba Usaha 1,42 juta USD/Million USD\nOperating Profit"),
+        ],
+    )
+
+    run_extract(tmp_config, source_name="idx_financial_reports", limit=10)
+
+    rconn = connect(tmp_config.paths.db_path, read_only=True)
+    try:
+        currencies = dict(
+            rconn.execute("SELECT metric_name, currency FROM metric_items WHERE document_id = ?", (document_id,)).fetchall()
+        )
+    finally:
+        rconn.close()
+    assert currencies["revenue"] == "IDR"
+    assert currencies["operating_profit"] == "USD"

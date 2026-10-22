@@ -6,14 +6,16 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from ..config import Config
-from ..db import WriterQueue, connect, configure_pragmas, run_migrations
+from ..db import WriterQueue, connect, configure_pragmas, release_evidence_spans, run_migrations
+from ..fiscal_year import IDX_REPORT_PERIODS, fiscal_period_end, resolve_fiscal_year_end_month
 
-EXTRACTOR_VERSION = "phase5-v2"
+EXTRACTOR_VERSION = "phase5-v3"
 FINANCIAL_REQUIRED_METRICS = {
     "revenue",
     "gross_profit",
@@ -54,6 +56,7 @@ class ExtractDocument:
     process_state: str
     raw_metadata: dict[str, Any]
     title: str | None
+    fiscal_year_end_month: int | None = None
 
 
 @dataclass(frozen=True)
@@ -184,8 +187,15 @@ def run_extract(
             for document in documents:
                 started_at = datetime.now(timezone.utc)
                 chunks = _load_chunks(reader, document.document_id)
+                fiscal_year_end_month = (
+                    resolve_fiscal_year_end_month(
+                        reader, cfg, ticker=document.ticker, stored_month=document.fiscal_year_end_month
+                    )[0]
+                    if document.ticker
+                    else 12
+                )
                 try:
-                    extracted = _extract_document(document, chunks)
+                    extracted = _extract_document(document, chunks, fiscal_year_end_month=fiscal_year_end_month)
                 except ExtractionError as exc:
                     finished_at = datetime.now(timezone.utc)
                     wq.submit(
@@ -359,11 +369,13 @@ def _select_documents(
                 d.parser_version,
                 d.process_state,
                 dc.raw_metadata,
-                dc.title
+                dc.title,
+                c.fiscal_year_end_month
             FROM documents d
             LEFT JOIN document_candidates dc
               ON dc.source_name = d.source_name
              AND dc.source_record_id = d.source_record_id
+            LEFT JOIN companies c ON c.ticker = d.ticker
             WHERE d.document_id = ?
             LIMIT 1
             """,
@@ -380,6 +392,7 @@ def _select_documents(
                 process_state=row["process_state"],
                 raw_metadata=json.loads(row["raw_metadata"]) if row["raw_metadata"] else {},
                 title=row["title"],
+                fiscal_year_end_month=row["fiscal_year_end_month"],
             )
             for row in rows
         ]
@@ -400,11 +413,13 @@ def _select_documents(
             d.parser_version,
             d.process_state,
             dc.raw_metadata,
-            dc.title
+            dc.title,
+            c.fiscal_year_end_month
         FROM documents d
         LEFT JOIN document_candidates dc
           ON dc.source_name = d.source_name
          AND dc.source_record_id = d.source_record_id
+        LEFT JOIN companies c ON c.ticker = d.ticker
         WHERE d.process_state IN ({placeholders})
     """
     params: list[object] = list(states)
@@ -425,6 +440,7 @@ def _select_documents(
             process_state=row["process_state"],
             raw_metadata=json.loads(row["raw_metadata"]) if row["raw_metadata"] else {},
             title=row["title"],
+            fiscal_year_end_month=row["fiscal_year_end_month"],
         )
         for row in rows
     ]
@@ -454,7 +470,12 @@ def _load_chunks(conn: sqlite3.Connection, document_id: str) -> list[ChunkText]:
     ]
 
 
-def _extract_document(document: ExtractDocument, chunks: list[ChunkText]) -> ExtractResult:
+def _extract_document(
+    document: ExtractDocument,
+    chunks: list[ChunkText],
+    *,
+    fiscal_year_end_month: int = 12,
+) -> ExtractResult:
     if not chunks:
         raise ExtractionError("missing_chunks", f"No parsed chunks for {document.document_id}")
 
@@ -462,7 +483,7 @@ def _extract_document(document: ExtractDocument, chunks: list[ChunkText]) -> Ext
     events: list[ExtractedEvent] = []
 
     if document.source_name == "idx_financial_reports":
-        metrics.extend(_extract_financial_metrics(document, chunks))
+        metrics.extend(_extract_financial_metrics(document, chunks, fiscal_year_end_month=fiscal_year_end_month))
         events.extend(_extract_financial_events(document, chunks))
     if document.source_name == "idx_disclosures":
         events.extend(_extract_disclosure_events(document, chunks))
@@ -488,9 +509,19 @@ def _extract_document(document: ExtractDocument, chunks: list[ChunkText]) -> Ext
     return ExtractResult(metrics=metrics, events=events, status=status, error_code=error_code)
 
 
-def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText]) -> list[ExtractedMetric]:
-    fiscal_year = _infer_fiscal_year(document, chunks)
-    period_end_date = f"{fiscal_year}-12-31" if fiscal_year is not None else None
+def _extract_financial_metrics(
+    document: ExtractDocument,
+    chunks: list[ChunkText],
+    *,
+    fiscal_year_end_month: int,
+) -> list[ExtractedMetric]:
+    fiscal_period = _infer_fiscal_period(document)
+    fiscal_year = _infer_fiscal_year(document, chunks, fiscal_period=fiscal_period)
+    period_end_date = (
+        fiscal_period_end(fiscal_year, fiscal_period, fiscal_year_end_month).isoformat()
+        if fiscal_year is not None
+        else None
+    )
     audit_status = "audited" if document.document_type == "annual_report" else None
     consolidation_scope = "consolidated"
     language_variant = _language_variant(chunks)
@@ -502,6 +533,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
         for metric in _extract_financial_highlight_chunk(
             chunk,
             fiscal_year=fiscal_year,
+            fiscal_period=fiscal_period,
             period_end_date=period_end_date,
             audit_status=audit_status,
             consolidation_scope=consolidation_scope,
@@ -512,6 +544,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
         metric = _extract_operating_cash_flow(
             chunk,
             fiscal_year=fiscal_year,
+            fiscal_period=fiscal_period,
             period_end_date=period_end_date,
             audit_status=audit_status,
             consolidation_scope=consolidation_scope,
@@ -523,6 +556,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
         for metric in _extract_optional_financial_metrics(
             chunk,
             fiscal_year=fiscal_year,
+            fiscal_period=fiscal_period,
             period_end_date=period_end_date,
             audit_status=audit_status,
             consolidation_scope=consolidation_scope,
@@ -534,6 +568,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
             _extract_segment_metrics(
                 chunk,
                 fiscal_year=fiscal_year,
+                fiscal_period=fiscal_period,
                 period_end_date=period_end_date,
                 audit_status=audit_status,
                 language_variant=language_variant,
@@ -544,7 +579,7 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
             metric = _extract_operating_profit_guidance(
                 chunk,
                 fiscal_year=fiscal_year,
-                period_end_date=period_end_date,
+                fiscal_year_end_month=fiscal_year_end_month,
                 audit_status=audit_status,
                 consolidation_scope=consolidation_scope,
                 language_variant=language_variant,
@@ -553,13 +588,15 @@ def _extract_financial_metrics(document: ExtractDocument, chunks: list[ChunkText
                 out[metric.metric_name] = metric
     for metric in _derive_financial_metrics(out):
         out.setdefault(metric.metric_name, metric)
-    return list(out.values()) + segment_metrics
+    currency = _infer_reporting_currency(chunks)
+    return [replace(metric, currency=metric.currency or currency) for metric in [*out.values(), *segment_metrics]]
 
 
 def _extract_financial_highlight_chunk(
     chunk: ChunkText,
     *,
     fiscal_year: int | None,
+    fiscal_period: str,
     period_end_date: str | None,
     audit_status: str | None,
     consolidation_scope: str | None,
@@ -591,10 +628,10 @@ def _extract_financial_highlight_chunk(
                 metric_name=metric_name,
                 value_normalized=_parse_number(raw),
                 raw_value_text=raw,
-                currency="USD",
+                currency=None,
                 unit_scale="units",
                 fiscal_year=fiscal_year,
-                fiscal_period="Annual",
+                fiscal_period=fiscal_period,
                 period_end_date=period_end_date,
                 audit_status=audit_status,
                 consolidation_scope=consolidation_scope,
@@ -612,6 +649,7 @@ def _extract_operating_cash_flow(
     chunk: ChunkText,
     *,
     fiscal_year: int | None,
+    fiscal_period: str,
     period_end_date: str | None,
     audit_status: str | None,
     consolidation_scope: str | None,
@@ -635,10 +673,10 @@ def _extract_operating_cash_flow(
             metric_name="operating_cash_flow",
             value_normalized=value,
             raw_value_text=raw,
-            currency="USD",
+            currency=None,
             unit_scale="units",
             fiscal_year=fiscal_year,
-            fiscal_period="Annual",
+            fiscal_period=fiscal_period,
             period_end_date=period_end_date,
             audit_status=audit_status,
             consolidation_scope=consolidation_scope,
@@ -655,12 +693,11 @@ def _extract_operating_profit_guidance(
     chunk: ChunkText,
     *,
     fiscal_year: int | None,
-    period_end_date: str | None,
+    fiscal_year_end_month: int,
     audit_status: str | None,
     consolidation_scope: str | None,
     language_variant: str,
 ) -> ExtractedMetric | None:
-    del period_end_date
     matches = list(re.finditer(r"Laba Usaha\s+(\(?[\d\.,]+\)?)\s+juta USD", chunk.text, flags=re.IGNORECASE))
     if not matches:
         return None
@@ -670,11 +707,15 @@ def _extract_operating_profit_guidance(
         metric_name="operating_profit",
         value_normalized=_parse_number(raw) * 1_000_000,
         raw_value_text=raw,
-        currency="USD",
+        currency="USD",  # the guidance pattern matches "juta USD"
         unit_scale="million",
         fiscal_year=fiscal_year + 1 if fiscal_year is not None else None,
         fiscal_period="Annual",
-        period_end_date=f"{fiscal_year + 1}-12-31" if fiscal_year is not None else None,
+        period_end_date=(
+            fiscal_period_end(fiscal_year + 1, "Annual", fiscal_year_end_month).isoformat()
+            if fiscal_year is not None
+            else None
+        ),
         audit_status=None,
         consolidation_scope=consolidation_scope,
         language_variant=language_variant,
@@ -689,6 +730,7 @@ def _extract_optional_financial_metrics(
     chunk: ChunkText,
     *,
     fiscal_year: int | None,
+    fiscal_period: str,
     period_end_date: str | None,
     audit_status: str | None,
     consolidation_scope: str | None,
@@ -725,10 +767,10 @@ def _extract_optional_financial_metrics(
                 metric_name=metric_name,
                 value_normalized=_parse_number(raw),
                 raw_value_text=raw,
-                currency="USD",
+                currency=None,
                 unit_scale="units",
                 fiscal_year=fiscal_year,
-                fiscal_period="Annual",
+                fiscal_period=fiscal_period,
                 period_end_date=period_end_date,
                 audit_status=audit_status,
                 consolidation_scope=consolidation_scope,
@@ -746,6 +788,7 @@ def _extract_segment_metrics(
     chunk: ChunkText,
     *,
     fiscal_year: int | None,
+    fiscal_period: str,
     period_end_date: str | None,
     audit_status: str | None,
     language_variant: str,
@@ -785,10 +828,10 @@ def _extract_segment_metrics(
                     metric_name=metric_name,
                     value_normalized=_parse_number(raw),
                     raw_value_text=raw,
-                    currency="USD",
+                    currency=None,
                     unit_scale="units",
                     fiscal_year=fiscal_year,
-                    fiscal_period="Annual",
+                    fiscal_period=fiscal_period,
                     period_end_date=period_end_date,
                     audit_status=audit_status,
                     consolidation_scope=f"segment:{segment_name}",
@@ -1232,7 +1275,7 @@ def _persist_extraction_success(
     now = finished_at.isoformat()
     conn.execute("DELETE FROM metric_items WHERE document_id = ?", (document.document_id,))
     conn.execute("DELETE FROM events WHERE document_id = ?", (document.document_id,))
-    conn.execute("DELETE FROM evidence_spans WHERE document_id = ?", (document.document_id,))
+    release_evidence_spans(conn, document.document_id)
 
     metrics_extracted = 0
     events_detected = 0
@@ -1443,7 +1486,30 @@ def _parse_number(raw: str) -> float:
     return -value if negative else value
 
 
-def _infer_fiscal_year(document: ExtractDocument, chunks: list[ChunkText]) -> int | None:
+_STATEMENT_FILE_PERIOD = re.compile(r"financialstatement-\d{4}-(iii|ii|i|tahunan)-", re.IGNORECASE)
+_STATEMENT_FILE_PERIODS = {"i": "Q1", "ii": "H1", "iii": "Q3", "tahunan": "Annual"}
+
+
+def _infer_fiscal_period(document: ExtractDocument) -> str:
+    if document.document_type == "annual_report":
+        return "Annual"
+    for key in ("requested_period", "report_period"):
+        period = IDX_REPORT_PERIODS.get(str(document.raw_metadata.get(key) or "").strip().lower())
+        if period is not None:
+            return period
+    names = f"{document.raw_metadata.get('file_path') or ''} {document.title or ''}"
+    match = _STATEMENT_FILE_PERIOD.search(names)
+    if match is not None:
+        return _STATEMENT_FILE_PERIODS[match.group(1).lower()]
+    return "Annual"
+
+
+def _infer_fiscal_year(document: ExtractDocument, chunks: list[ChunkText], *, fiscal_period: str) -> int | None:
+    report_year = _coerce_int(document.raw_metadata.get("report_year"))
+    if fiscal_period != "Annual" and report_year is not None:
+        # Interim statements quote the prior year-end balance sheet, which the
+        # text patterns below would mistake for the reporting year.
+        return report_year
     samples = [document.title or ""]
     samples.extend(chunk.text[:600] for chunk in chunks[:20])
     patterns = [
@@ -1457,12 +1523,38 @@ def _infer_fiscal_year(document: ExtractDocument, chunks: list[ChunkText]) -> in
             match = re.search(pattern, sample, flags=re.IGNORECASE | re.DOTALL)
             if match is not None:
                 return int(match.group(1))
-    year = _coerce_int(document.raw_metadata.get("report_year"))
-    if year is None:
+    if report_year is None:
         return None
     if document.document_type == "annual_report":
-        return year - 1
-    return year
+        return report_year - 1
+    return report_year
+
+
+# IDX's standardized statements carry an explicit reporting-currency field.
+_REPORTING_CURRENCY_FIELD = re.compile(r"mata uang pelaporan[^/\n]{0,40}/\s*(IDR|USD)\b", re.IGNORECASE)
+_REPORTING_CURRENCY_PATTERNS = (
+    (re.compile(r"expressed in (?:(?:millions|thousands|billions) of )?(?:indonesian )?rupiah", re.IGNORECASE), "IDR"),
+    (
+        re.compile(r"expressed in (?:(?:millions|thousands|billions) of )?(?:united states|us|u\.s\.) dollars?", re.IGNORECASE),
+        "USD",
+    ),
+    (re.compile(r"\bdalam (?:jutaan |ribuan |miliaran )?(?:rupiah|rp)\b", re.IGNORECASE), "IDR"),
+    (re.compile(r"\bdalam (?:jutaan |ribuan |miliaran )?dolar (?:amerika serikat|as)\b", re.IGNORECASE), "USD"),
+)
+
+
+def _infer_reporting_currency(chunks: list[ChunkText]) -> str | None:
+    """Currency of the statements: the explicit IDX field, else the majority of
+    "expressed in ..." / "(dalam jutaan Rupiah)" headers, else unknown."""
+    counts: Counter[str] = Counter()
+    for chunk in chunks:
+        field = _REPORTING_CURRENCY_FIELD.search(chunk.text)
+        if field is not None:
+            return field.group(1).upper()
+        for pattern, currency in _REPORTING_CURRENCY_PATTERNS:
+            if matches := len(pattern.findall(chunk.text)):
+                counts[currency] += matches
+    return counts.most_common(1)[0][0] if counts else None
 
 
 def _looks_like_attachment_notice(document: ExtractDocument, chunks: list[ChunkText]) -> bool:
