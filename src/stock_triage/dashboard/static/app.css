@@ -440,21 +440,16 @@ section.workspaceHeader.viewVisible {
   align-items: start;
 }
 
-body[data-active-view="review"] .workspace,
-body[data-active-view="ops"] .workspace,
-body[data-active-view="market"] .workspace {
+body:not([data-active-view="home"]):not([data-active-view="company"]) .workspace {
   grid-template-columns: 1fr;
 }
 
-body[data-active-view="review"] .statusStrip,
-body[data-active-view="ops"] .statusStrip,
-body[data-active-view="market"] .statusStrip {
+/* The filing pipeline's counters belong to the filing views. */
+body:not([data-active-view="home"]):not([data-active-view="company"]) .statusStrip {
   display: none;
 }
 
-body[data-active-view="review"] [data-shell="rail"],
-body[data-active-view="ops"] [data-shell="rail"],
-body[data-active-view="market"] [data-shell="rail"] {
+body:not([data-active-view="home"]):not([data-active-view="company"]) [data-shell="rail"] {
   display: none;
 }
 
@@ -2466,4 +2461,1222 @@ body[data-active-view="market"] [data-shell="rail"] {
   .runStep.step-running .runStepGlyph {
     color: var(--accent);
   }
+}
+
+/* --- app bar and tabs ---------------------------------------------------- */
+
+.appBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.appBrand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.appBrand strong {
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.appMeta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appSearch {
+  flex: 0 1 360px;
+  min-width: 0;
+}
+
+.appSearch input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.appSearch input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.viewTabDivider {
+  width: 1px;
+  align-self: stretch;
+  margin: 10px 6px;
+  background: var(--line-strong);
+  flex: none;
+}
+
+.viewTab.viewTabMinor {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.viewTab.viewTabMinor.active {
+  font-weight: 600;
+}
+
+/* --- decision views (static/decide.js) ---------------------------------- */
+
+.dPage {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.dCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.dCardHead h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.dLead,
+.dCardHead p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dTitle {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+
+.dEyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dMuted {
+  color: var(--muted);
+}
+
+.dFoot {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dPad {
+  padding: 8px 2px;
+}
+
+.dSub {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.dCard h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink-2);
+}
+
+.dGrid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.dGrid2.dWideLeft {
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+}
+
+.dGrid2.dTight {
+  gap: 12px;
+}
+
+.dStack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.num,
+.dTable td.num,
+.dKpiValue,
+.dBigNum,
+.dNumValue {
+  font-variant-numeric: tabular-nums;
+}
+
+.up {
+  color: var(--ok);
+}
+
+.down {
+  color: var(--critical);
+}
+
+.dEmpty {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.dEmpty p {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+.dPath {
+  font-family: var(--mono);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.dCode {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-x: auto;
+}
+
+/* KPIs */
+
+.dKpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 20px;
+}
+
+.dKpisCompact {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.dKpiLabel {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.dKpiValue {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin-top: 2px;
+}
+
+.dKpiSub {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* Market strip on the Overview */
+
+.dMarketStrip .dStripHead {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 2fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.dStripTitle {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.dStripState {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.dStripWhy {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+.dState {
+  display: inline-block;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.dState.st-calm {
+  color: var(--ok);
+}
+
+.dState.st-elevated {
+  color: var(--warning);
+}
+
+.dState.st-stressed {
+  color: var(--serious);
+}
+
+.dState.st-crisis {
+  color: var(--critical);
+}
+
+.dLinkButton {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 13.5px;
+  font-weight: 550;
+  justify-self: start;
+}
+
+.dLinkButton:hover {
+  text-decoration: underline;
+}
+
+.dLinkButton:focus-visible,
+.dTicker:focus-visible,
+.dSort:focus-visible,
+.dBack:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Tables */
+
+.dTableWrap {
+  min-width: 0;
+}
+
+.dTableScroll {
+  overflow-x: auto;
+}
+
+.dTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.dTable th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+
+.dTable th.num {
+  text-align: right;
+}
+
+.dSort {
+  all: unset;
+  cursor: pointer;
+}
+
+.dSort:hover {
+  color: var(--ink);
+}
+
+.dSortMark {
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.dTable td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.dTable td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dTable tr.isClickable {
+  cursor: pointer;
+}
+
+.dTable tr.isClickable:hover td {
+  background: var(--surface-2);
+}
+
+.dTable tr.isClickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dTickerCell {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dTicker {
+  all: unset;
+  cursor: pointer;
+  font-weight: 650;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.dTicker:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.dName {
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.dMore {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dMore:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Flags */
+
+.dFlags {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dFlag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dFlag.lvl-risk {
+  color: var(--critical);
+  background: var(--critical-soft);
+  border-color: var(--critical-line);
+}
+
+.dFlag.lvl-watch {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: var(--warning-line);
+}
+
+.dFlag.lvl-note {
+  color: var(--ink-2);
+  background: var(--surface-2);
+}
+
+.dFlagMore {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dFlagList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.dFlagList li {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.dFlagLevel {
+  font-size: 12px;
+  font-weight: 650;
+  padding-top: 1px;
+}
+
+.dFlagList li.lvl-risk .dFlagLevel {
+  color: var(--critical);
+}
+
+.dFlagList li.lvl-watch .dFlagLevel {
+  color: var(--warning);
+}
+
+.dFlagList li.lvl-note .dFlagLevel {
+  color: var(--muted);
+}
+
+/* Scores */
+
+.dScores {
+  display: grid;
+  gap: 10px;
+}
+
+.dScoreRow {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 32px;
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.dScoreLabel {
+  font-size: 13.5px;
+  font-weight: 550;
+}
+
+.dScoreTrack {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.dScoreFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.dScoreMid {
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.dScoreNum {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  font-weight: 600;
+}
+
+.dScoreHint {
+  grid-column: 2 / 4;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.dScoreMini {
+  display: inline-flex;
+  gap: 3px;
+  align-items: flex-end;
+  height: 18px;
+}
+
+.dScoreMiniBar {
+  width: 7px;
+  height: 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+
+.dScoreMiniBar.isEmpty {
+  background: transparent;
+  border-style: dashed;
+}
+
+.dScoreMiniFill {
+  width: 100%;
+  background: var(--accent);
+}
+
+/* Charts */
+
+.dChartWrap {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dChart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.dGrid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.dAxis {
+  fill: var(--muted);
+  font-size: 11px;
+  font-family: var(--font);
+}
+
+.dLine {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.dLine.isPrimary {
+  stroke: var(--accent);
+}
+
+.dLine.isCompare {
+  stroke: var(--muted);
+  stroke-dasharray: 4 3;
+  stroke-width: 1.4;
+}
+
+.dBand {
+  fill: var(--serious-soft);
+  opacity: 0.8;
+}
+
+.dBand.band-crisis {
+  fill: var(--critical-soft);
+  opacity: 0.8;
+}
+
+.dCursor {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.dOverlay {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.dReadout {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+  min-height: 1em;
+}
+
+.dLegend {
+  display: flex;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.dLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dSwatch {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid var(--accent);
+}
+
+.dLegendItem.isCompare .dSwatch {
+  border-top: 2px dashed var(--muted);
+}
+
+.dRange {
+  display: grid;
+  gap: 4px;
+}
+
+.dRangeTrack {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.dRangeMarker {
+  position: absolute;
+  top: -5px;
+  width: 3px;
+  height: 14px;
+  margin-left: -1.5px;
+  background: var(--ink);
+  border-radius: 2px;
+}
+
+.dRangeLabels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dReturns {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dReturn {
+  display: grid;
+  gap: 2px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.dReturn .dMuted {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* Segmented control and filters */
+
+.dSegmented {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  justify-self: start;
+}
+
+.dSegmented button {
+  all: unset;
+  cursor: pointer;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  border-right: 1px solid var(--line);
+}
+
+.dSegmented button:last-child {
+  border-right: none;
+}
+
+.dSegmented button.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.dSegmented button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dScreenHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+}
+
+.dPresets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dPreset {
+  all: unset;
+  cursor: pointer;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.dPreset:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.dPreset.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.dPreset:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dPresetHint {
+  margin: -6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dFilters {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.dInput,
+.dSelect {
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.dInput {
+  min-width: 220px;
+}
+
+.dCheck {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.dTableTools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dCountLine {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Stock page */
+
+.dBack {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 13.5px;
+  font-weight: 550;
+  justify-self: start;
+}
+
+.dStockHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.dStockTicker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dStockTicker h2 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+}
+
+.dStockName {
+  font-size: 15px;
+  color: var(--ink-2);
+  margin-top: 2px;
+}
+
+.dTags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.dTag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.dStockPrice {
+  text-align: right;
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+}
+
+.dBigNum {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.dStar {
+  all: unset;
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.dStar.active {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.dStar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dMarketNote {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--critical-line);
+  background: var(--critical-soft);
+  font-size: 14px;
+}
+
+.dMarketNote .dState {
+  font-size: 14px;
+}
+
+.dNumGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.dNumGroup h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.dNums {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.dNums dt {
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.dNums dt[title] {
+  text-decoration: underline dotted var(--line-strong);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.dNums dd {
+  margin: 0;
+  text-align: right;
+  display: grid;
+  justify-items: end;
+}
+
+.dNumValue {
+  font-weight: 650;
+  font-size: 14.5px;
+}
+
+.dNumSub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* Lists */
+
+.dPlainList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.dPlainList li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.dDate {
+  flex: none;
+  min-width: 92px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+
+.dMovers h4 {
+  margin: 0 0 6px;
+}
+
+.dMoverList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.dMoverList li {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13.5px;
+}
+
+/* Portfolio */
+
+.dMixBar {
+  display: flex;
+  height: 14px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.dMixPart,
+.dMixKey {
+  display: inline-block;
+}
+
+.dMixKey {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.dPlainList li .num {
+  margin-left: auto;
+}
+
+.shade-0 { background: #1f5fbf; }
+.shade-1 { background: #5b86c9; }
+.shade-2 { background: #8eaad6; }
+.shade-3 { background: #4a5568; }
+.shade-4 { background: #7b8494; }
+.shade-5 { background: #aeb5c0; }
+.isCash { background: var(--surface-2); border: 1px solid var(--line-strong); }
+
+.dBigLine {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.45;
+  font-weight: 550;
+}
+
+/* Small screens */
+
+@media (max-width: 1100px) {
+  .dNumGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dGrid2.dWideLeft {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .dGrid2,
+  .dMarketStrip .dStripHead {
+    grid-template-columns: 1fr;
+  }
+
+  .dNumGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .dReturns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dStockPrice {
+    text-align: left;
+    justify-items: start;
+  }
+
+  .dName {
+    display: none;
+  }
+
+  .dInput {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .appSearch {
+    flex: 1 1 100%;
+  }
+}
+
+.dChartHolder {
+  min-width: 0;
+  width: 100%;
+}
+
+.dChartHolder .dChart {
+  width: 100%;
+  height: auto;
+}
+
+.dReadout {
+  visibility: hidden;
+}
+
+/* The global form and button rules are for the filing views; keep the decision
+   views' controls at their own size and without the filled hover. */
+.dFilters .dInput,
+.dFilters .dSelect {
+  width: auto;
+}
+
+.dCheck input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.dLinkButton:hover,
+.dBack:hover,
+.dTicker:hover,
+.dSort:hover,
+.dSegmented button:hover,
+.dPreset:hover {
+  background: none;
+}
+
+.dPreset.active:hover {
+  background: var(--accent);
+}
+
+.dBack:hover {
+  text-decoration: underline;
+}
+
+.dStar:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.dStar.active:hover {
+  background: var(--accent-soft);
+}
+
+.dMore:hover {
+  background: var(--surface);
+}
+
+@media (max-width: 760px) {
+  .dKpis,
+  .dKpisCompact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dKpiValue {
+    font-size: 19px;
+  }
+}
+
+/* Half-width cards: names live in the ticker's tooltip so the numbers fit. */
+.dGrid2 .dTable .dName {
+  display: none;
+}
+
+.dKpisCompact {
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
 }

@@ -47,7 +47,8 @@
     _companyCache: {},        // ticker -> {data, fetchedAt}
     _sectionLoaded: {},       // section -> boolean
     _sectionLoading: {},      // section -> boolean (in-flight guard)
-    activeView: "home",       // current view tab
+    activeView: "overview",   // current view tab
+    stockTicker: null,        // the stock page open in the Stocks view, or null for the screener
     subviews: {
       home: "board",
       company: "summary",
@@ -797,12 +798,14 @@
   }
 
   const VIEW_PREFS_KEY = "stockTriage.viewPrefs.v1";
+  const VIEWS = ["overview", "market", "stocks", "portfolio", "home", "company", "review", "ops"];
 
   function loadViewPrefs() {
     try {
       const prefs = JSON.parse(window.localStorage.getItem(VIEW_PREFS_KEY) || "null");
       if (!prefs || typeof prefs !== "object") return;
-      if (["home", "market", "company", "review", "ops"].includes(prefs.activeView)) state.activeView = prefs.activeView;
+      if (VIEWS.includes(prefs.activeView)) state.activeView = prefs.activeView;
+      if (typeof prefs.stockTicker === "string") state.stockTicker = prefs.stockTicker;
       if (prefs.subviews && typeof prefs.subviews === "object") {
         Object.keys(state.subviews).forEach((scope) => {
           if (typeof prefs.subviews[scope] === "string") state.subviews[scope] = prefs.subviews[scope];
@@ -818,7 +821,12 @@
     try {
       window.localStorage.setItem(
         VIEW_PREFS_KEY,
-        JSON.stringify({ activeView: state.activeView, subviews: state.subviews, selectedTicker: state.selectedTicker })
+        JSON.stringify({
+          activeView: state.activeView,
+          subviews: state.subviews,
+          selectedTicker: state.selectedTicker,
+          stockTicker: state.stockTicker,
+        })
       );
     } catch (_) {
       // Storage unavailable: preferences are not remembered.
@@ -861,9 +869,9 @@
     if (viewTitle && viewLead && viewEyebrow) {
       const copy = {
         home: {
-          eyebrow: "Decision Flow",
-          title: "Start from ranked market decisions, not from raw documents.",
-          lead: "Use Home in three passes: ranked board first, watchlist second, recent changes last.",
+          eyebrow: "Filings",
+          title: "What the companies' own filings say, ranked.",
+          lead: "Stances from the filings the pipeline has read, watchlist urgency and recent changes. For prices, valuation and screening, use Stocks.",
         },
         market: {
           eyebrow: "Market",
@@ -898,11 +906,97 @@
     }
     if (view === "review") fetchSectionDetail("review");
     if (view === "market") fetchMarketView();
+    if (view === "overview" || view === "stocks" || view === "portfolio") fetchDecideView(view);
     if (view === "ops") {
       fetchSectionDetail("ops");
       fetchRerunPreview();
     }
   }
+
+  // Overview, Stocks and Portfolio (static/decide.js, dashboard/stocks.py).
+  const decideCache = {};
+  const decideRequest = {};
+  const DECIDE_HOSTS = { overview: "overviewView", stocks: "stocksView", portfolio: "portfolioView" };
+
+  async function fetchDecideView(view, force = false) {
+    const host = document.getElementById(DECIDE_HOSTS[view]);
+    const decide = window.StockTriageDecide;
+    if (!host || !decide) return;
+    if (!snapshotEndpoint) {
+      host.innerHTML = `<div class="emptyState"><strong>This view needs the live dashboard.</strong> Open it with <code>dashboard-serve</code>.</div>`;
+      return;
+    }
+    // What this request is for, fixed now: a later click must not change how its answer is drawn.
+    const ticker = view === "stocks" ? state.stockTicker : null;
+    let url = view === "overview" ? "/api/overview" : view === "portfolio" ? "/api/portfolio" : "/api/stocks";
+    if (ticker) url = `/api/stock?ticker=${encodeURIComponent(ticker)}`;
+    const draw = (payload) => {
+      if (view === "overview") decide.renderOverview(host, payload);
+      else if (view === "portfolio") decide.renderPortfolio(host, payload);
+      else if (ticker) decide.renderStock(host, payload);
+      else decide.renderStocks(host, payload);
+    };
+    // Every call supersedes the ones still in flight for this view, a cached one included.
+    const token = (decideRequest[view] = (decideRequest[view] || 0) + 1);
+    const current = () => token === decideRequest[view];
+    const cached = decideCache[url];
+    if (cached && !force && Date.now() - cached.at < 5 * 60 * 1000) {
+      host.classList.remove("loading");
+      draw(cached.payload);
+      return;
+    }
+    host.classList.add("loading");
+    try {
+      const response = await fetch(url);
+      if (!current()) return;
+      if (response.status === 404 && ticker) {
+        showToast(`No IDX data for ${ticker}.`);
+        state.stockTicker = null;
+        saveViewPrefs();
+        fetchDecideView("stocks");
+        return;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (!current()) return;
+      decideCache[url] = { at: Date.now(), payload };
+      draw(payload);
+    } catch (error) {
+      if (current()) host.innerHTML = `<div class="emptyState"><strong>Could not load this view.</strong> ${esc(error.message || error)}</div>`;
+    } finally {
+      if (current()) host.classList.remove("loading");
+    }
+  }
+
+  function openStock(ticker) {
+    state.stockTicker = ticker ? String(ticker).trim().toUpperCase() : null;
+    saveViewPrefs();
+    if (state.activeView === "stocks") fetchDecideView("stocks");
+    else switchView("stocks");
+    window.scrollTo({ top: 0 });
+  }
+
+  function openCompany(ticker) {
+    state.selectedTicker = ticker;
+    state.subviews.company = "summary";
+    render();
+    fetchCompanyDetail(ticker);
+    switchView("company");
+    window.scrollTo({ top: 0 });
+  }
+
+  async function toggleWatchlist(ticker) {
+    const upper = String(ticker).toUpperCase();
+    const starred = (data.watchlist || []).some((item) => item.toUpperCase() === upper);
+    const response = await postForm("/api/watchlist", { ticker: upper, action: starred ? "remove" : "add" });
+    const result = await response.json();
+    data.watchlist = result.tickers || [];
+    Object.keys(decideCache).forEach((key) => delete decideCache[key]);
+    render();
+    return data.watchlist.some((item) => item.toUpperCase() === upper);
+  }
+
+  window.StockTriageApp = { openStock, openCompany, toggleWatchlist, switchView };
 
   async function fetchMarketView(force = false) {
     const host = document.getElementById("marketView");
@@ -2929,6 +3023,8 @@
       if (viewTarget === runPill) {
         state.subviews.ops = "run";
       }
+      // The Stocks tab always opens the screener, not the last stock page.
+      if (viewTarget.classList.contains("viewTab") && viewTarget.dataset.view === "stocks") state.stockTicker = null;
       switchView(viewTarget.dataset.view);
       return;
     }
@@ -3046,9 +3142,41 @@
     }
   });
 
+  // The app bar's search opens a stock's page from any view.
+  const stockSearch = document.getElementById("stockSearch");
+  const stockOptions = document.getElementById("stockOptions");
+  const stockSearchForm = document.getElementById("stockSearchForm");
+  if (stockSearch && stockOptions && stockSearchForm) {
+    (data.issuers || []).forEach((item) => {
+      const option = document.createElement("option");
+      option.value = `${item.ticker} · ${item.issuer_name || ""}`;
+      stockOptions.append(option);
+    });
+    const openSearched = () => {
+      const text = stockSearch.value.trim();
+      if (!text) return;
+      const query = text.split("·")[0].trim().toUpperCase();
+      const issuers = data.issuers || [];
+      const match =
+        issuers.find((item) => item.ticker.toUpperCase() === query) ||
+        issuers.find((item) => (item.issuer_name || "").toUpperCase().includes(text.toUpperCase()));
+      stockSearch.value = "";
+      stockSearch.blur();
+      openStock(match ? match.ticker : query);
+    };
+    stockSearchForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      openSearched();
+    });
+    // Picking a suggestion fills in "TICKER · Name": open it straight away.
+    stockSearch.addEventListener("change", () => {
+      if (stockSearch.value.includes("·")) openSearched();
+    });
+  }
+
   startPolling();
   loadViewPrefs();
-  switchView(state.activeView || "home");
+  switchView(state.activeView || "overview");
   render();
   renderRunState();
   checkActiveRun();

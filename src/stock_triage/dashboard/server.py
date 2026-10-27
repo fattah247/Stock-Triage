@@ -52,6 +52,7 @@ from .runs import (
     summarize_run,
 )
 from .market import load_market_view
+from .stocks import load_overview, load_portfolio_view, load_stock_view, load_stocks_view
 from .snapshot import load_company_detail, load_section_detail, load_snapshot_lite
 
 
@@ -427,6 +428,23 @@ def _handler_factory():
                 return
             if parsed.path == "/api/market":
                 self._write_json(HTTPStatus.OK, load_market_view(self.server.cfg), emit_body=emit_body)
+                return
+            if parsed.path == "/api/overview":
+                self._write_json(HTTPStatus.OK, load_overview(self.server.cfg, _load_watchlist(self.server.cfg)), emit_body=emit_body)
+                return
+            if parsed.path == "/api/stocks":
+                self._write_json(HTTPStatus.OK, load_stocks_view(self.server.cfg, _load_watchlist(self.server.cfg)), emit_body=emit_body)
+                return
+            if parsed.path == "/api/stock":
+                ticker = parse_qs(parsed.query).get("ticker", [""])[0].strip().upper()
+                detail = load_stock_view(self.server.cfg, ticker, _load_watchlist(self.server.cfg)) if ticker else None
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "unknown_ticker", "ticker": ticker}, emit_body=emit_body)
+                    return
+                self._write_json(HTTPStatus.OK, detail, emit_body=emit_body)
+                return
+            if parsed.path == "/api/portfolio":
+                self._write_json(HTTPStatus.OK, load_portfolio_view(self.server.cfg, _load_watchlist(self.server.cfg)), emit_body=emit_body)
                 return
             if parsed.path == "/api/rerun-preview":
                 params = parse_qs(parsed.query)

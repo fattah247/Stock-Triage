@@ -8,6 +8,17 @@
 </head>
 <body>
   <main class="page">
+    <header class="appBar">
+      <div class="appBrand">
+        <strong>Stock Triage</strong>
+        <span class="appMeta">IDX stocks, market and filings</span>
+      </div>
+      <form class="appSearch" id="stockSearchForm" role="search">
+        <input id="stockSearch" type="search" list="stockOptions" placeholder="Find a stock: ticker or name" aria-label="Find a stock by ticker or name" autocomplete="off">
+        <datalist id="stockOptions"></datalist>
+      </form>
+    </header>
+
     <section class="statusStrip panel">
       <div class="statusHeader">
         <div>
@@ -30,11 +41,15 @@
 
     <nav class="viewNav" id="viewNav" aria-label="Workspace views">
       <div class="viewTabs" role="tablist">
-        <button class="viewTab active" data-view="home" type="button" role="tab" aria-selected="true">Home</button>
+        <button class="viewTab active" data-view="overview" type="button" role="tab" aria-selected="true">Overview</button>
         <button class="viewTab" data-view="market" type="button" role="tab" aria-selected="false">Market</button>
-        <button class="viewTab" data-view="company" type="button" role="tab" aria-selected="false">Company</button>
-        <button class="viewTab" data-view="review" type="button" role="tab" aria-selected="false">Review</button>
-        <button class="viewTab" data-view="ops" type="button" role="tab" aria-selected="false">Ops</button>
+        <button class="viewTab" data-view="stocks" type="button" role="tab" aria-selected="false">Stocks</button>
+        <button class="viewTab" data-view="portfolio" type="button" role="tab" aria-selected="false">Portfolio</button>
+        <span class="viewTabDivider" aria-hidden="true"></span>
+        <button class="viewTab viewTabMinor" data-view="home" type="button" role="tab" aria-selected="false">Filings</button>
+        <button class="viewTab viewTabMinor" data-view="company" type="button" role="tab" aria-selected="false">Company</button>
+        <button class="viewTab viewTabMinor" data-view="review" type="button" role="tab" aria-selected="false">Review</button>
+        <button class="viewTab viewTabMinor" data-view="ops" type="button" role="tab" aria-selected="false">Ops</button>
       </div>
       <button id="runPill" class="runPill" type="button" data-view="ops" hidden></button>
     </nav>
@@ -124,8 +139,20 @@
 
         </section>
 
+        <section class="screenStack" data-views="overview">
+          <div id="overviewView" aria-live="polite"></div>
+        </section>
+
         <section class="screenStack" data-views="market">
           <div id="marketView" aria-live="polite"></div>
+        </section>
+
+        <section class="screenStack" data-views="stocks">
+          <div id="stocksView" aria-live="polite"></div>
+        </section>
+
+        <section class="screenStack" data-views="portfolio">
+          <div id="portfolioView" aria-live="polite"></div>
         </section>
 
         <section class="screenStack" data-views="review">
@@ -371,6 +398,7 @@
 
   <script id="dashboardBootstrap" type="application/json">__BOOTSTRAP_JSON__</script>
   <script src="__STATIC_ROOT__/market.js"></script>
+  <script src="__STATIC_ROOT__/decide.js"></script>
   <script src="__STATIC_ROOT__/app.js"></script>
 </body>
 </html>
