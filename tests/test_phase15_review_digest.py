@@ -100,7 +100,7 @@ def test_phase15_digest_review_and_kpis(tmp_config):
 def test_phase15_migration_applies(tmp_config):
     with WriterQueue(tmp_config) as wq:
         applied = wq.submit(run_migrations)
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
 
 
 def test_group_review_rows_collapse_persistence_into_issue_family():

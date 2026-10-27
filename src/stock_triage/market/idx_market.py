@@ -92,6 +92,38 @@ def parse_stock_summary(payload: dict[str, Any]) -> dict[str, float]:
     return series
 
 
+# GetStockSummary's fields, in stock_daily's column order.
+STOCK_FIELDS = (
+    ("previous", "Previous"),
+    ("open", "OpenPrice"),
+    ("high", "High"),
+    ("low", "Low"),
+    ("close", "Close"),
+    ("volume", "Volume"),
+    ("value", "Value"),
+    ("frequency", "Frequency"),
+    ("listed_shares", "ListedShares"),
+    ("tradable_shares", "TradebleShares"),
+    ("foreign_buy", "ForeignBuy"),
+    ("foreign_sell", "ForeignSell"),
+)
+
+
+def parse_stock_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """One ``stock_daily`` row per stock: prices, turnover, share counts and foreign volumes."""
+    rows = []
+    for row in rows_of(payload):
+        ticker = str(row.get("StockCode") or "").strip().upper()
+        if not ticker:
+            continue
+        parsed: dict[str, Any] = {"ticker": ticker}
+        for column, field in STOCK_FIELDS:
+            value = row.get(field)
+            parsed[column] = float(value) if isinstance(value, (int, float)) else None
+        rows.append(parsed)
+    return rows
+
+
 class BrowserIDXFetcher:
     """Fetches from inside one opened IDX page, at most ``rate_per_second`` calls."""
 

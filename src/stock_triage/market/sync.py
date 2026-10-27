@@ -1,5 +1,9 @@
 """``market-sync``: daily IDX summaries and Bank Indonesia's JISDOR into ``market_series_daily``.
 
+Each trading day's stock summary is also kept per stock (``stock_daily``), and
+IDX's monthly financial-ratio and dividend tables for every company
+(``idx_ratios``, ``idx_dividends``) are fetched through the same page.
+
 The first sync also fetches the history before IDX's summaries begin in 2020:
 the composite's daily closes from 2009 out of IDX's statistics reports
 (``idx_history``), and JISDOR from its first fixing in 2013.
@@ -23,24 +27,42 @@ from .idx_market import (
     IDXMarketFetcher,
     open_idx_fetcher,
     parse_index_summary,
+    parse_stock_rows,
     parse_stock_summary,
     rows_of,
 )
 from .idx_market import SOURCE_NAME as IDX_SOURCE
+from .idx_market import STOCK_FIELDS
 from .jisdor import SERIES_ID as JISDOR_SERIES
 from .jisdor import SOURCE_NAME as JISDOR_SOURCE
 from .exchange_notices import SOURCE_NAME as NOTICES_SOURCE
 from .exchange_notices import fetch_exchange_notices, persist_notices, write_notice_series
 from .idx_history import SOURCE_NAME as HISTORY_SOURCE
 from .idx_history import fetch_history, store_history
+from .idx_dividends import FIRST_MONTH as DIVIDENDS_FIRST_MONTH
+from .idx_dividends import SOURCE_NAME as DIVIDENDS_SOURCE
+from .idx_dividends import fetch_dividends, store_dividends
+from .idx_ratios import FIRST_MONTH as RATIOS_FIRST_MONTH
+from .idx_ratios import SOURCE_NAME as RATIOS_SOURCE
+from .idx_ratios import fetch_ratios, months_due, store_ratios
+from .idx_profiles import SOURCE_NAME as PROFILES_SOURCE
+from .idx_profiles import fetch_profile_dividends, store_profile_dividends, tickers_due
 from .jisdor import FIRST_DAY as JISDOR_FIRST_DAY
 from .jisdor import fetch_jisdor_export, parse_jisdor_export
 
-# Without a backfill, a sync looks back this far for missing days.
+# Without a backfill, a sync looks back this far for missing days, or to the
+# day after the last one synced when that is earlier.
 DEFAULT_LOOKBACK_DAYS = 10
+# IDX's summaries for a day are final after the close; earlier in the day the
+# current day is left for a later sync.
+JAKARTA = timezone(timedelta(hours=7))
+DAY_FINAL_HOUR = 18
 # History fills the years before IDX's summaries start (2020-01-02); from then
 # on, the sync's own range covers both sources.
 HISTORY_END_YEAR = 2019
+# The per-stock rows of a day's stock summary, in their own ledger so a day
+# synced before they were kept is fetched again for them alone.
+STOCKS_SOURCE = "idx_stocks"
 # This many failed days in a row means the source is down or the browser is gone,
 # not that a few days are bad: stop and leave the rest for the next run.
 MAX_CONSECUTIVE_FAILURES = 3
@@ -57,6 +79,10 @@ class MarketSyncResult:
     idx_days_left: int = 0
     jisdor_rates: int = 0
     notices_new: int = 0
+    stock_days: int = 0
+    ratio_months: int = 0
+    dividend_months: int = 0
+    profiles: int = 0
     history_days: int = 0
     history_first: date | None = None
     history_last: date | None = None
@@ -70,6 +96,7 @@ def run_market_sync(
     end: date | None = None,
     refresh: bool = False,
     history: bool = True,
+    monthly: bool = True,
     idx_fetcher_factory: Callable[[], AbstractContextManager[IDXMarketFetcher]] | None = None,
     jisdor_client: httpx.Client | None = None,
 ) -> MarketSyncResult:
@@ -77,35 +104,74 @@ def run_market_sync(
 
     With ``history``, also fetch the pre-2020 history still missing: IDX's
     statistics reports once (again with ``refresh``), and each JISDOR year
-    from 2013 that holds no rate yet.
+    from 2013 that holds no rate yet. With ``monthly``, fetch IDX's monthly
+    ratio and dividend tables for each month not stored yet, and the latest
+    ones once a day.
     """
     cfg.ensure_dirs()
     end = end or datetime.now(timezone.utc).date()
-    start = start or end - timedelta(days=DEFAULT_LOOKBACK_DAYS)
-    result = MarketSyncResult(start=start, end=end)
+    explicit_start = start is not None
 
     with WriterQueue(cfg) as wq:
         wq.submit(run_migrations)
         reader = connect(cfg.paths.db_path, read_only=True)
         try:
             configure_pragmas(reader, cfg)
-            done = set() if refresh else _synced_days(reader, IDX_SOURCE)
+            ledger = _ledger(reader, IDX_SOURCE)
+            stocks_ledger = _synced_days(reader, STOCKS_SOURCE)
+            if not explicit_start:
+                start = end - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+                synced = sorted(day for day, status in ledger.items() if day <= end)
+                if synced and synced[-1] + timedelta(days=1) < start:
+                    start = synced[-1] + timedelta(days=1)  # resume after a break
+                ok_days = [day for day, status in ledger.items() if status == "ok"]
+                if ok_days and not stocks_ledger:
+                    start = min(start, min(ok_days))  # keep each stock's rows for every day already synced
+            index_days = {} if refresh else ledger
+            stock_days = set() if refresh else stocks_ledger
             # Notices are fetched once a day, even when every trading day is already synced.
             notices_due = refresh or end not in _synced_days(reader, NOTICES_SOURCE)
             history_due = history and (refresh or not _synced_days(reader, HISTORY_SOURCE))
             jisdor_history = _missing_jisdor_years(reader) if history else []
+            # IDX's monthly tables: (ledger source, months due, fetch, store, result counter).
+            tables = [
+                (source, months_due({} if refresh else _fetched_on(reader, source), today=end, first=first), fetch, store, counter)
+                for source, first, fetch, store, counter in (
+                    (RATIOS_SOURCE, RATIOS_FIRST_MONTH, fetch_ratios, store_ratios, "ratio_months"),
+                    (DIVIDENDS_SOURCE, DIVIDENDS_FIRST_MONTH, fetch_dividends, store_dividends, "dividend_months"),
+                )
+            ] if monthly else []
+            profiles_due = tickers_due(reader, today=end) if monthly else []
         finally:
             reader.close()
 
-        pending = [day for day in _weekdays(start, end) if day not in done]
-        result.idx_days_skipped = len(list(_weekdays(start, end))) - len(pending)
-        if pending or notices_due or history_due:
+        result = MarketSyncResult(start=start, end=end)
+        jakarta_now = datetime.now(JAKARTA)
+        weekdays = [
+            day
+            for day in _weekdays(start, end)
+            if not (day == jakarta_now.date() and jakarta_now.hour < DAY_FINAL_HOUR)
+        ]
+        # A trading day synced before per-stock rows were kept needs its stock summary alone.
+        pending = [
+            day
+            for day in weekdays
+            if day not in index_days or (index_days[day] == "ok" and day not in stock_days)
+        ]
+        result.idx_days_skipped = len(weekdays) - len(pending)
+        if pending or notices_due or history_due or profiles_due or any(months for _, months, *_ in tables):
             factory = idx_fetcher_factory or (lambda: open_idx_fetcher(cfg))
             with factory() as fetcher:
                 failures = 0
                 for position, day in enumerate(pending):
                     try:
-                        series, row_count = _fetch_idx_day(fetcher, day)
+                        if day in index_days:
+                            series, row_count = None, 0
+                            stocks = parse_stock_rows(fetcher.fetch(STOCK_SUMMARY_PATH, day))
+                            if not stocks:
+                                raise RuntimeError("IDX returned an empty stock summary for a trading day")
+                        else:
+                            series, row_count, stocks = _fetch_idx_day(fetcher, day)
                     except Exception as exc:  # noqa: BLE001 - one bad day must not lose the others
                         result.errors.append(f"{IDX_SOURCE} {day.isoformat()}: {exc}")
                         failures += 1
@@ -114,15 +180,19 @@ def run_market_sync(
                             break
                         continue
                     failures = 0
-                    wq.submit(
-                        lambda conn, d=day, s=series, n=row_count: _persist_day(
-                            conn, source_name=IDX_SOURCE, trade_date=d, series=s, row_count=n
+                    if series is not None:
+                        wq.submit(
+                            lambda conn, d=day, s=series, n=row_count: _persist_day(
+                                conn, source_name=IDX_SOURCE, trade_date=d, series=s, row_count=n
+                            )
                         )
-                    )
-                    if series:
-                        result.idx_days_fetched += 1
-                    else:
-                        result.idx_days_no_data += 1
+                        if series:
+                            result.idx_days_fetched += 1
+                        else:
+                            result.idx_days_no_data += 1
+                    if series is None or series:
+                        wq.submit(lambda conn, d=day, r=stocks: _persist_stocks(conn, trade_date=d, rows=r))
+                        result.stock_days += bool(stocks)
                 if notices_due and not result.idx_days_left:
                     # Suspensions and UMA notices (phase 2b), through the same page.
                     try:
@@ -141,6 +211,36 @@ def run_market_sync(
                     else:
                         result.history_days = stored.stored
                         result.history_first, result.history_last = stored.first, stored.last
+                for source, months, fetch, store, counter in tables:
+                    if result.idx_days_left:
+                        break
+                    failures = 0
+                    for month in months:
+                        try:
+                            rows = fetch(fetcher, month)
+                        except Exception as exc:  # noqa: BLE001
+                            result.errors.append(f"{source} {month:%Y-%m}: {exc}")
+                            failures += 1
+                            if failures >= MAX_CONSECUTIVE_FAILURES:
+                                break
+                            continue
+                        failures = 0
+                        wq.submit(lambda conn, m=month, r=rows, f=store: f(conn, month=m, rows=r))
+                        setattr(result, counter, getattr(result, counter) + bool(rows))
+                # Each company's latest dividend, from its profile (fills the monthly table's gaps).
+                failures = 0
+                for ticker in profiles_due if not result.idx_days_left else []:
+                    try:
+                        rows = fetch_profile_dividends(fetcher, ticker)
+                    except Exception as exc:  # noqa: BLE001
+                        result.errors.append(f"{PROFILES_SOURCE} {ticker}: {exc}")
+                        failures += 1
+                        if failures >= MAX_CONSECUTIVE_FAILURES:
+                            break
+                        continue
+                    failures = 0
+                    wq.submit(lambda conn, t=ticker, r=rows: store_profile_dividends(conn, ticker=t, rows=r))
+                    result.profiles += 1
         wq.submit(write_notice_series)
 
         ranges = list(_year_ranges(start, end))
@@ -161,13 +261,38 @@ def run_market_sync(
     return result
 
 
-def _fetch_idx_day(fetcher: IDXMarketFetcher, day: date) -> tuple[dict[str, float], int]:
+def _fetch_idx_day(fetcher: IDXMarketFetcher, day: date) -> tuple[dict[str, float], int, list[dict]]:
     index_payload = fetcher.fetch(INDEX_SUMMARY_PATH, day)
     if not rows_of(index_payload):
-        return {}, 0  # a holiday or weekend: IDX returns no rows
+        return {}, 0, []  # a holiday or weekend: IDX returns no rows
     stock_payload = fetcher.fetch(STOCK_SUMMARY_PATH, day)
+    stocks = parse_stock_rows(stock_payload)
+    if not stocks:
+        # The index traded, so an empty stock summary is a fault to retry, not a holiday.
+        raise RuntimeError("IDX returned an empty stock summary for a trading day")
     series = {**parse_index_summary(index_payload), **parse_stock_summary(stock_payload)}
-    return series, len(rows_of(index_payload)) + len(rows_of(stock_payload))
+    return series, len(rows_of(index_payload)) + len(rows_of(stock_payload)), stocks
+
+
+def _persist_stocks(conn: sqlite3.Connection, *, trade_date: date, rows: list[dict]) -> None:
+    columns = ("ticker", "trade_date") + tuple(column for column, _ in STOCK_FIELDS)
+    updates = ", ".join(f"{column} = excluded.{column}" for column in columns[2:])
+    conn.executemany(
+        f"""
+        INSERT INTO stock_daily ({", ".join(columns)}) VALUES ({", ".join("?" for _ in columns)})
+        ON CONFLICT(ticker, trade_date) DO UPDATE SET {updates}
+        """,
+        [(row["ticker"], trade_date.isoformat()) + tuple(row[column] for column, _ in STOCK_FIELDS) for row in rows],
+    )
+    conn.execute(
+        """
+        INSERT INTO market_sync_days (source_name, trade_date, status, row_count, fetched_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source_name, trade_date) DO UPDATE SET
+            status = excluded.status, row_count = excluded.row_count, fetched_at = excluded.fetched_at
+        """,
+        (STOCKS_SOURCE, trade_date.isoformat(), "ok" if rows else "no_data", len(rows), datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def _persist_day(
@@ -221,6 +346,22 @@ def _persist_rates(conn: sqlite3.Connection, *, rates: dict[date, float]) -> Non
         """,
         [(JISDOR_SERIES, day.isoformat(), rate, JISDOR_SOURCE, now) for day, rate in sorted(rates.items())],
     )
+
+
+def _ledger(conn: sqlite3.Connection, source_name: str) -> dict[date, str]:
+    """Each day's status (``ok`` or ``no_data``) for ``source_name``."""
+    return {
+        date.fromisoformat(row["trade_date"]): row["status"]
+        for row in conn.execute("SELECT trade_date, status FROM market_sync_days WHERE source_name = ?", (source_name,))
+    }
+
+
+def _fetched_on(conn: sqlite3.Connection, source_name: str) -> dict[date, date]:
+    """The day each ledger entry for ``source_name`` was last fetched."""
+    return {
+        date.fromisoformat(row["trade_date"]): date.fromisoformat(row["fetched_at"][:10])
+        for row in conn.execute("SELECT trade_date, fetched_at FROM market_sync_days WHERE source_name = ?", (source_name,))
+    }
 
 
 def _synced_days(conn: sqlite3.Connection, source_name: str) -> set[date]:

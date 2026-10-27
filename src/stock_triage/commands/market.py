@@ -104,7 +104,8 @@ def cmd_market_sync(args: argparse.Namespace) -> int:
         f"from={result.start.isoformat()} to={result.end.isoformat()} "
         f"idx_days={result.idx_days_fetched} no_data_days={result.idx_days_no_data} "
         f"already_synced={result.idx_days_skipped} jisdor_rates={result.jisdor_rates} "
-        f"notices_new={result.notices_new} errors={len(result.errors)}"
+        f"notices_new={result.notices_new} stock_days={result.stock_days} ratio_months={result.ratio_months} "
+        f"dividend_months={result.dividend_months} errors={len(result.errors)}"
     )
     if result.history_days:
         print(

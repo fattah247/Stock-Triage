@@ -139,6 +139,7 @@ def test_market_sync_fetches_weekdays_records_holidays_and_resumes(tmp_config, m
         start=date(2026, 10, 10),
         end=date(2026, 10, 18),
         history=False,
+        monthly=False,
         idx_fetcher_factory=factory,
         jisdor_client=_jisdor_client(posted),
     )
@@ -174,7 +175,7 @@ def test_market_sync_fetches_weekdays_records_holidays_and_resumes(tmp_config, m
     # A second run only retries the failed day.
     fake.failing, fake.calls = set(), []
     again = run_market_sync(
-        tmp_config, start=date(2026, 10, 10), end=date(2026, 10, 18), history=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
+        tmp_config, start=date(2026, 10, 10), end=date(2026, 10, 18), history=False, monthly=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
     )
     assert again.idx_days_skipped == 4
     assert {day for _, day in fake.calls if day} == {date(2026, 10, 15)}
@@ -191,7 +192,7 @@ def test_market_sync_stops_when_every_day_fails_and_resumes_later(tmp_config, mo
         yield fake
 
     result = run_market_sync(
-        tmp_config, start=days[0], end=days[-1], history=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
+        tmp_config, start=days[0], end=days[-1], history=False, monthly=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
     )
 
     assert result.idx_days_fetched == 1
@@ -203,7 +204,7 @@ def test_market_sync_stops_when_every_day_fails_and_resumes_later(tmp_config, mo
 
     fake.failing, fake.calls = set(), []
     again = run_market_sync(
-        tmp_config, start=days[0], end=days[-1], history=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
+        tmp_config, start=days[0], end=days[-1], history=False, monthly=False, idx_fetcher_factory=factory, jisdor_client=_jisdor_client([])
     )
     assert (again.idx_days_skipped, again.idx_days_left, again.errors) == (1, 0, [])
 
