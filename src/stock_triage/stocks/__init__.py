@@ -6,5 +6,6 @@ Ratio table (``company_ratios``). It describes; it does not recommend.
 """
 
 from .metrics import Universe, build_universe, stock_detail
+from .portfolio import HoldingsFileError, load_holdings, portfolio_view
 
-__all__ = ["Universe", "build_universe", "stock_detail"]
+__all__ = ["HoldingsFileError", "Universe", "build_universe", "load_holdings", "portfolio_view", "stock_detail"]

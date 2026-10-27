@@ -152,6 +152,8 @@ class MarketConfig(BaseModel):
 
     catalysts_path: Path = REPO_ROOT / "data" / "catalysts.yaml"
     index_membership_path: Path = REPO_ROOT / "data" / "index_membership.yaml"
+    # Your holdings, for the Portfolio view (config/portfolio.example.yaml).
+    portfolio_path: Path = REPO_ROOT / "data" / "portfolio.yaml"
     # Days ahead of a risk date that its reminder fires.
     catalyst_lead_days: int = 3
     # Watchlist companies at or above this exposure score raise an alert.
@@ -227,7 +229,9 @@ class MarketConfig(BaseModel):
     # A theme is active with at least this many tagged items over three days.
     theme_active_min_items: int = 3
 
-    @field_validator("catalysts_path", "index_membership_path", "watch_sources_path", "risk_themes_path", mode="before")
+    @field_validator(
+        "catalysts_path", "index_membership_path", "portfolio_path", "watch_sources_path", "risk_themes_path", mode="before"
+    )
     @classmethod
     def _to_path(cls, v: Any) -> Path:
         p = Path(v)
@@ -270,6 +274,8 @@ class Config(BaseModel):
             self.market.catalysts_path = data_dir / "catalysts.yaml"
         if "index_membership_path" not in self.market.model_fields_set:
             self.market.index_membership_path = data_dir / "index_membership.yaml"
+        if "portfolio_path" not in self.market.model_fields_set:
+            self.market.portfolio_path = data_dir / "portfolio.yaml"
         return self
 
     def ensure_dirs(self) -> None:

@@ -1,0 +1,15 @@
+# Your holdings, for the dashboard's Portfolio view. Copy this file to
+# <paths.data_dir>/portfolio.yaml (or set market.portfolio_path) and edit it.
+# It stays on this machine. One lot is 100 shares; prices are in rupiah.
+# Profit and loss is against avg_price and leaves out dividends and fees.
+
+cash: 25000000
+
+holdings:
+  - ticker: BBCA
+    lots: 20
+    avg_price: 8750
+  - ticker: ANTM
+    lots: 50
+    avg_price: 1520
+    note: gold exposure
