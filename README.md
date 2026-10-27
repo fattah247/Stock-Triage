@@ -147,7 +147,14 @@ python -m stock_triage intelligence-kpis
 # Render the local dashboard plus CSV exports
 python -m stock_triage dashboard-export
 
-# Serve the local operator dashboard so you can click actions instead of typing each command
+# Serve the local dashboard. It opens on Overview (market, your portfolio,
+# watchlist, movers, sectors), then Market, Stocks (a screener over every IDX
+# stock and a page per stock: price against IHSG, valuation against peers and
+# its own past, profit and growth, scores and warnings) and Portfolio. The
+# filing views (Filings, Company, Review, Ops) follow. The numbers come from
+# market-sync, which also stores each stock's daily summary and IDX's monthly
+# ratio table; see docs/stock_decisions.md. For the Portfolio view, copy
+# config/portfolio.example.yaml to data/portfolio.yaml and enter your holdings.
 python -m stock_triage dashboard-serve --open-browser
 
 # Market risk, phase 1 (docs/market_risk_plan.md): risk calendar, exposure ranking,
@@ -164,6 +171,9 @@ python -m stock_triage exposure-run
 # itself: IHSG daily closes from 2009 out of IDX's own statistics reports, and
 # JISDOR from its first fixing in May 2013. Those days carry only the close and
 # the rupiah, so breadth, foreign-flow and sector signals read no_data on them.
+# Each sync also keeps every stock's daily row (prices, shares, foreign trades)
+# and IDX's monthly financial-ratio (since 2021) and dividend (since 2019)
+# tables, for the Stocks and Portfolio views.
 python -m stock_triage market-sync --backfill-from 2020-01-02
 python -m stock_triage market-sync
 python -m stock_triage market-signals
