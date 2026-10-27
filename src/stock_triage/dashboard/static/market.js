@@ -361,9 +361,13 @@
       label.textContent = options.yFormat(tick);
       svg.append(label);
     });
+    let lastLabelY = null;
     (options.refLines || []).forEach((ref) => {
       svg.append(svgEl("line", { x1: margin.left, x2: margin.left + inner.w, y1: y(ref.value), y2: y(ref.value), class: "mkRef" }));
-      // At the right edge, clear of where most series start.
+      // At the right edge, clear of where most series start; over a long range the
+      // lines sit close together, so a label too near the last one is left out.
+      if (lastLabelY !== null && Math.abs(y(ref.value) - lastLabelY) < 13) return;
+      lastLabelY = y(ref.value);
       const label = svgEl("text", { x: margin.left + inner.w - 4, y: y(ref.value) - 4, class: "mkRefText", "text-anchor": "end" });
       label.textContent = ref.label;
       svg.append(label);
